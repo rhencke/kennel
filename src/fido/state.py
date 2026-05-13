@@ -7,7 +7,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fido.appstate import FidoState
+    from fido.atomic import AtomicUpdater
 
 
 class JsonFileStore(ABC):
@@ -62,12 +66,11 @@ class JsonFileStore(ABC):
         snapshot).
 
         Fires post-release rather than under the flock so the callback
-        is free to acquire other locks (e.g. read a sibling JsonFileStore
-        whose data composes into the same snapshot) without risking
-        lock-order inversion.  Concurrent publishers must serialize via
-        their own mechanism (e.g. a per-repo publish lock); see
-        :func:`fido.worker.publish_repo_snapshot` for the canonical
-        pattern (#1696 codex P1).
+        is free to acquire other locks without risking lock-order
+        inversion.  Per-source leaf publish (#1696): each subclass
+        publishes only its own slice into :class:`~fido.appstate.RepoState`,
+        so concurrent publishers update independent fields and need no
+        shared serialization.
         """
 
     @contextmanager
@@ -120,54 +123,52 @@ class State(JsonFileStore):
     shared reads via :meth:`load` are not blocked by concurrent
     ``modify`` calls.
 
-    *registry* and *repo_name* (when supplied) wire :meth:`on_mutate` to
-    publish a fresh :class:`~fido.appstate.IssueSnapshot` after every
-    successful write — same SCADA hook pattern as
-    :class:`~fido.tasks.Tasks`.  Tests that don't care about the
-    snapshot leave them at the defaults; the hook becomes a no-op in
-    that case.
+    *state_updater* and *repo_name* (when supplied) wire :meth:`on_mutate`
+    to publish a fresh :class:`~fido.appstate.IssueSnapshot` to the
+    repo's leaf field on :class:`~fido.appstate.RepoState` after every
+    successful write.  Independent leaf — state mutations never touch
+    the task-list leaf or worker/provider leaves, so no shared lock and
+    no cross-source reads (#1696).
     """
 
     def __init__(
         self,
         fido_dir: Path,
         *,
-        registry: object | None = None,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
         repo_name: str = "",
-        work_dir: Path | None = None,
     ) -> None:
         self._fido_dir = fido_dir
-        self._registry = registry
+        self._state_updater = state_updater
         self._repo_name = repo_name
-        # publish_repo_snapshot wants the work_dir (where tasks.json
-        # lives); fido_dir is the .git/fido under it.  When omitted we
-        # derive it from fido_dir's parent's parent.
-        self._work_dir = work_dir if work_dir is not None else fido_dir.parent.parent
 
     def on_mutate(self, data: object) -> None:
-        """Publish a fresh :class:`~fido.appstate.IssueSnapshot` to
-        :class:`~fido.appstate.FidoState` after each state.json mutation.
+        """Publish the new :class:`~fido.appstate.IssueSnapshot` leaf to
+        :class:`~fido.appstate.FidoState` after each state.json write.
 
-        Fires *after* the state.lock flock is released so the callback
-        can safely read tasks.json (sibling JsonFileStore on a
-        different flock) without lock-order inversion against
-        :meth:`Tasks.on_mutate` (#1696 codex P1).
-        ``publish_repo_snapshot`` re-reads state.json fresh rather than
-        trusting the captured *data* — if a sibling mutator wrote
-        between our flock release and our publish, we want the latest
-        disk view.  Per-repo publish lock serializes concurrent
-        publishers."""
-        del data  # see docstring — re-read happens inside publish_repo_snapshot
-        if self._registry is None or not self._repo_name:
+        Fires *after* :meth:`modify`/:meth:`save`/:meth:`clear` release
+        the state.lock flock so the lens-write CAS retry doesn't run
+        while we hold any flock.  Pure leaf publish — no cross-source
+        reads, sibling mutators (Tasks for task_list leaf, registry
+        for activity/thread/provider leaves) update independent fields
+        on RepoState.
+
+        No-op when *state_updater* or *repo_name* were not supplied at
+        construction (tests, one-off CLI use)."""
+        if self._state_updater is None or not self._repo_name:
             return
-        # Lazy import: state is a leaf module imported broadly.
-        from fido.worker import publish_repo_snapshot
+        from fido.appstate import IssueSnapshot
 
-        publish_repo_snapshot(
-            self._work_dir,
-            self._repo_name,
-            self._registry,  # pyright: ignore[reportArgumentType]
+        assert isinstance(data, dict), "state.json must hold an object"
+        snapshot = IssueSnapshot(
+            issue=data.get("issue"),
+            issue_title=data.get("issue_title"),
+            issue_started_at=data.get("issue_started_at"),
+            pr_number=data.get("pr_number"),
+            pr_title=data.get("pr_title"),
         )
+        _name = self._repo_name
+        self._state_updater.update(lambda root: root.repos[_name].issue, snapshot)
 
     @property
     def _data_path(self) -> Path:

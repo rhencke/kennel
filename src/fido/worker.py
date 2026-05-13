@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 import requests as _requests
 
 from fido import hooks, tasks
-from fido.appstate import FidoState, IssueSnapshot
+from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
@@ -246,10 +246,6 @@ class ActivityReporter(Protocol):
 
     def publish_provider_snapshot(self, repo_name: str) -> None: ...
 
-    def publish_issue_snapshot(
-        self, repo_name: str, snapshot: IssueSnapshot
-    ) -> None: ...
-
     def tasks_for(self, repo_name: str) -> Tasks: ...
 
     def state_for(self, repo_name: str) -> State: ...
@@ -293,125 +289,6 @@ class WorkerContext:
 def _sub_dir() -> Path:
     """Return the path to the sub/ skill-instructions directory."""
     return default_sub_dir()
-
-
-_publish_locks: dict[str, threading.Lock] = {}
-_publish_locks_lock = threading.Lock()
-
-
-def _publish_lock_for(repo_name: str) -> threading.Lock:
-    """Return the per-repo publish-serialization lock.
-
-    Concurrent ``Tasks.on_mutate`` / ``State.on_mutate`` callbacks
-    serialize on this lock so the snapshot install order matches the
-    last-acquired-lock order — no stale overwrite race (#1696 codex P2)
-    and no flock-order inversion (#1696 codex P1).  This is a separate
-    lock from the data-file flocks; it is held only across the
-    snapshot build + publish, never around any blocking I/O the
-    callback didn't already do.
-    """
-    with _publish_locks_lock:
-        existing = _publish_locks.get(repo_name)
-        if existing is None:
-            existing = threading.Lock()
-            _publish_locks[repo_name] = existing
-        return existing
-
-
-def publish_repo_snapshot(
-    work_dir: Path,
-    repo_name: str,
-    registry: ActivityReporter | None,
-) -> None:
-    """Refresh *repo_name*'s :class:`IssueSnapshot` in :class:`FidoState`.
-
-    Called from three places — all of them automatic, no manual triggers
-    in worker / event code:
-
-    - :meth:`fido.tasks.Tasks.on_mutate` (post-flock-release) after a
-      tasks.json write
-    - :meth:`fido.state.State.on_mutate` (post-flock-release) after a
-      state.json write
-    - :meth:`fido.registry.WorkerRegistry.start` to seed the snapshot
-      from existing on-disk state when a repo first comes up
-
-    Always re-reads BOTH state.json and tasks.json fresh — never trusts
-    a hint captured by the caller, because between the caller's flock
-    release and our publish a sibling mutator may have written newer
-    data; we want the LATEST disk state in the snapshot we install
-    (#1696 codex P1: lock-inversion fix; codex P2 round 1: stale-
-    overwrite fix).  The per-repo publish lock serializes concurrent
-    publishers so the last-acquired publish wins deterministically.
-
-    Skips publication entirely when a read raises so a transient I/O
-    or parse error never clobbers a previously-valid snapshot for the
-    status renderer.  Bails out cleanly when ``registry`` is ``None``
-    or ``repo_name`` is empty (unit-test scaffolding).
-    """
-    from fido.appstate import IssueSnapshot
-
-    if registry is None or not repo_name:
-        return
-    fido_dir = work_dir / ".git" / "fido"
-    with _publish_lock_for(repo_name):
-        try:
-            state_data = State(fido_dir).load()
-        except Exception:  # noqa: BLE001  # don't clobber prior snapshot on transient failure
-            log.warning(
-                "publish_repo_snapshot: failed to load state for %s — keeping prior snapshot",
-                repo_name,
-            )
-            return
-        try:
-            task_list = Tasks(work_dir).list()
-        except Exception:  # noqa: BLE001
-            log.warning(
-                "publish_repo_snapshot: failed to load tasks for %s — keeping prior snapshot",
-                repo_name,
-            )
-            return
-
-        pending = sum(1 for t in task_list if t.get("status") == "pending")
-        completed = sum(1 for t in task_list if t.get("status") == "completed")
-
-        current_task: str | None = None
-        for t in task_list:
-            if t.get("status") == "in_progress":
-                current_task = t.get("title")
-                break
-        if current_task is None:
-            for t in task_list:
-                if t.get("status") == "pending":
-                    current_task = t.get("title")
-                    break
-
-        non_completed = [t for t in task_list if t.get("status") != "completed"]
-        task_number: int | None = None
-        task_total: int | None = None
-        if non_completed:
-            task_total = len(non_completed)
-            for idx, t in enumerate(non_completed, start=1):
-                if t.get("status") == "in_progress":
-                    task_number = idx
-                    break
-            if task_number is None:
-                task_number = 1
-
-        registry.publish_issue_snapshot(
-            repo_name,
-            IssueSnapshot(
-                issue=state_data.get("issue"),
-                issue_title=state_data.get("issue_title"),
-                issue_started_at=state_data.get("issue_started_at"),
-                pr_number=state_data.get("pr_number"),
-                pr_title=state_data.get("pr_title"),
-                pending_task_count=pending,
-                completed_task_count=completed,
-                current_task=current_task,
-                task_number=task_number,
-                task_total=task_total,
-            ),
-        )
 
 
 def acquire_lock(fido_dir: Path) -> IO[str]:
@@ -4443,37 +4320,20 @@ class Worker:
             ctx = self.create_context()
         except LockHeld:
             log.warning("another fido is running — exiting")
-            # The other process owns the master lock but state.json /
-            # tasks.json reads are independent of it; refresh so status
-            # readers don't go stale during contention (#1696 codex P2).
-            self._publish_issue_snapshot()
             return 2
 
         with ctx:
             log.info("worker started for %s (git_dir=%s)", self.work_dir, ctx.git_dir)
-            # Cold-start + long-iteration coverage: refresh the snapshot
-            # before the iteration starts so status renders immediately,
-            # not blank until the first finally fires (#1696 codex P1).
-            self._publish_issue_snapshot()
-
+            # No explicit publish_repo_snapshot calls: every Tasks /
+            # State write fires its own on_mutate which publishes the
+            # corresponding leaf on RepoState (#1696).  The initial
+            # seed ran in registry.start when the Repo was created;
+            # subsequent mutations during the iteration auto-publish.
             self.assert_git_identity(phase="pre")
             try:
                 return self._run_iteration(ctx)
             finally:
                 self.assert_git_identity(phase="post")
-                # Catches mutations made during the iteration (sweep,
-                # task completion, PR transitions, etc.).
-                self._publish_issue_snapshot()
-
-    def _publish_issue_snapshot(self) -> None:
-        """Refresh this repo's :class:`IssueSnapshot` in :class:`FidoState`.
-
-        Used at iteration start (cold-start cover) and on the
-        ``LockHeld`` early-return path.  Steady-state mutations during
-        the iteration auto-publish via the Tasks/State ``on_mutate``
-        hooks, so this serves as a defensive backstop for state changes
-        that don't go through those hooks (yet)."""
-        publish_repo_snapshot(self.work_dir, self._repo_name, self._registry)
 
     def _run_iteration(self, ctx: WorkerContext) -> int:
         """Body of :meth:`run` — guaranteed to run between the pre- and

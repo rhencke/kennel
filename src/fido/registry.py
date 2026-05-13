@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 from fido.appstate import (
     FidoState,
-    IssueSnapshot,
     ProviderSnapshot,
     RepoState,
     ThreadSnapshot,
@@ -263,18 +262,23 @@ class WorkerRegistry:
         # rather than as a confusing flock-on-a-file error later.
         git_dir = _resolve_git_dir(repo_cfg.work_dir)  # pyright: ignore[reportPrivateUsage]
         fido_dir = git_dir / "fido"
-        self._repos[repo_cfg.name] = Repo(
+        repo = Repo(
             name=repo_cfg.name,
             work_dir=repo_cfg.work_dir,
             git_dir=git_dir,
-            tasks=Tasks(repo_cfg.work_dir, registry=self, repo_name=repo_cfg.name),
+            tasks=Tasks(
+                repo_cfg.work_dir,
+                state_updater=self._state_updater,
+                repo_name=repo_cfg.name,
+                fido_dir=fido_dir,
+            ),
             state=State(
                 fido_dir,
-                registry=self,
+                state_updater=self._state_updater,
                 repo_name=repo_cfg.name,
-                work_dir=repo_cfg.work_dir,
             ),
         )
+        self._repos[repo_cfg.name] = repo
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
@@ -291,14 +295,12 @@ class WorkerRegistry:
             webhook_activities=(),
         )
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
-        # Seed the initial IssueSnapshot from existing on-disk state.json
-        # + tasks.json now that the FidoState entry exists.  Without this
-        # the first publish wouldn't fire until the worker iteration's
-        # finally — which can be slow on resume if session init stalls
-        # (#1696 codex P2 round 4).
-        from fido.worker import publish_repo_snapshot
-
-        publish_repo_snapshot(repo_cfg.work_dir, repo_cfg.name, self)
+        # Seed the initial IssueSnapshot + TaskListSnapshot leaves
+        # from existing on-disk state.json / tasks.json now that the
+        # FidoState entry exists.  Calling on_mutate with the loaded
+        # data shares the publish path — no separate seed code (#1696).
+        repo.state.on_mutate(repo.state.load())
+        repo.tasks.on_mutate(repo.tasks.list())
         thread.start()
         self._publish_thread_snapshot(repo_cfg.name)
         self._publish_provider_snapshot(repo_cfg.name)
@@ -439,20 +441,6 @@ class WorkerRegistry:
         and after each :class:`~fido.worker.Worker` turn.
         """
         self._publish_provider_snapshot(repo_name)
-
-    def publish_issue_snapshot(self, repo_name: str, snapshot: IssueSnapshot) -> None:
-        """Publish a fresh :class:`IssueSnapshot` for *repo_name* to :class:`FidoState`.
-
-        Workers call this at iteration boundaries so the SCADA display path
-        (``./fido status`` and ``/status.json``) can read issue/PR/task
-        state from the in-memory snapshot instead of reading state.json
-        and tasks.json from disk on every request (#1690).
-
-        The repo must have been :meth:`start`-ed first (the ``repos[name]``
-        key is prepopulated by :meth:`start`).
-        """
-        _name = repo_name
-        self._state_updater.update(lambda root: root.repos[_name].issue, snapshot)
 
     def _publish_webhook_activities(self, repo_name: str) -> None:
         """Publish the webhook-activity tuple for *repo_name* to :class:`FidoState`.

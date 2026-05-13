@@ -39,7 +39,7 @@ from fido.events import (
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
-from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_status
+from fido.server import FidoHTTPServer, PreflightError, WebhookHandler
 from fido.store import FidoStore
 from fido.tasks import Tasks
 from fido.types import TaskStatus, TaskType
@@ -205,7 +205,6 @@ def _restore_handler_fns() -> object:
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
         "infra": WebhookHandler.infra,
         "static_files": WebhookHandler.static_files,
-        "fido_started_at": WebhookHandler.fido_started_at,
         "_restart_fsm_state": WebhookHandler._restart_fsm_state,
     }
     # Reset the ingress oracle so each test starts with a clean delivery-ID
@@ -224,12 +223,6 @@ def _restore_handler_fns() -> object:
         _bg_threads.clear()
     for attr, val in saved.items():
         setattr(WebhookHandler, attr, val)
-
-
-@pytest.fixture(autouse=True)
-def _stub_provider_statuses() -> object:
-    with patch("fido.server.provider_statuses_for_repo_configs", return_value={}):
-        yield
 
 
 @pytest.fixture()
@@ -312,37 +305,71 @@ class TestSignatureVerification:
 
 
 class TestGetEndpoint:
+    """``/status.json`` is now a pure :class:`FidoState` dump.
+
+    The compatibility layer (``_collect_status_payload``,
+    ``_collect_activities``, ``_collect_fido_state``, ``_repo_status``,
+    ``_serialize_*``, the XML renderer) was removed in #1696.  These
+    tests exercise the new shape — a JSON serialization of the
+    snapshot dataclass tree via :func:`fido.server._jsonable`.
+    """
+
     def test_health_check(self, server: tuple) -> None:
         url, _ = server
         resp = urllib.request.urlopen(url)
         assert resp.status == 200
         assert b"fido is running" in resp.read()
 
-    def test_status_endpoint_returns_activities(self, server: tuple) -> None:
+    def test_status_endpoint_returns_json(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.state_reader.get.return_value = _fido_state()
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        assert resp.status == 200
+        assert resp.headers.get("Content-Type") == "application/json"
+        data = json.loads(resp.read())
+        assert data == {
+            "repos": {},
+            "github_limits": {
+                "rest": {
+                    "name": "rest",
+                    "used": None,
+                    "limit": None,
+                    "resets_at": None,
+                    "unit": None,
+                },
+                "graphql": {
+                    "name": "graphql",
+                    "used": None,
+                    "limit": None,
+                    "resets_at": None,
+                    "unit": None,
+                },
+            },
+            "process_started_at": None,
+        }
+
+    def test_status_endpoint_dumps_repo_state(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state("owner/repo")
         )
-        WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
-        assert resp.status == 200
         data = json.loads(resp.read())
-        assert len(data["activities"]) == 1
-        entry = data["activities"][0]
-        assert entry["repo_name"] == "owner/repo"
-        assert entry["what"] == "Working on: #1"
-        assert entry["busy"] is True
-        assert entry["crash_count"] == 0
-        assert entry["last_crash_error"] is None
-        assert entry["is_stuck"] is False
-        assert isinstance(entry["worker_uptime_seconds"], float)
-        assert entry["webhook_activities"] == []
-        assert entry["session_owner"] is None
-        assert entry["session_dropped_count"] == 0
-        assert entry["session_sent_count"] == 0
-        assert entry["session_received_count"] == 0
 
-    def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
+        assert "owner/repo" in data["repos"]
+        repo = data["repos"]["owner/repo"]
+        assert repo["key"] == "owner/repo"
+        assert repo["activity"]["repo_name"] == "owner/repo"
+        assert repo["activity"]["what"] == "Working on: #1"
+        assert repo["activity"]["busy"] is True
+        assert repo["crash_record"]["death_count"] == 0
+        assert repo["webhook_activities"] == []
+        assert repo["thread"] is None
+        assert repo["provider"] is None
+        assert repo["issue"] is None
+        assert repo["task_list"] is None
+
+    def test_status_endpoint_dumps_provider_snapshot(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.state_reader.get.return_value = _fido_state(
             _repo_state(
@@ -350,117 +377,48 @@ class TestGetEndpoint:
                 provider=ProviderSnapshot(
                     session_owner="worker-home",
                     session_alive=True,
-                    session_pid=None,
+                    session_pid=4321,
                     session_dropped_count=3,
                     session_sent_count=10,
                     session_received_count=8,
                 ),
             )
         )
-        WebhookHandler.registry.is_rescoping.return_value = False
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data["activities"][0]["session_owner"] == "worker-home"
-        assert data["activities"][0]["session_dropped_count"] == 3
-        assert data["activities"][0]["session_sent_count"] == 10
-        assert data["activities"][0]["session_received_count"] == 8
-
-    def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state(
-                "owner/repo",
-                what="idle",
-                busy=False,
-                provider=ProviderSnapshot(
-                    session_owner=None,
-                    session_alive=True,
-                    session_pid=None,
-                    session_dropped_count=0,
-                    session_sent_count=0,
-                    session_received_count=0,
-                ),
-            )
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["activities"][0]["session_alive"] is True
-        assert data["activities"][0]["session_owner"] is None
-
-    def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state(
-                "owner/repo",
-                what="Napping",
-                busy=False,
-                crash_count=3,
-                last_error="RuntimeError: boom",
-            )
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["activities"][0]["crash_count"] == 3
-        assert data["activities"][0]["last_crash_error"] == "RuntimeError: boom"
-
-    def test_status_endpoint_empty_when_no_activities(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        assert resp.status == 200
-        assert json.loads(resp.read()) == {
-            "activities": [],
-            "rate_limit": None,
-            "fido_uptime_seconds": None,
+        provider = data["repos"]["owner/repo"]["provider"]
+        assert provider == {
+            "session_owner": "worker-home",
+            "session_alive": True,
+            "session_pid": 4321,
+            "session_dropped_count": 3,
+            "session_sent_count": 10,
+            "session_received_count": 8,
         }
 
-    def test_status_endpoint_content_type_json(self, server: tuple) -> None:
+    def test_status_endpoint_dumps_issue_snapshot(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        assert resp.headers.get("Content-Type") == "application/json"
-
-    def test_status_endpoint_skips_zero_sentinel_repos(self, server: tuple) -> None:
-        """Repos whose activity is still the zero sentinel (what='') are excluded."""
-        url, _ = server
-        # A repo in the snapshot with what="" — prepopulated but never active.
+        snapshot = IssueSnapshot(
+            issue=42,
+            issue_title="Fix the thing",
+            issue_started_at="2026-04-01T00:00:00+00:00",
+            pr_number=99,
+            pr_title="Fixes the thing",
+        )
         WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="")
+            _repo_state("owner/repo", issue=snapshot)
         )
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data["activities"] == []
+        assert data["repos"]["owner/repo"]["issue"] == {
+            "issue": 42,
+            "issue_title": "Fix the thing",
+            "issue_started_at": "2026-04-01T00:00:00+00:00",
+            "pr_number": 99,
+            "pr_title": "Fixes the thing",
+        }
 
-    def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", stale=True)
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["activities"][0]["is_stuck"] is True
-
-    def test_status_endpoint_includes_rescoping_flag(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = True
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["activities"][0]["rescoping"] is True
-
-    def test_status_endpoint_includes_rate_limit_when_snapshot_present(
-        self, server: tuple
-    ) -> None:
-        """A :class:`GitHubLimit` in ``FidoState`` serializes into ``/status.json``
-        under the top-level ``rate_limit`` key (lock-free read via registry
-        snapshot, closes #812 follow-up)."""
-        from datetime import timezone
-
+    def test_status_endpoint_dumps_github_limits(self, server: tuple) -> None:
         url, _ = server
         limits = GitHubLimit(
             rest=ProviderLimitWindow(
@@ -476,632 +434,48 @@ class TestGetEndpoint:
                 resets_at=datetime(2024, 11, 14, 13, 0, tzinfo=timezone.utc),
             ),
         )
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="idle", busy=False),
-            github_limits=limits,
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        rl = data["rate_limit"]
-        assert rl is not None
-        assert rl["rest"]["used"] == 5
-        assert rl["rest"]["limit"] == 5000
-        assert rl["graphql"]["used"] == 12
-
-    def test_status_endpoint_omits_rate_limit_when_snapshot_absent(
-        self, server: tuple
-    ) -> None:
-        """Zero-value ``GitHubLimit`` (not yet polled) → ``rate_limit``
-        key is ``None`` in the ``/status.json`` response."""
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="idle", busy=False)
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["rate_limit"] is None
-
-    def test_status_endpoint_rate_limit_graphql_zero_when_only_rest_polled(
-        self, server: tuple
-    ) -> None:
-        """When ``GitHubLimit`` has rest populated but graphql is zero-value
-        (used=None), the serialized graphql window carries None fields."""
-        from datetime import timezone
-
-        url, _ = server
-        limits = GitHubLimit(
-            rest=ProviderLimitWindow(
-                name="rest",
-                used=5,
-                limit=5000,
-                resets_at=datetime(2024, 11, 14, 12, 0, tzinfo=timezone.utc),
-            ),
-            # graphql uses zero-value default: used=None, limit=None
-        )
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="idle", busy=False),
-            github_limits=limits,
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        rl = data["rate_limit"]
-        assert rl is not None
-        assert rl["rest"]["used"] == 5
-        # graphql window is zero-value: used and limit are None
-        assert rl["graphql"]["name"] == "graphql"
-        assert rl["graphql"]["used"] is None
-
-    def test_status_endpoint_serializes_loaded_issue_cache(self, server: tuple) -> None:
-        """Wire a real loaded :class:`IssueTreeCache` through the registry
-        and verify the /status.json payload includes the cache snapshot
-        (closes #812 status half).
-        """
-        from fido.issue_cache import IssueTreeCache
-
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-
-        cache = IssueTreeCache("owner/repo")
-        cache.load_inventory(
-            [
-                {
-                    "number": 7,
-                    "title": "demo",
-                    "createdAt": "2026-04-01T00:00:00Z",
-                    "assignees": {"nodes": []},
-                    "subIssues": {"nodes": []},
-                }
-            ],
-            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
-        )
-        WebhookHandler.registry.get_issue_cache.return_value = cache
-
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        cache_blob = data["activities"][0]["issue_cache"]
-        assert cache_blob is not None
-        assert cache_blob["loaded"] is True
-        assert cache_blob["open_issues"] == 1
-        assert cache_blob["events_applied"] == 0
-        assert cache_blob["last_event_at"] is None
-        assert cache_blob["last_reconcile_at"] is None
-        assert cache_blob["last_reconcile_drift"] == 0
-
-    def test_status_endpoint_omits_issue_cache_when_registry_returns_non_cache(
-        self, server: tuple
-    ) -> None:
-        """A MagicMock registry (default in these tests) returns a Mock
-        from ``get_issue_cache``; ``_serialize_issue_cache`` must reject
-        it as non-cache and emit ``None`` rather than raise.
-        """
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        # registry.get_issue_cache returns a MagicMock by default, not a
-        # real IssueTreeCache — must serialize to None.
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["activities"][0]["issue_cache"] is None
-
-    def test_status_endpoint_includes_provider_status(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        with patch(
-            "fido.server.provider_statuses_for_repo_configs",
-            return_value={
-                ProviderID.CLAUDE_CODE: MagicMock(
-                    provider=ProviderID.CLAUDE_CODE,
-                    window_name="five_hour",
-                    pressure=0.96,
-                    percent_used=96,
-                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=timezone.utc),
-                    unavailable_reason=None,
-                    level="paused",
-                    warning=False,
-                    paused=True,
-                )
-            },
-        ):
-            resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["activities"][0]["provider"] == ProviderID.CLAUDE_CODE
-        assert data["activities"][0]["provider_status"]["level"] == "paused"
-        assert data["activities"][0]["provider_status"]["percent_used"] == 96
-
-    def test_status_endpoint_rescoping_false_by_default(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="Napping", busy=False)
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        assert data["activities"][0]["rescoping"] is False
-
-    def test_status_endpoint_includes_fido_state_defaults_when_no_files(
-        self, server: tuple
-    ) -> None:
-        """With no state.json or tasks.json on disk, fido_state fields default."""
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        entry = data["activities"][0]
-        assert entry["fido_running"] is False
-        assert entry["issue"] is None
-        assert entry["issue_title"] is None
-        assert entry["issue_elapsed_seconds"] is None
-        assert entry["pr_number"] is None
-        assert entry["pr_title"] is None
-        assert entry["pending"] == 0
-        assert entry["completed"] == 0
-        assert entry["current_task"] is None
-        assert entry["task_number"] is None
-        assert entry["task_total"] is None
-
-    def test_status_endpoint_includes_fido_state_from_snapshot(
-        self, server: tuple, tmp_path: Path
-    ) -> None:
-        """The IssueSnapshot published by the worker is surfaced in the
-        activity entry — the request thread no longer reads state.json
-        or tasks.json from disk (#1690)."""
-        snapshot = IssueSnapshot(
-            issue=42,
-            issue_title="Fix the thing",
-            issue_started_at="2026-04-01T00:00:00+00:00",
-            pr_number=99,
-            pr_title="Fixes the thing",
-            pending_task_count=1,
-            completed_task_count=1,
-            current_task="active task",
-            task_number=1,
-            task_total=2,
-        )
-
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="Working on: #42", issue=snapshot)
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        entry = data["activities"][0]
-        assert entry["issue"] == 42
-        assert entry["issue_title"] == "Fix the thing"
-        assert entry["issue_elapsed_seconds"] is not None
-        assert entry["issue_elapsed_seconds"] >= 0
-        assert entry["pr_number"] == 99
-        assert entry["pr_title"] == "Fixes the thing"
-        assert entry["pending"] == 1
-        assert entry["completed"] == 1
-        assert entry["current_task"] == "active task"
-        assert entry["task_number"] == 1
-        assert entry["task_total"] == 2
-
-    def test_status_endpoint_fido_state_defaults_when_repo_cfg_missing(
-        self, server: tuple
-    ) -> None:
-        """When a repo has no config entry, fido_state fields are all defaults."""
-        url, _ = server
-        # Report an activity for a repo not in config
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("unknown/repo", what="idle", busy=False)
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        entry = data["activities"][0]
-        assert entry["fido_running"] is False
-        assert entry["issue"] is None
-        assert entry["pending"] == 0
-        assert entry["task_number"] is None
-
-
-class TestCollectFidoState:
-    """Unit tests for _collect_fido_state — the request-thread renderer.
-
-    Disk-resident issue/PR/task state is no longer read by the request
-    thread; the worker publishes an ``IssueSnapshot`` to ``FidoState``
-    once per iteration and this function renders that (#1690).  Logic
-    around what goes into the snapshot lives in :func:`make_issue_snapshot`
-    and is exercised by ``tests/test_appstate.py``.
-    """
-
-    def _now(self) -> object:
-        from datetime import datetime, timezone
-
-        return datetime(2026, 4, 19, 12, 0, 0, tzinfo=timezone.utc)
-
-    def test_defaults_when_snapshot_is_none(self) -> None:
-        """Cold start: worker has not yet published a snapshot."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        result = _collect_fido_state(self._now(), None, fido_running=False)
-        assert result["fido_running"] is False
-        assert result["issue"] is None
-        assert result["issue_title"] is None
-        assert result["issue_elapsed_seconds"] is None
-        assert result["pr_number"] is None
-        assert result["pr_title"] is None
-        assert result["pending"] == 0
-        assert result["completed"] == 0
-        assert result["current_task"] is None
-        assert result["task_number"] is None
-        assert result["task_total"] is None
-
-    def test_fido_running_passes_through(self) -> None:
-        """``fido_running`` is supplied by the caller from the published
-        ``ThreadSnapshot.is_alive`` — no flock probe, no derivation here."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        result = _collect_fido_state(self._now(), None, fido_running=True)
-        assert result["fido_running"] is True
-
-    def test_passes_through_snapshot_fields(self) -> None:
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        snapshot = IssueSnapshot(
-            issue=42,
-            issue_title="Add a thing",
-            issue_started_at="2026-04-19T11:30:00+00:00",
-            pr_number=99,
-            pr_title="Add a thing (closes #42)",
-            pending_task_count=3,
-            completed_task_count=5,
-            current_task="working on the thing",
-            task_number=2,
-            task_total=4,
-        )
-        result = _collect_fido_state(self._now(), snapshot, fido_running=True)
-        assert result["issue"] == 42
-        assert result["issue_title"] == "Add a thing"
-        assert result["pr_number"] == 99
-        assert result["pr_title"] == "Add a thing (closes #42)"
-        assert result["pending"] == 3
-        assert result["completed"] == 5
-        assert result["current_task"] == "working on the thing"
-        assert result["task_number"] == 2
-        assert result["task_total"] == 4
-        # 30 minutes elapsed between issue_started_at and _now().
-        assert result["issue_elapsed_seconds"] == 1800
-
-    def test_invalid_issue_started_at_in_snapshot(self) -> None:
-        """A bad ISO date in the snapshot must not break the request."""
-        from fido.server import (
-            _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        snapshot = IssueSnapshot(
-            issue=1,
-            issue_title=None,
-            issue_started_at="not-a-date",
-            pr_number=None,
-            pr_title=None,
-            pending_task_count=0,
-            completed_task_count=0,
-            current_task=None,
-            task_number=None,
-            task_total=None,
-        )
-        result = _collect_fido_state(self._now(), snapshot, fido_running=True)
-        assert result["issue"] == 1
-        assert result["issue_elapsed_seconds"] is None
-
-
-class TestRepoStatus:
-    @pytest.mark.parametrize(
-        ("act", "expected"),
-        [
-            (
-                {
-                    "provider_status": {"paused": True},
-                    "is_stuck": False,
-                    "crash_count": 0,
-                    "busy": True,
-                },
-                "paused",
-            ),
-            ({"is_stuck": True, "crash_count": 2, "busy": True}, "stuck"),
-            ({"is_stuck": False, "crash_count": 3, "busy": True}, "crashed"),
-            ({"is_stuck": False, "crash_count": 0, "busy": True}, "busy"),
-            ({"is_stuck": False, "crash_count": 0, "busy": False}, "waiting"),
-            (
-                {
-                    "is_stuck": False,
-                    "crash_count": 0,
-                    "busy": False,
-                    "what": "waiting: no issues found",
-                },
-                "waiting: no issues found",
-            ),
-            (
-                {
-                    "is_stuck": False,
-                    "crash_count": 0,
-                    "busy": False,
-                    "what": "scanning for work",
-                },
-                "scanning for work",
-            ),
-        ],
-        ids=[
-            "paused",
-            "stuck",
-            "crashed",
-            "busy",
-            "waiting",
-            "waiting-what",
-            "scanning",
-        ],
-    )
-    def test_repo_status_priority(self, act: dict, expected: str) -> None:
-        assert _repo_status(act) == expected
-
-
-class TestStatusXml:
-    def test_status_returns_namespaced_xml_with_xslt_pi(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert resp.headers.get("Content-Type") == "application/xml; charset=utf-8"
-        assert '<?xml version="1.0" encoding="UTF-8"?>' in body
-        assert '<?xml-stylesheet type="text/xsl" href="/static/status.xsl"?>' in body
-        assert "<fido" in body
-        assert 'xmlns="https://fidocancode.dog/fido"' in body
-
-    def test_status_xml_contains_repo_data_with_namespaces(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<repo_name>owner/repo</repo_name>" in body
-        assert "<what>Working on: #1</what>" in body
-        assert "<busy>true</busy>" in body
-        assert 'dog:status="busy"' in body
-
-    def test_status_xml_empty_fido(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert 'xmlns="https://fidocancode.dog/fido"' in body
-        # Empty fido — self-closing root element (with namespace attrs)
-        assert "/>" in body
-
-    def test_status_xml_includes_claude_talker(self, server: tuple) -> None:
-        from fido.provider import SessionTalker
-
-        url, _ = server
-        talker = SessionTalker(
-            repo_name="owner/repo",
-            thread_id=42,
-            kind="worker",
-            description="implementing task",
-            subprocess_pid=9999,
-            started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
-        )
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="working")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        with patch("fido.provider.get_talker", return_value=talker):
-            resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<kind>worker</kind>" in body
-        assert "<subprocess_pid>9999</subprocess_pid>" in body
-
-    def test_status_xml_includes_provider_status(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="working", busy=False)
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        with patch(
-            "fido.server.provider_statuses_for_repo_configs",
-            return_value={
-                ProviderID.CLAUDE_CODE: MagicMock(
-                    provider=ProviderID.CLAUDE_CODE,
-                    window_name="five_hour",
-                    pressure=0.96,
-                    percent_used=96,
-                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=timezone.utc),
-                    unavailable_reason=None,
-                    level="paused",
-                    warning=False,
-                    paused=True,
-                )
-            },
-        ):
-            resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<provider>claude-code</provider>" in body
-        assert "<provider_status>" in body
-        assert "<percent_used>96</percent_used>" in body
-
-    def test_status_xml_includes_webhooks(self, server: tuple) -> None:
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state(
-                "owner/repo",
-                what="working",
-                webhook_activities=(
-                    WebhookActivity(
-                        handle_id=1,
-                        description="replying to review",
-                        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                        thread_id=789,
-                    ),
-                ),
-            )
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<description>replying to review</description>" in body
-        assert "<thread_id>789</thread_id>" in body
-
-    def test_status_xml_includes_fido_uptime(self, server: tuple) -> None:
-        """<fido_uptime_seconds> appears in the root element when fido_started_at is set."""
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        WebhookHandler.fido_started_at = datetime(
-            2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
-        )
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<fido_uptime_seconds>" in body
-
-    def test_status_xml_no_fido_uptime_when_not_started(self, server: tuple) -> None:
-        """<fido_uptime_seconds> is absent when fido_started_at is None (default)."""
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        assert WebhookHandler.fido_started_at is None
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<fido_uptime_seconds>" not in body
-
-    def test_status_xml_includes_rate_limit(self, server: tuple) -> None:
-        """<rate_limit> with nested windows appears in the root element when
-        ``FidoState.github_limits`` has been populated."""
-        url, _ = server
-        limits = GitHubLimit(
-            rest=ProviderLimitWindow(
-                name="rest",
-                used=100,
-                limit=5000,
-                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
-            ),
-            graphql=ProviderLimitWindow(
-                name="graphql",
-                used=5,
-                limit=5000,
-                resets_at=datetime(2026, 4, 19, 13, 0, tzinfo=timezone.utc),
-            ),
-        )
         WebhookHandler.state_reader.get.return_value = _fido_state(github_limits=limits)
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<rate_limit>" in body
-        assert "<rest>" in body
-        assert "<used>100</used>" in body
-        assert "<graphql>" in body
-        assert "<used>5</used>" in body
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        assert data["github_limits"]["rest"]["used"] == 5
+        assert data["github_limits"]["rest"]["limit"] == 5000
+        assert data["github_limits"]["rest"]["resets_at"] == "2024-11-14T12:00:00+00:00"
+        assert data["github_limits"]["graphql"]["used"] == 12
 
-    def test_status_json_includes_fido_uptime(self, server: tuple) -> None:
-        """fido_uptime_seconds appears in /status.json when fido_started_at is set."""
+    def test_status_endpoint_dumps_process_started_at(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        WebhookHandler.fido_started_at = datetime(
-            2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
+        started_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        WebhookHandler.state_reader.get.return_value = FidoState(
+            repos=frozendict(),
+            github_limits=GitHubLimit(),
+            process_started_at=started_at,
         )
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data["fido_uptime_seconds"] is not None
-        assert data["fido_uptime_seconds"] >= 0
+        assert data["process_started_at"] == "2026-01-01T12:00:00+00:00"
 
-    def test_status_json_fido_uptime_null_when_not_started(self, server: tuple) -> None:
-        """fido_uptime_seconds is null in /status.json when fido_started_at is None."""
+    def test_status_endpoint_dumps_webhook_activity(self, server: tuple) -> None:
         url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state()
-        assert WebhookHandler.fido_started_at is None
+        wa = WebhookActivity(
+            handle_id=1,
+            description="issue_comment.created",
+            started_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+            thread_id=12345,
+        )
+        WebhookHandler.state_reader.get.return_value = _fido_state(
+            _repo_state("owner/repo", webhook_activities=(wa,))
+        )
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data["fido_uptime_seconds"] is None
-
-    def test_status_xml_task_number_from_in_progress(
-        self, server: tuple, tmp_path: Path
-    ) -> None:
-        """task_number and task_total in the /status XML reflect in_progress position.
-
-        When a task is in_progress (not just pending), its index within the
-        non-completed list is reported — so the counter can show "2/3" rather
-        than always "1/N".
-        """
-        # Snapshot computed from the same logical 4-task set the previous
-        # disk-reading version of this test wrote to tasks.json.
-        snapshot = IssueSnapshot(
-            issue=10,
-            issue_title=None,
-            issue_started_at=None,
-            pr_number=None,
-            pr_title=None,
-            pending_task_count=2,
-            completed_task_count=1,
-            current_task="active task",
-            task_number=2,
-            task_total=3,
-        )
-
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="Working on: #10", issue=snapshot)
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        # Non-completed: [pending, in_progress, pending] → total=3; in_progress is #2.
-        assert "<task_number>2</task_number>" in body
-        assert "<task_total>3</task_total>" in body
-
-    def test_status_xml_includes_issue_cache_as_nested_elements(
-        self, server: tuple
-    ) -> None:
-        """issue_cache dict is emitted as nested XML children, not as str(dict)."""
-        from fido.issue_cache import IssueTreeCache
-
-        url, _ = server
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="working")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-
-        cache = IssueTreeCache("owner/repo")
-        cache.load_inventory(
-            [
-                {
-                    "number": 3,
-                    "title": "demo",
-                    "createdAt": "2026-04-01T00:00:00Z",
-                    "assignees": {"nodes": []},
-                    "subIssues": {"nodes": []},
-                }
-            ],
-            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
-        )
-        WebhookHandler.registry.get_issue_cache.return_value = cache
-
-        resp = urllib.request.urlopen(f"{url}/status")
-        body = resp.read().decode()
-        assert "<issue_cache>" in body
-        assert "<open_issues>1</open_issues>" in body
-        assert "<loaded>true</loaded>" in body
+        webhooks = data["repos"]["owner/repo"]["webhook_activities"]
+        assert webhooks == [
+            {
+                "handle_id": 1,
+                "description": "issue_comment.created",
+                "started_at": "2026-04-01T00:00:00+00:00",
+                "thread_id": 12345,
+            }
+        ]
 
 
 class TestStaticFileServing:
@@ -1595,32 +969,6 @@ class TestProcessAction:
         for call in WebhookHandler.registry.report_activity.call_args_list:
             args = call.args
             assert "handling webhook action" not in args
-
-    def test_status_endpoint_includes_claude_talker(self, server: tuple) -> None:
-        """Active SessionTalker appears in /status as a structured object."""
-        from fido.provider import SessionTalker
-
-        url, _ = server
-        talker = SessionTalker(
-            repo_name="owner/repo",
-            thread_id=12321,
-            kind="worker",
-            description="persistent session turn",
-            subprocess_pid=12345,
-            started_at=datetime(2026, 4, 14, 16, 0, tzinfo=timezone.utc),
-        )
-        WebhookHandler.state_reader.get.return_value = _fido_state(
-            _repo_state("owner/repo", what="running")
-        )
-        WebhookHandler.registry.is_rescoping.return_value = False
-        with patch("fido.provider.get_talker", return_value=talker):
-            resp = urllib.request.urlopen(f"{url}/status.json")
-        data = json.loads(resp.read())
-        talker_data = data["activities"][0]["claude_talker"]
-        assert talker_data["repo_name"] == "owner/repo"
-        assert talker_data["thread_id"] == 12321
-        assert talker_data["kind"] == "worker"
-        assert talker_data["subprocess_pid"] == 12345
 
     def test_claude_leak_halts_process(
         self,

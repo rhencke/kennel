@@ -151,21 +151,17 @@ class ThreadSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class IssueSnapshot:
-    """Immutable snapshot of one repo's current issue/PR/task state.
+    """Immutable snapshot of one repo's current issue / PR fields.
 
-    Captures the disk-resident state.json + tasks.json values that the
-    SCADA display path renders for ``./fido status`` and ``/status.json``.
-    Published by :meth:`~fido.registry.WorkerRegistry._publish_issue_snapshot`
-    at worker iteration boundaries so the status path never has to read
-    state.json or tasks.json from disk on the request thread (#1690).
+    Captures the disk-resident state.json values (issue id/title/started,
+    pr id/title) that the SCADA display path renders for ``./fido status``
+    and ``/status.json``.  Published by :class:`~fido.state.State` at every
+    state.json write — independent leaf, no cross-source reads (#1696).
 
-    ``current_task`` is the title of the in-progress task, falling back to
-    the first pending task when nothing is in progress.  ``task_number``
-    and ``task_total`` count non-completed entries — same semantics as the
-    original ``_collect_fido_state``.
-
-    Frozen so instances can be stored inside the frozen :class:`RepoState`
-    without breaking the immutability guarantee of the atomic snapshot.
+    Task-list-derived fields (current_task, task_number, task_total,
+    pending/completed counts) live on :class:`TaskListSnapshot` instead
+    so each leaf updates only when its own source changes — Tasks
+    mutations don't trigger an issue-snapshot republish, and vice versa.
     """
 
     issue: int | None
@@ -173,6 +169,21 @@ class IssueSnapshot:
     issue_started_at: str | None
     pr_number: int | None
     pr_title: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskListSnapshot:
+    """Immutable snapshot of one repo's current task-list-derived fields.
+
+    Computed from tasks.json contents at every Tasks mutation;
+    independent leaf in :class:`RepoState`, sibling of
+    :class:`IssueSnapshot`.
+
+    ``current_task`` is the title of the in-progress task, falling back
+    to the first pending task when nothing is in progress.
+    ``task_number`` and ``task_total`` count non-completed entries.
+    """
+
     pending_task_count: int
     completed_task_count: int
     current_task: str | None
@@ -230,6 +241,7 @@ class RepoState:
     thread: "ThreadSnapshot | None" = None
     provider: "ProviderSnapshot | None" = None
     issue: IssueSnapshot | None = None
+    task_list: TaskListSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,3 +281,4 @@ class FidoState:
 
     repos: frozendict[str, RepoState]
     github_limits: GitHubLimit
+    process_started_at: datetime | None = None

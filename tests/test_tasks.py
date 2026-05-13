@@ -12,6 +12,7 @@ from fido.tasks import (
     Tasks,
     _apply_reorder,
     _assert_rescope_matches_oracle,
+    _build_task_list_snapshot,
     _compute_thread_changes,
     _find_duplicate_titles,
     _format_work_queue,
@@ -698,6 +699,65 @@ class TestUnblockTasks:
 
     def test_returns_zero_on_empty_file(self, tmp_path: Path) -> None:
         assert Tasks(tmp_path).unblock_tasks() == 0
+
+
+# ── _build_task_list_snapshot ─────────────────────────────────────────────────
+
+
+class TestBuildTaskListSnapshot:
+    """The :class:`TaskListSnapshot` projection published from
+    :meth:`Tasks.on_mutate` after every tasks.json write (#1696)."""
+
+    def test_counts_pending_and_completed(self) -> None:
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "pending", "title": "a"},
+                {"status": "pending", "title": "b"},
+                {"status": "completed", "title": "c"},
+                {"status": "in_progress", "title": "d"},
+            ]
+        )
+        assert snap.pending_task_count == 2
+        assert snap.completed_task_count == 1
+
+    def test_current_task_prefers_in_progress(self) -> None:
+        """When something is in_progress, ``current_task`` is its title and
+        ``task_number`` points at its 1-based position in non-completed."""
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "completed", "title": "done"},
+                {"status": "pending", "title": "next"},
+                {"status": "in_progress", "title": "active"},
+                {"status": "pending", "title": "later"},
+            ]
+        )
+        assert snap.current_task == "active"
+        # non-completed = [next, active, later]; active is index 2.
+        assert snap.task_number == 2
+        assert snap.task_total == 3
+
+    def test_current_task_falls_back_to_first_pending(self) -> None:
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "completed", "title": "done"},
+                {"status": "pending", "title": "do this"},
+                {"status": "pending", "title": "then that"},
+            ]
+        )
+        assert snap.current_task == "do this"
+        assert snap.task_number == 1
+        assert snap.task_total == 2
+
+    def test_all_completed_yields_none_counters(self) -> None:
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "completed", "title": "a"},
+                {"status": "completed", "title": "b"},
+            ]
+        )
+        assert snap.current_task is None
+        assert snap.task_number is None
+        assert snap.task_total is None
 
 
 # ── _parse_reorder_response ───────────────────────────────────────────────────

@@ -1177,189 +1177,6 @@ class TestWorker:
             worker.run()
         mock_create.assert_called_once_with()
 
-    def test_run_publishes_issue_snapshot_on_iteration_finally(
-        self, tmp_path: Path
-    ) -> None:
-        """SCADA: every worker iteration publishes a fresh IssueSnapshot
-        so the request thread reads in-memory data instead of state.json
-        and tasks.json on every /status.json (#1690)."""
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        (fido_dir / "state.json").write_text(
-            json.dumps(
-                {
-                    "issue": 7,
-                    "issue_title": "Fix it",
-                    "pr_number": 13,
-                    "pr_title": "Fix it (closes #7)",
-                }
-            )
-        )
-        (fido_dir / "tasks.json").write_text(
-            json.dumps(
-                [
-                    {
-                        "id": "1",
-                        "title": "active",
-                        "type": "spec",
-                        "status": "in_progress",
-                    },
-                    {
-                        "id": "2",
-                        "title": "next",
-                        "type": "spec",
-                        "status": "pending",
-                    },
-                ]
-            )
-        )
-        gh = self._make_gh()
-        registry = MagicMock(spec=ActivityReporter)
-        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
-        with (
-            patch.object(
-                worker,
-                "create_context",
-                return_value=self._make_mock_ctx(tmp_path),
-            ),
-            patch.object(
-                worker,
-                "discover_repo_context",
-                return_value=self._make_mock_repo_ctx(),
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "stop_session"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            worker.run()
-
-        # Publishes at iteration start (#1696 codex P1) AND in the
-        # finally block — same data both times for this idle path.
-        assert registry.publish_issue_snapshot.call_count == 2
-        repo_name, snapshot = registry.publish_issue_snapshot.call_args.args
-        assert repo_name == "owner/repo"
-        assert snapshot.issue == 7
-        assert snapshot.issue_title == "Fix it"
-        assert snapshot.pr_number == 13
-        assert snapshot.pr_title == "Fix it (closes #7)"
-        assert snapshot.current_task == "active"
-        assert snapshot.task_number == 1
-        assert snapshot.task_total == 2
-
-    def test_publish_issue_snapshot_no_op_without_registry(
-        self, tmp_path: Path
-    ) -> None:
-        """The publish helper bails out cleanly when the worker has no
-        registry — covers the construction-time defaults used in unit
-        tests that bypass the composition root."""
-        worker = Worker(tmp_path, MagicMock())  # no registry
-        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
-
-    def test_publish_issue_snapshot_no_op_without_repo_name(
-        self, tmp_path: Path
-    ) -> None:
-        """The publish helper bails out when repo_name is unset — covers
-        unit-test scaffolding where the worker is wired up partially."""
-        registry = MagicMock(spec=ActivityReporter)
-        worker = Worker(tmp_path, MagicMock(), repo_name="", registry=registry)
-        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
-        registry.publish_issue_snapshot.assert_not_called()
-
-    def test_publish_issue_snapshot_skips_on_state_load_error(
-        self, tmp_path: Path
-    ) -> None:
-        """Codex P2 (#1696): a transient state.json read failure must
-        skip publication so the prior valid snapshot is preserved for
-        status readers — overwriting with empty defaults would erase
-        live data on every transient I/O hiccup."""
-        registry = MagicMock(spec=ActivityReporter)
-        worker = Worker(
-            tmp_path, MagicMock(), repo_name="owner/repo", registry=registry
-        )
-        with patch("fido.worker.State") as mock_state:
-            mock_state.return_value.load.side_effect = RuntimeError("disk")
-            worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
-        registry.publish_issue_snapshot.assert_not_called()
-
-    def test_publish_issue_snapshot_skips_on_tasks_load_error(
-        self, tmp_path: Path
-    ) -> None:
-        """Codex P2 (#1696): same preservation guarantee for tasks.json.
-
-        publish_repo_snapshot constructs its own ``Tasks(work_dir)`` for
-        the disk read so we patch the class-level Tasks rather than the
-        worker's _tasks (which is on the construction-time DI path)."""
-        registry = MagicMock(spec=ActivityReporter)
-        worker = Worker(
-            tmp_path, MagicMock(), repo_name="owner/repo", registry=registry
-        )
-        with patch("fido.worker.Tasks") as mock_tasks_cls:
-            mock_tasks_cls.return_value.list.side_effect = RuntimeError("disk")
-            worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
-        registry.publish_issue_snapshot.assert_not_called()
-
-    def _publish_with_tasks(
-        self, tmp_path: Path, tasks_data: list[dict[str, str]]
-    ) -> object:
-        """Helper for snapshot-projection tests: write tasks_data, call
-        Worker._publish_issue_snapshot, return the published snapshot."""
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
-        (fido_dir / "tasks.json").write_text(json.dumps(tasks_data))
-        registry = MagicMock(spec=ActivityReporter)
-        worker = Worker(
-            tmp_path, MagicMock(), repo_name="owner/repo", registry=registry
-        )
-        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
-        return registry.publish_issue_snapshot.call_args.args[1]
-
-    def test_publish_issue_snapshot_counts_pending_and_completed(
-        self, tmp_path: Path
-    ) -> None:
-        snapshot = self._publish_with_tasks(
-            tmp_path,
-            [
-                {"id": "1", "title": "a", "type": "spec", "status": "pending"},
-                {"id": "2", "title": "b", "type": "spec", "status": "pending"},
-                {"id": "3", "title": "c", "type": "spec", "status": "completed"},
-                {"id": "4", "title": "d", "type": "spec", "status": "in_progress"},
-            ],
-        )
-        assert snapshot.pending_task_count == 2
-        assert snapshot.completed_task_count == 1
-
-    def test_publish_issue_snapshot_current_task_falls_back_to_first_pending(
-        self, tmp_path: Path
-    ) -> None:
-        snapshot = self._publish_with_tasks(
-            tmp_path,
-            [
-                {"id": "1", "title": "done", "type": "spec", "status": "completed"},
-                {"id": "2", "title": "do this", "type": "spec", "status": "pending"},
-                {"id": "3", "title": "then that", "type": "spec", "status": "pending"},
-            ],
-        )
-        assert snapshot.current_task == "do this"
-        assert snapshot.task_number == 1
-        assert snapshot.task_total == 2
-
-    def test_publish_issue_snapshot_task_number_and_total_none_when_all_completed(
-        self, tmp_path: Path
-    ) -> None:
-        snapshot = self._publish_with_tasks(
-            tmp_path,
-            [
-                {"id": "1", "title": "a", "type": "spec", "status": "completed"},
-                {"id": "2", "title": "b", "type": "spec", "status": "completed"},
-            ],
-        )
-        assert snapshot.current_task is None
-        assert snapshot.task_number is None
-        assert snapshot.task_total is None
-
     def test_first_iteration_sweep_runs_for_idle_repo_with_no_issue(
         self, tmp_path: Path
     ) -> None:
@@ -3620,7 +3437,6 @@ class TestSetupHooks:
         assert (fido_dir / "compact.sh").exists()
 
     def test_adds_hooks_to_settings(self, tmp_path: Path) -> None:
-        import json
 
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
@@ -3657,7 +3473,6 @@ class TestTeardownHooks:
         assert not (fido_dir / "compact.sh").exists()
 
     def test_removes_hooks_from_settings(self, tmp_path: Path) -> None:
-        import json
 
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
@@ -3695,7 +3510,6 @@ class TestLoadState:
         assert State(fido_dir).load() == {}
 
     def test_returns_state_when_present(self, tmp_path: Path) -> None:
-        import json
 
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
@@ -3703,7 +3517,6 @@ class TestLoadState:
         assert State(fido_dir).load() == {"issue": 42}
 
     def test_returns_dict_with_arbitrary_keys(self, tmp_path: Path) -> None:
-        import json
 
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
@@ -3762,7 +3575,6 @@ class TestState:
         assert state.load() == {}
 
     def test_load_returns_state_when_present(self, tmp_path: Path) -> None:
-        import json
 
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
@@ -8098,7 +7910,6 @@ class TestRunSeedTasksIntegration:
         assert result == 0
         find_or_create_pr_mock.assert_not_called()
         # State.json kept session_id (not touched) but dropped issue/pr fields.
-        import json
 
         state = json.loads((fido_dir / "state.json").read_text())
         assert "issue" not in state

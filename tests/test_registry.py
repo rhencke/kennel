@@ -13,7 +13,6 @@ from frozendict import frozendict
 from fido.appstate import (
     FidoState,
     GitHubLimit,
-    IssueSnapshot,
     ProviderSnapshot,
     ThreadSnapshot,
     WorkerCrash,
@@ -318,31 +317,13 @@ class TestWorkerRegistry:
         assert provider.session_sent_count == 5
         assert provider.session_received_count == 3
 
-    def test_publish_issue_snapshot_updates_fido_state(self, tmp_path: Path) -> None:
-        """publish_issue_snapshot() publishes a fresh IssueSnapshot into FidoState (#1690)."""
-        reg, factory, reader = self._make_registry()
-        reg.start(_repo("foo/bar", tmp_path))
-        snapshot = IssueSnapshot(
-            issue=42,
-            issue_title="Add a thing",
-            issue_started_at="2026-04-19T12:00:00+00:00",
-            pr_number=99,
-            pr_title="Add a thing (closes #42)",
-            pending_task_count=2,
-            completed_task_count=1,
-            current_task="working on the thing",
-            task_number=1,
-            task_total=3,
-        )
-        reg.publish_issue_snapshot("foo/bar", snapshot)
-        assert reader.get().repos["foo/bar"].issue == snapshot
-
     def test_repo_for_returns_publishing_repo_after_start(self, tmp_path: Path) -> None:
         """``repo_for`` returns the registry-owned :class:`Repo` whose
-        :class:`Tasks` mutations auto-publish IssueSnapshot updates
-        (#1696).  Mutating tasks via ``repo.tasks.add(...)`` fires the
-        on_mutate hook → registry.publish_issue_snapshot → snapshot
-        appears in FidoState."""
+        :class:`Tasks` mutations auto-publish a fresh
+        :class:`TaskListSnapshot` to the per-repo ``task_list`` leaf
+        (#1696).  Independent leaves: Tasks publishes ``task_list``;
+        :class:`State` publishes ``issue`` — neither reads the other's
+        source."""
         from fido.types import TaskType
 
         reg, factory, reader = self._make_registry()
@@ -355,7 +336,7 @@ class TestWorkerRegistry:
 
         repo.tasks.add(title="thing", task_type=TaskType.SPEC)
 
-        snap = reader.get().repos["foo/bar"].issue
+        snap = reader.get().repos["foo/bar"].task_list
         assert snap is not None
         assert snap.pending_task_count == 1
         assert snap.current_task == "thing"

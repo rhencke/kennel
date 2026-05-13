@@ -16,18 +16,12 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO, Any, cast
 from urllib.parse import urlparse
-from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
 import requests
 from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import (
-    FidoState,
-    GitHubLimit,
-    IssueSnapshot,
-    ProviderLimitWindow,
-)
+from fido.appstate import FidoState, GitHubLimit
 from fido.atomic import AtomicReader, create_atomic
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
@@ -63,12 +57,10 @@ from fido.registry import (
 from fido.rocq import self_restart as restart_fsm
 from fido.session_lock_watchdog import SessionLockWatchdog
 from fido.static_files import StaticFiles
-from fido.status import provider_statuses_for_repo_configs
 from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks
-from fido.watchdog import (  # noqa: PLC2701
-    _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
+from fido.watchdog import (
     ReconcileWatchdog,
     Watchdog,
 )
@@ -83,15 +75,6 @@ _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
 _RESTART_EXIT_CODE = 75
 _REQUEST_TIMEOUT_SECONDS = 10.0
-
-# XML namespace URIs for the /status endpoint structural XML.
-_NS_FIDO = "https://fidocancode.dog/fido"
-_NS_DOG = "https://fidocancode.dog/woof"
-
-# Register namespace prefixes for clean XML serialization.  Idempotent —
-# safe to call at module scope before any threads start.
-register_namespace("", _NS_FIDO)
-register_namespace("dog", _NS_DOG)
 
 
 class PreflightError(RuntimeError):
@@ -127,126 +110,25 @@ def _runner_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _serialize_talker(talker: provider.SessionTalker | None) -> dict[str, Any] | None:
-    """Convert a :class:`~fido.provider.SessionTalker` to a JSON-friendly dict.
+def _jsonable(value: object) -> object:
+    """``json.dumps`` default for snapshot dataclasses.
 
-    Returns ``None`` when nobody is talking to claude for the repo.
+    Walks frozen dataclasses, frozendict, and datetime — everything
+    that lives in :class:`FidoState` — into JSON-friendly primitives
+    so ``/status.json`` is a single, leaf-driven dump with zero
+    flattening / compatibility code (#1696).
     """
-    if talker is None:
-        return None
-    return {
-        "repo_name": talker.repo_name,
-        "thread_id": talker.thread_id,
-        "kind": talker.kind,
-        "description": talker.description,
-        "subprocess_pid": talker.subprocess_pid,
-        "started_at": talker.started_at.isoformat(),
-    }
-
-
-def _xml_text(value: object) -> str | None:
-    """Convert a Python value to XML element text.
-
-    Booleans become ``"true"`` / ``"false"``, ``None`` becomes ``None``
-    (empty element), everything else becomes its ``str()`` representation.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
-def _repo_status(act: dict[str, Any]) -> str:
-    """Derive a status string from activity flags.
-
-    Priority: paused > stuck > crashed > busy > what (falling back to
-    "waiting").  Used as the ``dog:status`` attribute on ``<repo>`` elements
-    so XSLT and CSS can style by state.  When the worker is not actively busy,
-    the live ``what`` field (e.g. "waiting: no issues found") is used so the
-    attribute carries the specific reason rather than a generic label.
-    """
-    provider_status = act.get("provider_status")
-    if isinstance(provider_status, dict) and provider_status.get("paused"):
-        return "paused"
-    if act.get("is_stuck"):
-        return "stuck"
-    if act.get("crash_count", 0) > 0:
-        return "crashed"
-    if act.get("busy"):
-        return "busy"
-    return act.get("what") or "waiting"
-
-
-def _activities_to_xml(payload: dict[str, Any]) -> bytes:
-    """Serialize the full status payload to namespaced structural XML with an XSLT PI.
-
-    Pure function — transforms data, no I/O.  The server emits this structural
-    XML in the ``https://fidocancode.dog/fido`` namespace.  The browser
-    fetches ``status.xsl`` (via the XSLT processing instruction), which
-    transforms it into display-oriented XML in a separate namespace, which
-    is then styled by ``status.css`` via a CSS processing instruction.
-
-    Three-layer pipeline: structural XML → XSLT → display XML → CSS.
-
-    The root ``<fido>`` element carries fido-level metadata (uptime, rate
-    limits) before the per-repo ``<repo>`` children so XSLT can render a
-    dashboard header without reaching into any individual repo card.
-    """
-    root = Element(f"{{{_NS_FIDO}}}fido")
-
-    # Fido-level metadata — emitted before per-repo elements.
-    fido_uptime = payload.get("fido_uptime_seconds")
-    if fido_uptime is not None:
-        el = SubElement(root, f"{{{_NS_FIDO}}}fido_uptime_seconds")
-        el.text = _xml_text(fido_uptime)
-
-    rate_limit = payload.get("rate_limit")
-    if rate_limit is not None:
-        rl_el = SubElement(root, f"{{{_NS_FIDO}}}rate_limit")
-        for rl_key, rl_val in rate_limit.items():
-            child_el = SubElement(rl_el, f"{{{_NS_FIDO}}}{rl_key}")
-            for k, v in rl_val.items():
-                sub_el = SubElement(child_el, f"{{{_NS_FIDO}}}{k}")
-                sub_el.text = _xml_text(v)
-
-    for act in payload.get("activities", []):
-        repo = SubElement(root, f"{{{_NS_FIDO}}}repo")
-        repo.set(f"{{{_NS_DOG}}}status", _repo_status(act))
-        for key, value in act.items():
-            if key == "webhook_activities":
-                wa_el = SubElement(repo, f"{{{_NS_FIDO}}}webhook_activities")
-                for wh in value:
-                    webhook_el = SubElement(wa_el, f"{{{_NS_FIDO}}}webhook")
-                    for wk, wv in wh.items():
-                        el = SubElement(webhook_el, f"{{{_NS_FIDO}}}{wk}")
-                        el.text = _xml_text(wv)
-            elif key == "claude_talker":
-                ct_el = SubElement(repo, f"{{{_NS_FIDO}}}claude_talker")
-                if value is not None:
-                    for ck, cv in value.items():
-                        el = SubElement(ct_el, f"{{{_NS_FIDO}}}{ck}")
-                        el.text = _xml_text(cv)
-            elif key == "provider_status":
-                ps_el = SubElement(repo, f"{{{_NS_FIDO}}}provider_status")
-                if value is not None:
-                    for pk, pv in value.items():
-                        el = SubElement(ps_el, f"{{{_NS_FIDO}}}{pk}")
-                        el.text = _xml_text(pv)
-            elif key == "issue_cache":
-                ic_el = SubElement(repo, f"{{{_NS_FIDO}}}issue_cache")
-                if value is not None:
-                    for ik, iv in value.items():
-                        el = SubElement(ic_el, f"{{{_NS_FIDO}}}{ik}")
-                        el.text = _xml_text(iv)
-            else:
-                el = SubElement(repo, f"{{{_NS_FIDO}}}{key}")
-                el.text = _xml_text(value)
-    xml_body = tostring(root, encoding="unicode")
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<?xml-stylesheet type="text/xsl" href="/static/status.xsl"?>\n' + xml_body
-    ).encode("utf-8")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            f.name: _jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)
+        }
+    if isinstance(value, frozendict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
 
 
 def _parse_repo_from_url(url: str) -> str | None:
@@ -263,133 +145,6 @@ def _parse_repo_from_url(url: str) -> str | None:
     path = path.lstrip("/").removesuffix(".git")
     parts = path.split("/")
     return path if len(parts) == 2 and all(parts) else None
-
-
-def _serialize_provider_status(
-    status: "provider.ProviderPressureStatus | None",
-) -> dict[str, Any] | None:
-    """Convert a ProviderPressureStatus to a JSON-friendly dict."""
-    if status is None:
-        return None
-    return {
-        "provider": status.provider,
-        "window_name": status.window_name,
-        "pressure": status.pressure,
-        "percent_used": status.percent_used,
-        "resets_at": status.resets_at.isoformat() if status.resets_at else None,
-        "unavailable_reason": status.unavailable_reason,
-        "level": status.level,
-        "warning": status.warning,
-        "paused": status.paused,
-    }
-
-
-def _serialize_rate_limit(limits: GitHubLimit) -> dict[str, Any] | None:
-    """Serialize :class:`~fido.rate_limit.GitHubLimit` for the ``/status.json``
-    payload.
-
-    Returns ``None`` when *limits* is the zero-value sentinel — both windows
-    have ``used=None``, meaning the monitor has not yet completed its first
-    successful poll.  The value is read lock-free from
-    :attr:`~fido.registry.FidoState.github_limits` on the registry's
-    atomically-swapped state.
-    """
-    if limits.rest.used is None and limits.graphql.used is None:
-        return None
-    return {
-        "rest": _serialize_rate_window(limits.rest),
-        "graphql": _serialize_rate_window(limits.graphql),
-    }
-
-
-def _serialize_rate_window(window: ProviderLimitWindow) -> dict[str, Any]:
-    return {
-        "name": window.name,
-        "used": window.used,
-        "limit": window.limit,
-        "resets_at": window.resets_at.isoformat() if window.resets_at else None,
-    }
-
-
-def _serialize_issue_cache(cache: object) -> dict[str, Any] | None:
-    """Serialize an :class:`~fido.issue_cache.IssueTreeCache` snapshot for
-    the /status.json payload (#812).  Returns ``None`` when the cache has
-    not been bootstrapped yet (or when *cache* isn't a real cache, which
-    happens in tests that hand the server a MagicMock registry) — fido
-    status hides the line in that case.
-    """
-    from fido.issue_cache import IssueTreeCache
-
-    if not isinstance(cache, IssueTreeCache):
-        return None
-    metrics = cache.metrics()
-    return {
-        "loaded": metrics.inventory_loaded_at is not None,
-        "open_issues": metrics.open_issue_count,
-        "events_applied": metrics.events_applied,
-        "events_dropped_stale": metrics.events_dropped_stale,
-        "last_event_at": metrics.last_event_at.isoformat()
-        if metrics.last_event_at
-        else None,
-        "last_reconcile_at": metrics.last_reconcile_at.isoformat()
-        if metrics.last_reconcile_at
-        else None,
-        "last_reconcile_drift": metrics.last_reconcile_drift,
-    }
-
-
-def _collect_fido_state(
-    now: datetime,
-    snapshot: "IssueSnapshot | None",
-    *,
-    fido_running: bool,
-) -> dict[str, Any]:
-    """Render the issue/PR/task fields for the status endpoint.
-
-    Pure in-memory: every value is read from the :class:`IssueSnapshot`
-    published by the worker plus the ``fido_running`` boolean the caller
-    pulls from ``repo_state.thread.is_alive`` (#1690).  No filesystem
-    syscalls on the request thread.
-
-    ``snapshot`` is ``None`` only on cold start before the worker has
-    finished its first iteration — defaults match the legacy behaviour.
-    """
-    if snapshot is None:
-        return {
-            "fido_running": fido_running,
-            "issue": None,
-            "issue_title": None,
-            "issue_elapsed_seconds": None,
-            "pr_number": None,
-            "pr_title": None,
-            "pending": 0,
-            "completed": 0,
-            "current_task": None,
-            "task_number": None,
-            "task_total": None,
-        }
-
-    issue_elapsed_seconds: int | None = None
-    if snapshot.issue_started_at:
-        try:
-            started = datetime.fromisoformat(snapshot.issue_started_at)
-            issue_elapsed_seconds = max(0, int((now - started).total_seconds()))
-        except TypeError, ValueError:
-            pass
-
-    return {
-        "fido_running": fido_running,
-        "issue": snapshot.issue,
-        "issue_title": snapshot.issue_title,
-        "issue_elapsed_seconds": issue_elapsed_seconds,
-        "pr_number": snapshot.pr_number,
-        "pr_title": snapshot.pr_title,
-        "pending": snapshot.pending_task_count,
-        "completed": snapshot.completed_task_count,
-        "current_task": snapshot.current_task,
-        "task_number": snapshot.task_number,
-        "task_total": snapshot.task_total,
-    }
 
 
 def _get_self_repo(runner_dir: Path, proc: ProcessRunner) -> str | None:
@@ -589,8 +344,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # registry.  Status serialisation reads from here; registry only writes.
     state_reader: AtomicReader[FidoState]
     provider_factory: DefaultProviderFactory | None = None
-    # Set by run() to record when the server came up, used for fido uptime.
-    fido_started_at: datetime | None = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
@@ -1306,139 +1059,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.infra.os_proc.exit(_RESTART_EXIT_CODE)
 
     def do_GET(self) -> None:
-        if self.path == "/status":
-            body = _activities_to_xml(self._collect_status_payload())
-            self._respond_body("application/xml; charset=utf-8", body)
-        elif self.path == "/status.json":
-            body = json.dumps(self._collect_status_payload()).encode()
+        if self.path == "/status.json":
+            body = json.dumps(self.state_reader.get(), default=_jsonable).encode()
             self._respond_body("application/json", body)
         elif self.path.startswith("/static/"):
             self._serve_static()
         else:
             self._respond(200, "fido is running")
-
-    def _collect_status_payload(self) -> dict[str, Any]:
-        """Build the status payload shared by ``/status.json`` and ``/status`` XML.
-
-        Wraps the per-repo activity list, a global rate-limit snapshot, and
-        fido-level metadata (uptime) under top-level keys.  Both endpoints
-        call this method so they always render the same data.
-        """
-        now = datetime.now(tz=timezone.utc)
-        started = self.fido_started_at
-        fido_uptime = (now - started).total_seconds() if started is not None else None
-        return {
-            "activities": self._collect_activities(),
-            "rate_limit": _serialize_rate_limit(self.state_reader.get().github_limits),
-            "fido_uptime_seconds": fido_uptime,
-        }
-
-    def _collect_activities(self) -> list[dict[str, Any]]:
-        """Build the activity snapshot for all registered repos."""
-        now = datetime.now(tz=timezone.utc)
-        activities: list[dict[str, Any]] = []
-        provider_statuses = provider_statuses_for_repo_configs(
-            list(self.config.repos.values()),
-            _provider_factory=self.provider_factory,
-        )
-        snapshot = self.state_reader.get()
-        for repo_state in snapshot.repos.values():
-            a = repo_state.activity
-            if a.what == "":
-                continue  # zero sentinel — not yet active
-            crash_record = repo_state.crash_record
-            started_at = repo_state.started_at
-            repo_cfg = self.config.repos.get(repo_state.key)
-            _provider_snap = repo_state.provider
-            dropped_count = int(
-                _provider_snap.session_dropped_count
-                if _provider_snap is not None
-                else 0
-            )
-            worker_uptime = (now - started_at).total_seconds()
-            webhooks = [
-                {
-                    "description": w.description,
-                    "elapsed_seconds": (now - w.started_at).total_seconds(),
-                    "thread_id": w.thread_id,
-                }
-                for w in repo_state.webhook_activities
-            ]
-            fido_state = (
-                _collect_fido_state(
-                    now,
-                    repo_state.issue,
-                    fido_running=(
-                        repo_state.thread is not None and repo_state.thread.is_alive
-                    ),
-                )
-                if repo_cfg is not None
-                else {
-                    "fido_running": False,
-                    "issue": None,
-                    "issue_title": None,
-                    "issue_elapsed_seconds": None,
-                    "pr_number": None,
-                    "pr_title": None,
-                    "pending": 0,
-                    "completed": 0,
-                    "current_task": None,
-                    "task_number": None,
-                    "task_total": None,
-                }
-            )
-            activities.append(
-                {
-                    "repo_name": a.repo_name,
-                    "what": a.what,
-                    "busy": a.busy,
-                    "crash_count": crash_record.death_count
-                    if crash_record.death_count > 0
-                    else 0,
-                    "last_crash_error": crash_record.last_error
-                    if crash_record.death_count > 0
-                    else None,
-                    "is_stuck": (now - a.last_progress_at).total_seconds()
-                    > _STALE_THRESHOLD,
-                    "worker_uptime_seconds": worker_uptime,
-                    "webhook_activities": webhooks,
-                    "provider": repo_cfg.provider if repo_cfg is not None else None,
-                    "provider_status": _serialize_provider_status(
-                        provider_statuses.get(repo_cfg.provider)
-                        if repo_cfg is not None
-                        else None
-                    ),
-                    "session_owner": _provider_snap.session_owner
-                    if _provider_snap is not None
-                    else None,
-                    "session_alive": _provider_snap.session_alive
-                    if _provider_snap is not None
-                    else False,
-                    "session_pid": _provider_snap.session_pid
-                    if _provider_snap is not None
-                    else None,
-                    "session_dropped_count": dropped_count,
-                    "session_sent_count": int(
-                        _provider_snap.session_sent_count
-                        if _provider_snap is not None
-                        else 0
-                    ),
-                    "session_received_count": int(
-                        _provider_snap.session_received_count
-                        if _provider_snap is not None
-                        else 0
-                    ),
-                    "claude_talker": _serialize_talker(
-                        provider.get_talker(a.repo_name)
-                    ),
-                    "rescoping": self.registry.is_rescoping(repo_state.key),
-                    "issue_cache": _serialize_issue_cache(
-                        self.registry.get_issue_cache(repo_state.key)
-                    ),
-                    **fido_state,
-                }
-            )
-        return activities
 
     def _respond_body(self, content_type: str, body: bytes) -> None:
         """Send a 200 response with the given content type and body."""
@@ -1637,8 +1264,13 @@ def run(
     # (write-only) and to the rate-limit monitor; the reader stays here and
     # is placed on WebhookHandler so the status serialisation path can read
     # without going through the registry at all.
+    process_started_at = datetime.now(tz=timezone.utc)
     state_reader, state_updater = create_atomic(
-        FidoState(repos=frozendict(), github_limits=GitHubLimit())
+        FidoState(
+            repos=frozendict(),
+            github_limits=GitHubLimit(),
+            process_started_at=process_started_at,
+        )
     )
     registry = _make_registry(
         config.repos, gh, config, dispatchers=dispatchers, state_updater=state_updater
@@ -1660,7 +1292,6 @@ def run(
     # the lock indefinitely (closes #1377).
     _SessionLockWatchdog(registry, config.repos).start_thread()
     _RateLimitMonitor(gh, state_updater).start_thread()
-    WebhookHandler.fido_started_at = datetime.now(tz=timezone.utc)
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 

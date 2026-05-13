@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from fido.worker import ActivityReporter
+    from fido.appstate import FidoState, TaskListSnapshot
+    from fido.atomic import AtomicUpdater
 
 from fido.claude import ClaudeClient
 from fido.github import GitHub
@@ -409,10 +410,6 @@ def _apply_reorder_with_oracle(
     return _materialize_rescope_oracle_result(
         oracle_order, oracle_rows, tasks_by_oracle_id
     )
-
-
-def _task_file(work_dir: Path) -> Path:
-    return work_dir / ".git" / "fido" / "tasks.json"
 
 
 def _locked(path: Path) -> "_TaskFileLock":
@@ -1084,6 +1081,53 @@ def sync_tasks_background(
     _start(t)
 
 
+def _build_task_list_snapshot(task_list: list[dict[str, Any]]) -> "TaskListSnapshot":
+    """Project a tasks.json list into a :class:`TaskListSnapshot` leaf.
+
+    Pure data transform — used by :meth:`Tasks.on_mutate` to publish
+    after every successful tasks.json write.  Counts, current-task
+    selection, and task position follow the same semantics the legacy
+    flat ``_collect_fido_state`` used: in-progress task wins for
+    ``current_task``; otherwise the first pending entry; ``task_total``
+    counts non-completed entries.
+    """
+    from fido.appstate import TaskListSnapshot
+
+    pending = sum(1 for t in task_list if t.get("status") == "pending")
+    completed = sum(1 for t in task_list if t.get("status") == "completed")
+
+    current_task: str | None = None
+    for t in task_list:
+        if t.get("status") == "in_progress":
+            current_task = t.get("title")
+            break
+    if current_task is None:
+        for t in task_list:
+            if t.get("status") == "pending":
+                current_task = t.get("title")
+                break
+
+    non_completed = [t for t in task_list if t.get("status") != "completed"]
+    task_number: int | None = None
+    task_total: int | None = None
+    if non_completed:
+        task_total = len(non_completed)
+        for idx, t in enumerate(non_completed, start=1):
+            if t.get("status") == "in_progress":
+                task_number = idx
+                break
+        if task_number is None:
+            task_number = 1
+
+    return TaskListSnapshot(
+        pending_task_count=pending,
+        completed_task_count=completed,
+        current_task=current_task,
+        task_number=task_number,
+        task_total=task_total,
+    )
+
+
 class Tasks(JsonFileStore):
     """Encapsulates task file operations for a single worker directory.
 
@@ -1093,28 +1137,38 @@ class Tasks(JsonFileStore):
     Inherits :meth:`~JsonFileStore.modify` for atomic read-modify-write of
     the entire task list.
 
-    *registry* and *repo_name* (when supplied) wire :meth:`on_mutate` to
-    publish a fresh :class:`~fido.appstate.IssueSnapshot` after every
-    successful write — so SCADA status auto-refreshes on every task
-    change without scattered manual triggers.  Tests that don't care
-    about the snapshot leave them at the defaults; the hook becomes a
-    no-op in that case.
+    *state_updater* and *repo_name* (when supplied) wire :meth:`on_mutate`
+    to publish a fresh :class:`~fido.appstate.TaskListSnapshot` to the
+    repo's leaf field on :class:`~fido.appstate.RepoState` after every
+    successful write.  Independent leaf — task mutations never touch the
+    issue/PR leaf or the worker/provider leaves, so there's no
+    cross-source publish lock and no flock-order inversion (#1696).
+    Tests that don't care about the snapshot leave them at the
+    defaults; the hook becomes a no-op in that case.
     """
 
     def __init__(
         self,
         work_dir: Path,
         *,
-        registry: "ActivityReporter | None" = None,
+        state_updater: "AtomicUpdater[FidoState] | None" = None,
         repo_name: str = "",
+        fido_dir: Path | None = None,
     ) -> None:
         self._work_dir = work_dir
-        self._registry = registry
+        self._state_updater = state_updater
         self._repo_name = repo_name
+        # *fido_dir* is the canonical resolved fido directory (under
+        # the registry-resolved git_dir, #1696).  When omitted (test
+        # scaffolding without a registry) fall back to the
+        # conventional layout.
+        self._fido_dir = (
+            fido_dir if fido_dir is not None else work_dir / ".git" / "fido"
+        )
 
     @property
     def _data_path(self) -> Path:
-        return _task_file(self._work_dir)
+        return self._fido_dir / "tasks.json"
 
     def _default(self) -> list[dict[str, Any]]:
         return []
@@ -1128,30 +1182,24 @@ class Tasks(JsonFileStore):
                 raise ValueError(f"task {t.get('id', '?')} missing required type field")
 
     def on_mutate(self, data: object) -> None:
-        """Publish a fresh :class:`~fido.appstate.IssueSnapshot` to
-        :class:`~fido.appstate.FidoState` after each task-list mutation.
+        """Publish the new :class:`~fido.appstate.TaskListSnapshot` leaf
+        to :class:`~fido.appstate.FidoState` after each task-list write.
 
         Fires *after* :meth:`~JsonFileStore.modify` releases the
-        tasks.json flock so the callback can safely read the sibling
-        state.json without lock-order inversion (#1696 codex P1).
-        ``publish_repo_snapshot`` re-reads tasks.json fresh rather than
-        trusting the captured *data* — if a sibling mutator wrote
-        between our flock release and our publish, we want their value
-        too so the snapshot we install reflects the *current* disk
-        state, not our pre-release capture.  The per-repo publish lock
-        serializes concurrent publishers; the last one to acquire
-        always sees the latest disk state and wins.
+        tasks.json flock so the lens-write CAS retry doesn't run while
+        we hold any flock.  Pure leaf publish — no cross-source reads,
+        no shared lock with other publishers; sibling mutators
+        (State for the issue/PR leaf, registry for activity/thread/
+        provider leaves) update independent fields on RepoState.
 
-        No-op when *registry* or *repo_name* were not supplied at
+        No-op when *state_updater* or *repo_name* were not supplied at
         construction (tests, one-off CLI use)."""
-        del data  # see docstring — re-read happens inside publish_repo_snapshot
-        if self._registry is None or not self._repo_name:
+        if self._state_updater is None or not self._repo_name:
             return
-        # Lazy import to avoid a tasks → worker cycle (worker imports
-        # from tasks for the task-loop).
-        from fido.worker import publish_repo_snapshot
-
-        publish_repo_snapshot(self._work_dir, self._repo_name, self._registry)
+        assert isinstance(data, list), "tasks.json must hold a list"
+        snapshot = _build_task_list_snapshot(data)
+        _name = self._repo_name
+        self._state_updater.update(lambda root: root.repos[_name].task_list, snapshot)
 
     def list(self) -> list[dict[str, Any]]:
         """Return all tasks."""
