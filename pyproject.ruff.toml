@@ -252,7 +252,6 @@ ignore = ["E501"]
 # Each file below is a temporary exemption being retired one PR at a time.
 # Remove the entry for a file once its patch calls are replaced with constructor-DI.
 # Do NOT add new files here; fix them properly instead.
-"tests/test_claude.py" = ["TID251"]
 "tests/test_coverage_fills.py" = ["TID251"]
 "tests/test_events.py" = ["TID251"]
 "tests/test_server.py" = ["TID251"]
