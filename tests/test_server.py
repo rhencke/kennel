@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -19,6 +20,7 @@ from frozendict import frozendict
 
 from fido import provider
 from fido.appstate import (
+    _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     FidoState,
     GitHubLimit,
     IssueSnapshot,
@@ -28,6 +30,7 @@ from fido.appstate import (
     WebhookActivity,
     WorkerActivity,
     WorkerCrash,
+    zero_repo_state,
 )
 from fido.claude import ClaudeClient
 from fido.config import Config
@@ -69,9 +72,9 @@ def _repo_state(
         if stale
         else datetime.now(tz=timezone.utc)
     )
-    return RepoState(
-        key=repo_name,
-        started_at=started_at or _EPOCH,
+    base = zero_repo_state(repo_name, started_at=started_at or _EPOCH)
+    return dataclasses.replace(
+        base,
         activity=WorkerActivity(
             repo_name=repo_name,
             what=what,
@@ -84,12 +87,9 @@ def _repo_state(
             last_crash_time=_EPOCH,
         ),
         webhook_activities=webhook_activities,
-        provider=provider,
-        issue=issue,
+        provider=provider if provider is not None else base.provider,
+        issue=issue if issue is not None else base.issue,
     )
-
-
-_ZERO_GITHUB_LIMITS = GitHubLimit()
 
 
 def _fido_state(
@@ -99,6 +99,7 @@ def _fido_state(
     return FidoState(
         repos=frozendict({rs.key: rs for rs in repo_states}),
         github_limits=github_limits,
+        process_started_at=_EPOCH,
     )
 
 
@@ -332,20 +333,20 @@ class TestGetEndpoint:
             "github_limits": {
                 "rest": {
                     "name": "rest",
-                    "used": None,
-                    "limit": None,
-                    "resets_at": None,
-                    "unit": None,
+                    "used": 0,
+                    "limit": 0,
+                    "resets_at": "1970-01-01T00:00:00+00:00",
+                    "unit": "",
                 },
                 "graphql": {
                     "name": "graphql",
-                    "used": None,
-                    "limit": None,
-                    "resets_at": None,
-                    "unit": None,
+                    "used": 0,
+                    "limit": 0,
+                    "resets_at": "1970-01-01T00:00:00+00:00",
+                    "unit": "",
                 },
             },
-            "process_started_at": None,
+            "process_started_at": "1970-01-01T00:00:00+00:00",
         }
 
     def test_status_endpoint_dumps_repo_state(self, server: tuple) -> None:
@@ -364,10 +365,19 @@ class TestGetEndpoint:
         assert repo["activity"]["busy"] is True
         assert repo["crash_record"]["death_count"] == 0
         assert repo["webhook_activities"] == []
-        assert repo["thread"] is None
-        assert repo["provider"] is None
-        assert repo["issue"] is None
-        assert repo["task_list"] is None
+        # Zero-sentinel leaves: every snapshot field carries a real
+        # value (#1696 — no None on FidoState), and the zeros are
+        # documented per leaf in :mod:`fido.appstate`.
+        assert repo["thread"] == {
+            "is_alive": False,
+            "was_stopped": False,
+            "crash_error": "",
+        }
+        assert repo["provider"]["session_owner"] == ""
+        assert repo["provider"]["session_alive"] is False
+        assert repo["issue"]["issue"] == 0
+        assert repo["task_list"]["pending_task_count"] == 0
+        assert repo["rescoping"] is False
 
     def test_status_endpoint_dumps_provider_snapshot(self, server: tuple) -> None:
         url, _ = server
@@ -426,12 +436,14 @@ class TestGetEndpoint:
                 used=5,
                 limit=5000,
                 resets_at=datetime(2024, 11, 14, 12, 0, tzinfo=timezone.utc),
+                unit="",
             ),
             graphql=ProviderLimitWindow(
                 name="graphql",
                 used=12,
                 limit=5000,
                 resets_at=datetime(2024, 11, 14, 13, 0, tzinfo=timezone.utc),
+                unit="",
             ),
         )
         WebhookHandler.state_reader.get.return_value = _fido_state(github_limits=limits)
@@ -447,7 +459,7 @@ class TestGetEndpoint:
         started_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
         WebhookHandler.state_reader.get.return_value = FidoState(
             repos=frozendict(),
-            github_limits=GitHubLimit(),
+            github_limits=_ZERO_GITHUB_LIMITS,
             process_started_at=started_at,
         )
         resp = urllib.request.urlopen(f"{url}/status.json")
@@ -1072,7 +1084,11 @@ class TestProcessAction:
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         handler.registry = WorkerRegistry(MagicMock(), updater)
         handler.registry.start(cfg.repos["owner/repo"])
@@ -1321,7 +1337,11 @@ class TestProcessAction:
         handler.config = cfg
 
         reader, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
 
         # Build a mock thread with known, non-default session field values so
@@ -1425,7 +1445,11 @@ class TestProcessAction:
         handler.config = cfg
 
         reader, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
 
         # Use session_owner=None to exercise the provider-returns-None path
@@ -1495,10 +1519,12 @@ class TestProcessAction:
         # Two publishes must have fired even though the action raised.
         assert len(captured_snapshots) == 2
 
-        # Both snapshots must carry the mock thread's real session field values,
-        # including session_owner=None (the provider-returns-None case).
+        # Both snapshots must carry the mock thread's real session field values.
+        # session_owner falls back to "" when the provider returns None — the
+        # ProviderSnapshot field is now non-optional (#1696, no None on
+        # appstate types).
         expected = ProviderSnapshot(
-            session_owner=None,
+            session_owner="",
             session_alive=True,
             session_pid=99,
             session_dropped_count=1,

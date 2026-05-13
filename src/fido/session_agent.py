@@ -72,9 +72,9 @@ class SessionBackedAgent(SnapshotPublisher):
         if self._state_updater is None or self._repo_name is None:
             return
         snapshot = ProviderSnapshot(
-            session_owner=owner,
+            session_owner=owner or "",
             session_alive=alive,
-            session_pid=pid,
+            session_pid=pid or 0,
             session_dropped_count=dropped_count,
             session_sent_count=sent_count,
             session_received_count=received_count,

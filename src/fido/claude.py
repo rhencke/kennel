@@ -18,7 +18,10 @@ from typing import Any
 import requests as _requests
 
 from fido import provider
-from fido.appstate import FidoState
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+)
 from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
@@ -1588,9 +1591,13 @@ def _load_claude_oauth_state(
     return _ClaudeOAuthState(access_token=access_token)
 
 
-def _parse_usage_reset(value: object) -> datetime | None:
+def _parse_usage_reset(value: object) -> datetime:
+    """Parse a Claude usage reset timestamp.  Returns the unix epoch
+    when the field is absent — the unpolled :class:`ProviderLimitWindow`
+    sentinel uses the same value, so consumers see a uniform "no data"
+    marker rather than ``None``."""
     if value is None:
-        return None
+        return _EPOCH
     if not isinstance(value, str):
         raise ValueError(
             f"Claude usage reset time must be a string or null, got {value!r}"

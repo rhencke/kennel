@@ -1096,28 +1096,27 @@ def _build_task_list_snapshot(task_list: list[dict[str, Any]]) -> "TaskListSnaps
     pending = sum(1 for t in task_list if t.get("status") == "pending")
     completed = sum(1 for t in task_list if t.get("status") == "completed")
 
-    current_task: str | None = None
+    current_task = ""
     for t in task_list:
         if t.get("status") == "in_progress":
-            current_task = t.get("title")
+            current_task = t.get("title", "")
             break
-    if current_task is None:
+    if not current_task:
         for t in task_list:
             if t.get("status") == "pending":
-                current_task = t.get("title")
+                current_task = t.get("title", "")
                 break
 
     non_completed = [t for t in task_list if t.get("status") != "completed"]
-    task_number: int | None = None
-    task_total: int | None = None
+    task_number = 0
+    task_total = 0
     if non_completed:
         task_total = len(non_completed)
+        task_number = 1
         for idx, t in enumerate(non_completed, start=1):
             if t.get("status") == "in_progress":
                 task_number = idx
                 break
-        if task_number is None:
-            task_number = 1
 
     return TaskListSnapshot(
         pending_task_count=pending,

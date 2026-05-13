@@ -748,16 +748,19 @@ class TestBuildTaskListSnapshot:
         assert snap.task_number == 1
         assert snap.task_total == 2
 
-    def test_all_completed_yields_none_counters(self) -> None:
+    def test_all_completed_yields_zero_counters(self) -> None:
+        """Per #1696, the absent ``current_task`` is the empty string and
+        the absent ``task_number`` / ``task_total`` are 0 — uniform
+        zero sentinels, no None on the SCADA snapshot."""
         snap = _build_task_list_snapshot(
             [
                 {"status": "completed", "title": "a"},
                 {"status": "completed", "title": "b"},
             ]
         )
-        assert snap.current_task is None
-        assert snap.task_number is None
-        assert snap.task_total is None
+        assert snap.current_task == ""
+        assert snap.task_number == 0
+        assert snap.task_total == 0
 
 
 # ── _parse_reorder_response ───────────────────────────────────────────────────

@@ -21,7 +21,10 @@ import requests
 from frozendict import frozendict
 
 from fido import provider
-from fido.appstate import FidoState, GitHubLimit
+from fido.appstate import (
+    _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+)
 from fido.atomic import AtomicReader, create_atomic
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
@@ -1268,7 +1271,7 @@ def run(
     state_reader, state_updater = create_atomic(
         FidoState(
             repos=frozendict(),
-            github_limits=GitHubLimit(),
+            github_limits=_ZERO_GITHUB_LIMITS,
             process_started_at=process_started_at,
         )
     )

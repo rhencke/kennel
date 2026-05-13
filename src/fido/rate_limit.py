@@ -114,6 +114,7 @@ def _parse_window(name: str, raw: dict[str, Any]) -> ProviderLimitWindow:
         used=int(raw.get("used", 0)),
         limit=int(raw.get("limit", 0)),
         resets_at=resets_at,
+        unit="",
     )
 
 

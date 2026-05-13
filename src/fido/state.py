@@ -161,11 +161,11 @@ class State(JsonFileStore):
 
         assert isinstance(data, dict), "state.json must hold an object"
         snapshot = IssueSnapshot(
-            issue=data.get("issue"),
-            issue_title=data.get("issue_title"),
-            issue_started_at=data.get("issue_started_at"),
-            pr_number=data.get("pr_number"),
-            pr_title=data.get("pr_title"),
+            issue=int(data.get("issue") or 0),
+            issue_title=str(data.get("issue_title") or ""),
+            issue_started_at=str(data.get("issue_started_at") or ""),
+            pr_number=int(data.get("pr_number") or 0),
+            pr_title=str(data.get("pr_title") or ""),
         )
         _name = self._repo_name
         self._state_updater.update(lambda root: root.repos[_name].issue, snapshot)

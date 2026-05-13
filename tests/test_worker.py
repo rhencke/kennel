@@ -15,6 +15,9 @@ import pytest
 
 import fido.worker as worker_module
 from fido import provider
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.issue_cache import IssueNode, IssueTreeCache
@@ -803,12 +806,20 @@ class TestWorker:
         """Concurrent set_status calls on different workers sharing a registry serialize."""
         from frozendict import frozendict
 
-        from fido.appstate import FidoState, GitHubLimit
+        from fido.appstate import (
+            _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+            _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+            FidoState,
+        )
         from fido.atomic import create_atomic
         from fido.registry import WorkerRegistry
 
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         registry = WorkerRegistry(MagicMock(), updater)
         # registry.start now resolves git_dir via git rev-parse, so
@@ -1056,12 +1067,20 @@ class TestWorker:
         """Worker._ensure_provider passes state_updater to create_provider."""
         from frozendict import frozendict
 
-        from fido.appstate import FidoState, GitHubLimit
+        from fido.appstate import (  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+            _EPOCH,
+            _ZERO_GITHUB_LIMITS,
+            FidoState,
+        )
         from fido.atomic import create_atomic
 
         cfg = _default_repo_cfg(tmp_path, repo_name="owner/repo")
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         mock_factory = MagicMock()
         mock_factory.create_provider.return_value = MagicMock()
@@ -1084,12 +1103,20 @@ class TestWorker:
         """Worker.__init__ passes state_updater to create_provider when repo_cfg is given."""
         from frozendict import frozendict
 
-        from fido.appstate import FidoState, GitHubLimit
+        from fido.appstate import (  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+            _EPOCH,
+            _ZERO_GITHUB_LIMITS,
+            FidoState,
+        )
         from fido.atomic import create_atomic
 
         cfg = _default_repo_cfg(tmp_path, repo_name="owner/repo")
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         mock_factory = MagicMock()
         mock_factory.create_provider.return_value = MagicMock()
@@ -1995,6 +2022,8 @@ class TestWorkerFindNextIssue:
                     name="five_hour",
                     used=96,
                     limit=100,
+                    resets_at=_EPOCH,
+                    unit="",
                 ),
             ),
         )
@@ -2029,6 +2058,7 @@ class TestWorkerFindNextIssue:
                     used=97,
                     limit=100,
                     resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=timezone.utc),
+                    unit="",
                 ),
             ),
         )
@@ -2054,7 +2084,15 @@ class TestWorkerFindNextIssue:
         provider = MagicMock()
         provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE,
-            windows=(ProviderLimitWindow(name="five_hour", used=95, limit=100),),
+            windows=(
+                ProviderLimitWindow(
+                    name="five_hour",
+                    used=95,
+                    limit=100,
+                    resets_at=_EPOCH,
+                    unit="",
+                ),
+            ),
         )
         registry = MagicMock()
         registry.status_update.return_value.__enter__.return_value = None
@@ -17487,11 +17525,19 @@ class TestWorkerThread:
         """WorkerThread passes state_updater to Worker on each loop iteration."""
         from frozendict import frozendict
 
-        from fido.appstate import FidoState, GitHubLimit
+        from fido.appstate import (  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+            _EPOCH,
+            _ZERO_GITHUB_LIMITS,
+            FidoState,
+        )
         from fido.atomic import create_atomic
 
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         wt = WorkerThread(
             tmp_path,
@@ -17550,12 +17596,20 @@ class TestWorkerThread:
         """WorkerThread._ensure_provider passes state_updater to create_provider."""
         from frozendict import frozendict
 
-        from fido.appstate import FidoState, GitHubLimit
+        from fido.appstate import (  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+            _EPOCH,
+            _ZERO_GITHUB_LIMITS,
+            FidoState,
+        )
         from fido.atomic import create_atomic
 
         cfg = _default_repo_cfg(tmp_path, repo_name="owner/repo")
         _, updater = create_atomic(
-            FidoState(repos=frozendict(), github_limits=GitHubLimit())
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
         )
         mock_factory = MagicMock()
         mock_factory.create_provider.return_value = MagicMock()

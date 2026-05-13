@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import IO, Any, NoReturn, Protocol
 
 from fido import provider
-from fido.appstate import FidoState
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+)
 from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
@@ -529,9 +532,12 @@ def _normalize_limit_name(value: object, fallback: str) -> str:
     return "_".join(value.lower().replace("-", "_").split())
 
 
-def _parse_rate_limit_reset(value: object) -> datetime | None:
+def _parse_rate_limit_reset(value: object) -> datetime:
+    """Parse a Codex rate-limit reset timestamp.  Returns the unix epoch
+    when the field is absent — matches the unpolled
+    :class:`ProviderLimitWindow` sentinel."""
     if value is None:
-        return None
+        return _EPOCH
     if not isinstance(value, int | float):
         raise ValueError(f"Codex rate limit resetsAt must be numeric, got {value!r}")
     return datetime.fromtimestamp(float(value), tz=UTC)
@@ -606,18 +612,32 @@ def _codex_limit_windows(payload: dict[str, Any]) -> tuple[ProviderLimitWindow, 
             window = _rate_limit_window(limit_id, suffix, raw_limit.get(suffix))
             if window is not None:
                 windows.append(window)
-                if window.pressure is not None and window.pressure >= 1.0:
+                if window.pressure >= 1.0:
                     reached_names.add(window.name)
         reached_type = raw_limit.get("rateLimitReachedType")
         if _credits_depleted(raw_limit.get("credits"), reached_type):
             credit_name = f"{limit_id}_credits"
-            windows.append(ProviderLimitWindow(name=credit_name, used=100, limit=100))
+            windows.append(
+                ProviderLimitWindow(
+                    name=credit_name,
+                    used=100,
+                    limit=100,
+                    resets_at=_EPOCH,
+                    unit="%",
+                )
+            )
             reached_names.add(credit_name)
         reached_name = _reached_window_name(reached_type)
         full_reached_name = f"{limit_id}_{reached_name}" if reached_name else None
         if full_reached_name is not None and full_reached_name not in reached_names:
             windows.append(
-                ProviderLimitWindow(name=full_reached_name, used=100, limit=100)
+                ProviderLimitWindow(
+                    name=full_reached_name,
+                    used=100,
+                    limit=100,
+                    resets_at=_EPOCH,
+                    unit="%",
+                )
             )
     return tuple(windows)
 

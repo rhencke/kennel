@@ -22,7 +22,10 @@ if TYPE_CHECKING:
 import requests as _requests
 
 from fido import hooks, tasks
-from fido.appstate import FidoState
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+)
 from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
@@ -405,7 +408,13 @@ def _parse_status_nudge(raw: str) -> tuple[str, str]:
 
 
 def _format_provider_reset_time(resets_at: datetime | None) -> str:
-    if resets_at is None:
+    """Render a provider reset timestamp for the SCADA pause line.
+
+    Treats both ``None`` *and* the epoch sentinel (``1970-01-01``) as
+    "no info", since per #1696 the unpolled
+    :class:`~fido.appstate.ProviderLimitWindow` carries the epoch in
+    ``resets_at`` rather than ``None``."""
+    if resets_at is None or resets_at == _EPOCH:
         return "a little while"
     return resets_at.astimezone(timezone.utc).strftime("%H:%M UTC")
 

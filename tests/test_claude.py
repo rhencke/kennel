@@ -3073,6 +3073,10 @@ class TestClaudeUsageWindow:
         )
 
     def test_parses_window_with_null_reset(self) -> None:
+        # ``resets_at: None`` falls back to the epoch sentinel (per
+        # #1696, ProviderLimitWindow no longer accepts None for any field).
+        from datetime import datetime, timezone
+
         assert _usage_window(
             "seven_day",
             {
@@ -3083,7 +3087,7 @@ class TestClaudeUsageWindow:
             name="seven_day",
             used=12,
             limit=100,
-            resets_at=None,
+            resets_at=datetime(1970, 1, 1, tzinfo=timezone.utc),
             unit="%",
         )
 
