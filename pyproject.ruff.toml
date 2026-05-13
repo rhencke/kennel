@@ -254,5 +254,4 @@ ignore = ["E501"]
 # Do NOT add new files here; fix them properly instead.
 "tests/test_coverage_fills.py" = ["TID251"]
 "tests/test_events.py" = ["TID251"]
-"tests/test_status.py" = ["TID251"]
 "tests/test_worker.py" = ["TID251"]
