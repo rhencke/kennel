@@ -298,7 +298,7 @@ class TestResolveGitDir:
 
 class TestAcquireLock:
     def test_returns_open_fd(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
+        fido_dir = tmp_path / ".git" / "fido"
         fd = acquire_lock(fido_dir)
         assert not fd.closed
         fd.close()
@@ -310,13 +310,13 @@ class TestAcquireLock:
         fd.close()
 
     def test_creates_lock_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
+        fido_dir = tmp_path / ".git" / "fido"
         fd = acquire_lock(fido_dir)
         assert (fido_dir / "lock").exists()
         fd.close()
 
     def test_raises_lock_held_when_already_locked(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
+        fido_dir = tmp_path / ".git" / "fido"
         fd1 = acquire_lock(fido_dir)
         try:
             with pytest.raises(LockHeld):
@@ -325,7 +325,7 @@ class TestAcquireLock:
             fd1.close()
 
     def test_lock_held_message(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
+        fido_dir = tmp_path / ".git" / "fido"
         fd1 = acquire_lock(fido_dir)
         try:
             with pytest.raises(LockHeld, match="another fido"):
@@ -334,7 +334,7 @@ class TestAcquireLock:
             fd1.close()
 
     def test_reacquirable_after_release(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
+        fido_dir = tmp_path / ".git" / "fido"
         fd1 = acquire_lock(fido_dir)
         fd1.close()
         fd2 = acquire_lock(fido_dir)
@@ -344,7 +344,7 @@ class TestAcquireLock:
 
 class TestWorkerContextManager:
     def test_closes_lock_fd_on_exit(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
+        fido_dir = tmp_path / ".git" / "fido"
         fd = acquire_lock(fido_dir)
         ctx = WorkerContext(
             work_dir=tmp_path, git_dir=tmp_path / ".git", fido_dir=fido_dir, lock_fd=fd
@@ -354,7 +354,7 @@ class TestWorkerContextManager:
         assert fd.closed
 
     def test_closes_lock_fd_on_exception(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
+        fido_dir = tmp_path / ".git" / "fido"
         fd = acquire_lock(fido_dir)
         ctx = WorkerContext(
             work_dir=tmp_path, git_dir=tmp_path / ".git", fido_dir=fido_dir, lock_fd=fd
@@ -866,8 +866,8 @@ class TestWorker:
         return gh
 
     def test_get_issue_returns_none_when_no_state(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         gh = self._make_issue_gh()
         assert (
             Worker(
@@ -877,8 +877,8 @@ class TestWorker:
         )
 
     def test_get_issue_returns_issue_number_when_open(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         assert (
@@ -889,8 +889,8 @@ class TestWorker:
         )
 
     def test_get_issue_returns_int_type(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         result = Worker(
@@ -899,8 +899,8 @@ class TestWorker:
         assert isinstance(result, int)
 
     def test_get_issue_returns_none_when_closed(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         assert (
@@ -911,8 +911,8 @@ class TestWorker:
         )
 
     def test_get_issue_clears_state_when_closed(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         Worker(
@@ -923,8 +923,8 @@ class TestWorker:
     def test_get_issue_does_not_call_view_issue_when_no_state(
         self, tmp_path: Path
     ) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         gh = self._make_issue_gh()
         Worker(
             tmp_path, gh, registry=MagicMock(spec=ActivityReporter)
@@ -932,8 +932,8 @@ class TestWorker:
         gh.view_issue.assert_not_called()
 
     def test_get_issue_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 12})
         gh = self._make_issue_gh(state="OPEN")
         Worker(
@@ -946,8 +946,8 @@ class TestWorker:
     ) -> None:
         import logging
 
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 9})
         gh = self._make_issue_gh(state="CLOSED")
         with caplog.at_level(logging.INFO, logger="fido"):
@@ -957,8 +957,8 @@ class TestWorker:
         assert "advancing" in caplog.text
 
     def test_get_issue_state_preserved_when_open(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 5})
         gh = self._make_issue_gh(state="OPEN")
         Worker(
@@ -2132,8 +2132,8 @@ class TestWorkerFindNextIssue:
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
-        d = tmp_path / "fido"
-        d.mkdir()
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _load_issues(self, worker: "Worker", issues: list) -> None:
@@ -3330,8 +3330,8 @@ class TestWorkerFindNextIssueCacheBranch:
             issue_cache=cache,
             registry=MagicMock(spec=ActivityReporter),
         )
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         repo_ctx = RepoContext(
             repo="owner/repo",
             owner="owner",
@@ -3518,54 +3518,54 @@ class TestWorkerPostPickupComment:
 
 class TestCreateCompactScript:
     def test_creates_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         script = create_compact_script(fido_dir)
         assert script.exists()
 
     def test_returns_path_in_fido_dir(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         script = create_compact_script(fido_dir)
         assert script == fido_dir / "compact.sh"
 
     def test_script_is_executable(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         script = create_compact_script(fido_dir)
         assert script.stat().st_mode & 0o111  # any execute bit
 
     def test_script_has_shebang(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         script = create_compact_script(fido_dir)
         assert script.read_text().startswith("#!/usr/bin/env bash\n")
 
     def test_script_references_sub_dir(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         script = create_compact_script(fido_dir)
         from fido.worker import _sub_dir
 
         assert str(_sub_dir()) in script.read_text()
 
     def test_script_contains_post_compact_message(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         script = create_compact_script(fido_dir)
         assert "PostCompact" in script.read_text()
 
     def test_script_contains_md_glob(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         script = create_compact_script(fido_dir)
         assert "*.md" in script.read_text()
 
 
 class TestSetupHooks:
     def test_returns_compact_and_sync_cmds(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         compact_cmd, sync_cmd = Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3574,8 +3574,8 @@ class TestSetupHooks:
         assert "sync_tasks_cli" in sync_cmd
 
     def test_compact_cmd_references_compact_script(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         compact_cmd, _ = Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3583,8 +3583,8 @@ class TestSetupHooks:
         assert "compact.sh" in compact_cmd
 
     def test_sync_cmd_references_sync_script(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         _, sync_cmd = Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3593,8 +3593,8 @@ class TestSetupHooks:
         assert "uv run" not in sync_cmd
 
     def test_sync_cmd_includes_work_dir(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         _, sync_cmd = Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3602,8 +3602,8 @@ class TestSetupHooks:
         assert str(tmp_path) in sync_cmd
 
     def test_creates_compact_script(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3613,8 +3613,8 @@ class TestSetupHooks:
     def test_adds_hooks_to_settings(self, tmp_path: Path) -> None:
         import json
 
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3625,8 +3625,8 @@ class TestSetupHooks:
         assert "hooks" in cfg
 
     def test_gitexcludes_settings(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3637,8 +3637,8 @@ class TestSetupHooks:
 
 class TestTeardownHooks:
     def test_removes_compact_script(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         worker = Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3650,8 +3650,8 @@ class TestTeardownHooks:
     def test_removes_hooks_from_settings(self, tmp_path: Path) -> None:
         import json
 
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (tmp_path / ".git" / "info").mkdir(parents=True)
         worker = Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3663,16 +3663,16 @@ class TestTeardownHooks:
         assert "hooks" not in cfg
 
     def test_noop_when_compact_script_missing(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         # Should not raise even when compact.sh does not exist
         Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
         ).teardown_hooks(fido_dir, "bash /x/compact.sh", "bash sync.sh &")
 
     def test_noop_when_settings_missing(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         # No settings file created — should not raise
         Worker(
             tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
@@ -3681,23 +3681,23 @@ class TestTeardownHooks:
 
 class TestLoadState:
     def test_returns_empty_dict_when_absent(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         assert State(fido_dir).load() == {}
 
     def test_returns_state_when_present(self, tmp_path: Path) -> None:
         import json
 
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (fido_dir / "state.json").write_text(json.dumps({"issue": 42}))
         assert State(fido_dir).load() == {"issue": 42}
 
     def test_returns_dict_with_arbitrary_keys(self, tmp_path: Path) -> None:
         import json
 
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (fido_dir / "state.json").write_text(json.dumps({"issue": 7, "extra": "val"}))
         result = State(fido_dir).load()
         assert result["issue"] == 7
@@ -3706,20 +3706,20 @@ class TestLoadState:
 
 class TestSaveState:
     def test_creates_state_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 5})
         assert (fido_dir / "state.json").exists()
 
     def test_roundtrips_with_load_state(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 99})
         assert State(fido_dir).load() == {"issue": 99}
 
     def test_overwrites_existing_state(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 1})
         State(fido_dir).save({"issue": 2})
         assert State(fido_dir).load() == {"issue": 2}
@@ -3727,21 +3727,21 @@ class TestSaveState:
 
 class TestClearState:
     def test_removes_state_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 3})
         State(fido_dir).clear()
         assert not (fido_dir / "state.json").exists()
 
     def test_noop_when_absent(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         # Should not raise
         State(fido_dir).clear()
 
     def test_load_returns_empty_after_clear(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 10})
         State(fido_dir).clear()
         assert State(fido_dir).load() == {}
@@ -3755,20 +3755,20 @@ class TestState:
     def test_load_returns_state_when_present(self, tmp_path: Path) -> None:
         import json
 
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (fido_dir / "state.json").write_text(json.dumps({"issue": 7}))
         assert State(fido_dir).load() == {"issue": 7}
 
     def test_save_persists_data(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 42})
         assert State(fido_dir).load() == {"issue": 42}
 
     def test_clear_removes_state_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 1})
         State(fido_dir).clear()
         assert not (fido_dir / "state.json").exists()
@@ -3785,8 +3785,8 @@ class TestBuildPrompt:
         return sub
 
     def test_returns_system_and_prompt_paths(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, prompt_file = build_prompt(fido_dir, "task", "context")
@@ -3794,24 +3794,24 @@ class TestBuildPrompt:
         assert prompt_file == fido_dir / "prompt"
 
     def test_system_file_contains_persona(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "context")
         assert "I am Fido" in sys_file.read_text()
 
     def test_system_file_contains_skill(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "context")
         assert "Implement the task carefully." in sys_file.read_text()
 
     def test_system_file_joins_with_blank_line(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "context")
@@ -3819,32 +3819,32 @@ class TestBuildPrompt:
         assert "I am Fido, a very good dog.\n\nImplement the task carefully." in content
 
     def test_prompt_file_contains_context(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         with patch("fido.worker._sub_dir", return_value=sub):
             _, prompt_file = build_prompt(fido_dir, "task", "do the work")
         assert "do the work" in prompt_file.read_text()
 
     def test_system_file_ends_with_newline(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "ctx")
         assert sys_file.read_text().endswith("\n")
 
     def test_prompt_file_ends_with_newline(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         with patch("fido.worker._sub_dir", return_value=sub):
             _, prompt_file = build_prompt(fido_dir, "task", "ctx")
         assert prompt_file.read_text().endswith("\n")
 
     def test_uses_correct_subskill_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "ci.md").write_text("Fix the CI failure.")
         with patch("fido.worker._sub_dir", return_value=sub):
@@ -3853,8 +3853,8 @@ class TestBuildPrompt:
         assert "Implement the task carefully." not in sys_file.read_text()
 
     def test_strips_trailing_whitespace_from_persona(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "persona.md").write_text("Persona text\n\n\n")
         with patch("fido.worker._sub_dir", return_value=sub):
@@ -3864,8 +3864,8 @@ class TestBuildPrompt:
         assert not content.startswith("Persona text\n\n\n\n")
 
     def test_blog_label_injects_life_into_system_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("Rob is my person. I live in a cozy house.")
         with patch("fido.worker._sub_dir", return_value=sub):
@@ -3881,8 +3881,8 @@ class TestBuildPrompt:
         assert persona_pos < life_pos < skill_pos
 
     def test_blog_label_injects_life_into_skill_file(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("Rob is my person.")
         with patch("fido.worker._sub_dir", return_value=sub):
@@ -3896,8 +3896,8 @@ class TestBuildPrompt:
         assert life_pos < skill_pos
 
     def test_no_blog_label_omits_life(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("This should not appear.")
         with patch("fido.worker._sub_dir", return_value=sub):
@@ -3905,8 +3905,8 @@ class TestBuildPrompt:
         assert "This should not appear." not in sys_file.read_text()
 
     def test_no_labels_omits_life(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("This should not appear.")
         with patch("fido.worker._sub_dir", return_value=sub):
@@ -3914,8 +3914,8 @@ class TestBuildPrompt:
         assert "This should not appear." not in sys_file.read_text()
 
     def test_blog_label_missing_life_file_does_not_crash(self, tmp_path: Path) -> None:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         # life.md intentionally absent
         with patch("fido.worker._sub_dir", return_value=sub):
@@ -3930,8 +3930,8 @@ class TestProviderStart:
     """Tests for provider_start."""
 
     def _setup_fido_dir(self, tmp_path: Path) -> Path:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (fido_dir / "system").write_text("system prompt")
         (fido_dir / "skill").write_text("sub-skill instructions")
         (fido_dir / "prompt").write_text("user prompt")
@@ -4126,8 +4126,8 @@ class TestProviderRun:
     """Tests for provider_run."""
 
     def _setup_fido_dir(self, tmp_path: Path) -> Path:
-        fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
         (fido_dir / "system").write_text("system")
         (fido_dir / "skill").write_text("skill")
         (fido_dir / "prompt").write_text("prompt")
@@ -5311,8 +5311,8 @@ class TestFindOrCreatePr:
         )
 
     def _fido_dir(self, tmp_path: Path) -> Path:
-        d = tmp_path / "fido"
-        d.mkdir()
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _open_pr(self, number: int = 10, slug: str = "fix-bug") -> dict:
@@ -7238,8 +7238,12 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path, comment_text="All covered.")
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        # Pre-populate state with issue/PR tracking keys
-        with State(tmp_path).modify() as state:
+        # Pre-populate state at the worker's actual state path
+        # (work_dir/.git/fido); the worker now writes via its
+        # injected self._state which is anchored there (#1696).
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True, exist_ok=True)
+        with State(fido_dir).modify() as state:
             state["issue"] = 5
             state["issue_title"] = "My issue"
             state["issue_started_at"] = "2026-01-01T00:00:00Z"
@@ -7248,7 +7252,7 @@ class TestFinalizeSetupWithNoTasks:
             state["current_task_id"] = "abc-123"
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
-                tmp_path,
+                fido_dir,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -7257,7 +7261,7 @@ class TestFinalizeSetupWithNoTasks:
                 closed_sub_issues=subs,
                 explicit_no_tasks=True,
             )
-        remaining = State(tmp_path).load()
+        remaining = State(fido_dir).load()
         assert "issue" not in remaining
         assert "issue_title" not in remaining
         assert "issue_started_at" not in remaining

@@ -1537,7 +1537,7 @@ class Worker:
         If state.json records an issue that has been CLOSED on GitHub, the state
         is cleared (advancing to the next issue) and None is returned.
         """
-        state_obj = State(fido_dir)
+        state_obj = self._state
         issue = state_obj.load().get("issue")
         if issue is None:
             return None
@@ -1682,7 +1682,7 @@ class Worker:
             "starting issue #%s: %s (%s)", choice.number, choice.title, choice.reason
         )
         self.gh.add_assignee(repo_ctx.repo, choice.number, repo_ctx.gh_user)
-        State(fido_dir).save(
+        self._state.save(
             {
                 "issue": choice.number,
                 "issue_title": choice.title,
@@ -1710,7 +1710,7 @@ class Worker:
         resumes the issue instead of re-entering ``find_next_issue()``. A
         separate durable bit lets resume retry this idempotent check.
         """
-        state = State(fido_dir)
+        state = self._state
         if state.load().get("pickup_comment_ensured") is True:
             return
         self.post_pickup_comment(repo, issue, issue_title, gh_user)
@@ -1925,7 +1925,7 @@ class Worker:
         with self._tasks.modify() as data:
             data.clear()
         # Clear stale PR / task fields from state.json, keep issue fields.
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state.pop("pr_number", None)
             state.pop("pr_title", None)
             state.pop("current_task_id", None)
@@ -2028,7 +2028,7 @@ class Worker:
             pr_number = existing["number"]
             slug = existing["headRefName"]
             pr_title = existing.get("title") or request
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state["pr_number"] = pr_number
                 state["pr_title"] = pr_title
             # Open PR — resume
@@ -2205,7 +2205,7 @@ class Worker:
             slug,
         )
         pr_number = int(url.rstrip("/").split("/")[-1])
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state["pr_number"] = pr_number
             state["pr_title"] = request
 
@@ -3108,7 +3108,7 @@ class Worker:
             collaborators=repo_ctx.collaborators,
             allowed_bots=allowed_bots,
         )
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state.pop("current_task_id", None)
         tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
         self._delete_leaked_task_comments(
@@ -3320,7 +3320,7 @@ class Worker:
             # Clear durable state after both closes succeed so a crash
             # between close_pr and close_issue retries idempotently
             # instead of orphaning a still-open issue.
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state.pop("issue", None)
                 state.pop("issue_title", None)
                 state.pop("issue_started_at", None)
@@ -3537,7 +3537,7 @@ class Worker:
         log.info("task aborted: %s", task_title)
         self.git_clean()
         self._tasks.reset_to_pending(task_id)
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state.pop("current_task_id", None)
         self._abort_task.clear()
         tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
@@ -3623,7 +3623,7 @@ class Worker:
 
     def _task_still_current(self, fido_dir: Path, task_id: str) -> bool:
         """Return true when *task_id* is still the worker's active task."""
-        state_data = State(fido_dir).load()
+        state_data = self._state.load()
         if state_data.get("current_task_id") != task_id:
             return False
         current_task_list = self._tasks.list()
@@ -3689,7 +3689,7 @@ class Worker:
                     + ", ".join(str(comment_id) for comment_id in lineage_ids)
                 )
         state_path = fido_dir / "state.json"
-        state_data = State(fido_dir).load() if state_path.exists() else {}
+        state_data = self._state.load() if state_path.exists() else {}
         issue_number = state_data.get("issue")
         issue_title = ""
         issue_body = ""
@@ -3750,12 +3750,12 @@ class Worker:
         leak_before_ids = self._snapshot_fido_issue_comment_ids(
             repo_ctx.repo, pr_number, repo_ctx.gh_user
         )
-        with State(fido_dir).modify() as state:
+        with self._state.modify() as state:
             state["current_task_id"] = task["id"]
         self._tasks.update(task["id"], TaskStatus.IN_PROGRESS)
         if not self._admit_worker_turn(pr_number):
             self._tasks.update(task["id"], TaskStatus.PENDING)
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state.pop("current_task_id", None)
             return True
         if self._abort_task.is_active_for(task["id"]):
@@ -3784,7 +3784,7 @@ class Worker:
             )
             self._push_committed_work_before_yield(head_before, slug)
             self._tasks.update(task["id"], TaskStatus.PENDING)
-            with State(fido_dir).modify() as state:
+            with self._state.modify() as state:
                 state.pop("current_task_id", None)
             if self._abort_task.is_active_for(task["id"]):
                 log.info("consuming abort signal for preempted task %s", task["id"])
@@ -3822,7 +3822,7 @@ class Worker:
                         pr_number,
                         f"BLOCKED: {outcome.reason}",
                     )
-                    with State(fido_dir).modify() as state:
+                    with self._state.modify() as state:
                         state.pop("current_task_id", None)
                     return True
                 helped_by_identities: list[GitIdentity] = []
@@ -3912,7 +3912,7 @@ class Worker:
                                 "BLOCKED: push to remote failed after "
                                 "retries — manual intervention needed.",
                             )
-                            with State(fido_dir).modify() as state:
+                            with self._state.modify() as state:
                                 state.pop("current_task_id", None)
                             self._delete_leaked_task_comments(
                                 repo_ctx.repo,
@@ -3962,7 +3962,7 @@ class Worker:
                 )
                 self._push_committed_work_before_yield(head_before, slug)
                 self._tasks.update(task["id"], TaskStatus.PENDING)
-                with State(fido_dir).modify() as state:
+                with self._state.modify() as state:
                     state.pop("current_task_id", None)
                 if self._abort_task.is_active_for(task["id"]):
                     log.info("consuming abort signal for preempted task %s", task["id"])
@@ -4145,7 +4145,7 @@ class Worker:
             log.info("PR #%s approved by %s — merging", pr_number, repo_ctx.owner)
             self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True)
             (fido_dir / "tasks.json").write_text("[]")
-            State(fido_dir).clear()
+            self._state.clear()
             self._git(["checkout", repo_ctx.default_branch])
             self._git(
                 ["pull", "origin", repo_ctx.default_branch, "--ff-only"], check=False
@@ -4749,6 +4749,15 @@ class WorkerThread(threading.Thread):
             else provider_factory
         )
         self._state_updater: AtomicUpdater[FidoState] | None = state_updater
+        # Use the registry-owned State so WorkerThread's session-id
+        # persistence (state.json reads/writes around session_id) goes
+        # through the publishing-aware on_mutate hook (#1696).  Tests
+        # without a registry get a bare State with no-op on_mutate.
+        self._state: State = (
+            registry.state_for(repo_name)
+            if registry is not None and repo_name
+            else State(work_dir / ".git" / "fido")
+        )
         self._provider: Provider | None
         if provider is not None:
             self._provider = provider
@@ -4954,7 +4963,7 @@ class WorkerThread(threading.Thread):
         if fido_dir is None:
             return None
         try:
-            data = State(fido_dir).load()
+            data = self._state.load()
         except OSError:
             return None
         sid = data.get("session_id")
@@ -4979,7 +4988,7 @@ class WorkerThread(threading.Thread):
         if fido_dir is None:
             return
         try:
-            with State(fido_dir).modify() as data:
+            with self._state.modify() as data:
                 if data.get("session_id") != sid:
                     data["session_id"] = sid
         except OSError as exc:
@@ -5004,7 +5013,7 @@ class WorkerThread(threading.Thread):
         fido_dir = self._resolve_fido_dir()
         if fido_dir is not None:
             try:
-                with State(fido_dir).modify() as data:
+                with self._state.modify() as data:
                     data.pop("session_id", None)
             except OSError as exc:
                 log.warning(

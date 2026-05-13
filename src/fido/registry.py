@@ -278,6 +278,14 @@ class WorkerRegistry:
             webhook_activities=(),
         )
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
+        # Seed the initial IssueSnapshot from existing on-disk state.json
+        # + tasks.json now that the FidoState entry exists.  Without this
+        # the first publish wouldn't fire until the worker iteration's
+        # finally — which can be slow on resume if session init stalls
+        # (#1696 codex P2 round 4).
+        from fido.worker import publish_repo_snapshot
+
+        publish_repo_snapshot(repo_cfg.work_dir, repo_cfg.name, self)
         thread.start()
         self._publish_thread_snapshot(repo_cfg.name)
         self._publish_provider_snapshot(repo_cfg.name)
