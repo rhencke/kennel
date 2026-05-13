@@ -1227,7 +1227,9 @@ class TestWorker:
         ):
             worker.run()
 
-        registry.publish_issue_snapshot.assert_called_once()
+        # Publishes at iteration start (#1696 codex P1) AND in the
+        # finally block — same data both times for this idle path.
+        assert registry.publish_issue_snapshot.call_count == 2
         repo_name, snapshot = registry.publish_issue_snapshot.call_args.args
         assert repo_name == "owner/repo"
         assert snapshot.issue == 7
@@ -1244,46 +1246,39 @@ class TestWorker:
         """The publish helper bails out cleanly when the worker has no
         registry — covers the construction-time defaults used in unit
         tests that bypass the composition root."""
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
         worker = Worker(tmp_path, MagicMock())  # no registry
-        worker._publish_issue_snapshot(fido_dir)  # pyright: ignore[reportPrivateUsage]
+        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
 
     def test_publish_issue_snapshot_no_op_without_repo_name(
         self, tmp_path: Path
     ) -> None:
         """The publish helper bails out when repo_name is unset — covers
         unit-test scaffolding where the worker is wired up partially."""
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
         registry = MagicMock(spec=ActivityReporter)
         worker = Worker(tmp_path, MagicMock(), repo_name="", registry=registry)
-        worker._publish_issue_snapshot(fido_dir)  # pyright: ignore[reportPrivateUsage]
+        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
         registry.publish_issue_snapshot.assert_not_called()
 
-    def test_publish_issue_snapshot_recovers_from_state_load_error(
+    def test_publish_issue_snapshot_skips_on_state_load_error(
         self, tmp_path: Path
     ) -> None:
-        """Best-effort: a corrupt state.json must not break the publish
-        path — the snapshot still publishes with default state fields."""
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
+        """Codex P2 (#1696): a transient state.json read failure must
+        skip publication so the prior valid snapshot is preserved for
+        status readers — overwriting with empty defaults would erase
+        live data on every transient I/O hiccup."""
         registry = MagicMock(spec=ActivityReporter)
         worker = Worker(
             tmp_path, MagicMock(), repo_name="owner/repo", registry=registry
         )
         with patch("fido.worker.State") as mock_state:
             mock_state.return_value.load.side_effect = RuntimeError("disk")
-            worker._publish_issue_snapshot(fido_dir)  # pyright: ignore[reportPrivateUsage]
-        snapshot = registry.publish_issue_snapshot.call_args.args[1]
-        assert snapshot.issue is None
+            worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
+        registry.publish_issue_snapshot.assert_not_called()
 
-    def test_publish_issue_snapshot_recovers_from_tasks_load_error(
+    def test_publish_issue_snapshot_skips_on_tasks_load_error(
         self, tmp_path: Path
     ) -> None:
-        """Best-effort: a corrupt tasks.json must not break the publish path."""
-        fido_dir = tmp_path / ".git" / "fido"
-        fido_dir.mkdir(parents=True)
+        """Codex P2 (#1696): same preservation guarantee for tasks.json."""
         registry = MagicMock(spec=ActivityReporter)
         tasks = MagicMock()
         tasks.list.side_effect = RuntimeError("disk")
@@ -1294,9 +1289,8 @@ class TestWorker:
             registry=registry,
             _tasks=tasks,
         )
-        worker._publish_issue_snapshot(fido_dir)  # pyright: ignore[reportPrivateUsage]
-        snapshot = registry.publish_issue_snapshot.call_args.args[1]
-        assert snapshot.pending_task_count == 0
+        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
+        registry.publish_issue_snapshot.assert_not_called()
 
     def _publish_with_tasks(
         self, tmp_path: Path, tasks_data: list[dict[str, str]]
@@ -1310,7 +1304,7 @@ class TestWorker:
         worker = Worker(
             tmp_path, MagicMock(), repo_name="owner/repo", registry=registry
         )
-        worker._publish_issue_snapshot(fido_dir)  # pyright: ignore[reportPrivateUsage]
+        worker._publish_issue_snapshot()  # pyright: ignore[reportPrivateUsage]
         return registry.publish_issue_snapshot.call_args.args[1]
 
     def test_publish_issue_snapshot_counts_pending_and_completed(

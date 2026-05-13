@@ -2605,6 +2605,13 @@ def create_task(
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
+    # Refresh the IssueSnapshot so /status.json reflects the new task
+    # immediately — webhook-driven mutations happen between worker
+    # iterations and would otherwise stay invisible until the next
+    # iteration's finally fires (#1696 codex P2).
+    from fido.worker import publish_repo_snapshot
+
+    publish_repo_snapshot(repo_cfg.work_dir, repo_cfg.name, registry, _tasks)
     dispatcher.launch_sync()
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)

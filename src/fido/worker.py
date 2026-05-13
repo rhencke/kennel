@@ -291,6 +291,96 @@ def _sub_dir() -> Path:
     return default_sub_dir()
 
 
+def publish_repo_snapshot(
+    work_dir: Path,
+    repo_name: str,
+    registry: ActivityReporter | None,
+    tasks: Tasks | None = None,
+) -> None:
+    """Refresh *repo_name*'s :class:`IssueSnapshot` in :class:`FidoState`.
+
+    Reads state.json + tasks.json from disk (locks tasks.json briefly,
+    that's fine — collecting state is allowed to block).  Skips
+    publication entirely when either read raises so a transient I/O or
+    parse error never clobbers a previously-valid snapshot for the
+    status renderer (#1696 codex P2).
+
+    Called from:
+
+    - :meth:`Worker.run` at iteration start, end, and on the
+      ``LockHeld`` early-return path — covers the worker-driven mutations.
+    - :func:`fido.events.create_task` after appending a new task —
+      covers webhook-driven mutations that happen between worker
+      iterations.
+
+    Bails out cleanly when ``registry`` is ``None`` or ``repo_name`` is
+    empty (unit-test scaffolding that bypasses the composition root).
+    """
+    from fido.appstate import IssueSnapshot
+
+    if registry is None or not repo_name:
+        return
+    fido_dir = work_dir / ".git" / "fido"
+    try:
+        state_data = State(fido_dir).load()
+    except Exception:  # noqa: BLE001  # don't clobber prior snapshot on transient failure
+        log.warning(
+            "publish_repo_snapshot: failed to load state for %s — keeping prior snapshot",
+            repo_name,
+        )
+        return
+    try:
+        task_list = (tasks or Tasks(work_dir)).list()
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "publish_repo_snapshot: failed to load tasks for %s — keeping prior snapshot",
+            repo_name,
+        )
+        return
+
+    pending = sum(1 for t in task_list if t.get("status") == "pending")
+    completed = sum(1 for t in task_list if t.get("status") == "completed")
+
+    current_task: str | None = None
+    for t in task_list:
+        if t.get("status") == "in_progress":
+            current_task = t.get("title")
+            break
+    if current_task is None:
+        for t in task_list:
+            if t.get("status") == "pending":
+                current_task = t.get("title")
+                break
+
+    non_completed = [t for t in task_list if t.get("status") != "completed"]
+    task_number: int | None = None
+    task_total: int | None = None
+    if non_completed:
+        task_total = len(non_completed)
+        for idx, t in enumerate(non_completed, start=1):
+            if t.get("status") == "in_progress":
+                task_number = idx
+                break
+        if task_number is None:
+            task_number = 1
+
+    registry.publish_issue_snapshot(
+        repo_name,
+        IssueSnapshot(
+            issue=state_data.get("issue"),
+            issue_title=state_data.get("issue_title"),
+            issue_started_at=state_data.get("issue_started_at"),
+            pr_number=state_data.get("pr_number"),
+            pr_title=state_data.get("pr_title"),
+            pending_task_count=pending,
+            completed_task_count=completed,
+            current_task=current_task,
+            task_number=task_number,
+            task_total=task_total,
+        ),
+    )
+
+
 def acquire_lock(fido_dir: Path) -> IO[str]:
     """Acquire the fido lock file exclusively (non-blocking).
 
@@ -4312,84 +4402,32 @@ class Worker:
             ctx = self.create_context()
         except LockHeld:
             log.warning("another fido is running — exiting")
+            # The other process owns the master lock but state.json /
+            # tasks.json reads are independent of it; refresh so status
+            # readers don't go stale during contention (#1696 codex P2).
+            self._publish_issue_snapshot()
             return 2
 
         with ctx:
             log.info("worker started for %s (git_dir=%s)", self.work_dir, ctx.git_dir)
+            # Cold-start + long-iteration coverage: refresh the snapshot
+            # before the iteration starts so status renders immediately,
+            # not blank until the first finally fires (#1696 codex P1).
+            self._publish_issue_snapshot()
 
             self.assert_git_identity(phase="pre")
             try:
                 return self._run_iteration(ctx)
             finally:
                 self.assert_git_identity(phase="post")
-                # Publish the latest issue/PR/task snapshot so the SCADA
-                # status path reads in-memory data instead of state.json
-                # and tasks.json from disk on every request (#1690).
-                self._publish_issue_snapshot(ctx.fido_dir)
+                # Catches mutations made during the iteration (sweep,
+                # task completion, PR transitions, etc.).
+                self._publish_issue_snapshot()
 
-    def _publish_issue_snapshot(self, fido_dir: Path) -> None:
-        """Read state.json + tasks.json once and publish an
-        :class:`IssueSnapshot` to :class:`FidoState`.  Best-effort —
-        a missing or partially-written state file must never break the
-        worker iteration return path.
-
-        Construction lives here (not in :mod:`fido.appstate`) because
-        Worker owns the State and Tasks files this method scrapes.
-        ``IssueSnapshot`` itself is just a frozen dataclass shape.
-        """
-        from fido.appstate import IssueSnapshot
-
-        if self._registry is None or not self._repo_name:
-            return
-        try:
-            state_data = State(fido_dir).load()
-        except Exception:  # noqa: BLE001  # missing/corrupt state.json — fall back to {}
-            state_data = {}
-        try:
-            task_list = self._tasks.list()
-        except Exception:  # noqa: BLE001  # missing/corrupt tasks.json — fall back to []
-            task_list = []
-
-        pending = sum(1 for t in task_list if t.get("status") == "pending")
-        completed = sum(1 for t in task_list if t.get("status") == "completed")
-
-        current_task: str | None = None
-        for t in task_list:
-            if t.get("status") == "in_progress":
-                current_task = t.get("title")
-                break
-        if current_task is None:
-            for t in task_list:
-                if t.get("status") == "pending":
-                    current_task = t.get("title")
-                    break
-
-        non_completed = [t for t in task_list if t.get("status") != "completed"]
-        task_number: int | None = None
-        task_total: int | None = None
-        if non_completed:
-            task_total = len(non_completed)
-            for idx, t in enumerate(non_completed, start=1):
-                if t.get("status") == "in_progress":
-                    task_number = idx
-                    break
-            if task_number is None:
-                task_number = 1
-
-        self._registry.publish_issue_snapshot(
-            self._repo_name,
-            IssueSnapshot(
-                issue=state_data.get("issue"),
-                issue_title=state_data.get("issue_title"),
-                issue_started_at=state_data.get("issue_started_at"),
-                pr_number=state_data.get("pr_number"),
-                pr_title=state_data.get("pr_title"),
-                pending_task_count=pending,
-                completed_task_count=completed,
-                current_task=current_task,
-                task_number=task_number,
-                task_total=task_total,
-            ),
+    def _publish_issue_snapshot(self) -> None:
+        """Refresh this repo's :class:`IssueSnapshot` in :class:`FidoState`."""
+        publish_repo_snapshot(
+            self.work_dir, self._repo_name, self._registry, self._tasks
         )
 
     def _run_iteration(self, ctx: WorkerContext) -> int:
