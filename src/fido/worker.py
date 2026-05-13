@@ -252,6 +252,8 @@ class ActivityReporter(Protocol):
 
     def tasks_for(self, repo_name: str) -> Tasks: ...
 
+    def state_for(self, repo_name: str) -> State: ...
+
 
 class LockHeld(Exception):
     """Raised when the fido lock is already held by another process."""
@@ -293,41 +295,65 @@ def _sub_dir() -> Path:
     return default_sub_dir()
 
 
+_publish_locks: dict[str, threading.Lock] = {}
+_publish_locks_lock = threading.Lock()
+
+
+def _publish_lock_for(repo_name: str) -> threading.Lock:
+    """Return the per-repo publish-serialization lock.
+
+    Concurrent ``Tasks.on_mutate`` / ``State.on_mutate`` callbacks
+    serialize on this lock so the snapshot install order matches the
+    last-acquired-lock order — no stale overwrite race (#1696 codex P2)
+    and no flock-order inversion (#1696 codex P1).  This is a separate
+    lock from the data-file flocks; it is held only across the
+    snapshot build + publish, never around any blocking I/O the
+    callback didn't already do.
+    """
+    with _publish_locks_lock:
+        existing = _publish_locks.get(repo_name)
+        if existing is None:
+            existing = threading.Lock()
+            _publish_locks[repo_name] = existing
+        return existing
+
+
 def publish_repo_snapshot(
     work_dir: Path,
     repo_name: str,
     registry: ActivityReporter | None,
-    *,
-    task_list: list[dict[str, Any]] | None = None,
-    state_data: dict[str, Any] | None = None,
 ) -> None:
     """Refresh *repo_name*'s :class:`IssueSnapshot` in :class:`FidoState`.
 
     Called from three places — all of them automatic, no manual triggers
     in worker / event code:
 
-    - :meth:`fido.tasks.Tasks.on_mutate` after a tasks.json write
-      (passes the just-written list as ``task_list`` to avoid flock
-      recursion)
-    - :meth:`fido.state.State.on_mutate` after a state.json write
-      (passes the just-written dict as ``state_data``)
+    - :meth:`fido.tasks.Tasks.on_mutate` (post-flock-release) after a
+      tasks.json write
+    - :meth:`fido.state.State.on_mutate` (post-flock-release) after a
+      state.json write
     - :meth:`fido.registry.WorkerRegistry.start` to seed the snapshot
-      from existing on-disk state when a repo first comes up (no hints)
+      from existing on-disk state when a repo first comes up
 
-    Whichever side is not supplied is read from disk.  Skips publication
-    entirely when a read raises so a transient I/O or parse error never
-    clobbers a previously-valid snapshot for the status renderer
-    (#1696 codex P2).
+    Always re-reads BOTH state.json and tasks.json fresh — never trusts
+    a hint captured by the caller, because between the caller's flock
+    release and our publish a sibling mutator may have written newer
+    data; we want the LATEST disk state in the snapshot we install
+    (#1696 codex P1: lock-inversion fix; codex P2 round 1: stale-
+    overwrite fix).  The per-repo publish lock serializes concurrent
+    publishers so the last-acquired publish wins deterministically.
 
-    Bails out cleanly when ``registry`` is ``None`` or ``repo_name`` is
-    empty (unit-test scaffolding that bypasses the composition root).
+    Skips publication entirely when a read raises so a transient I/O
+    or parse error never clobbers a previously-valid snapshot for the
+    status renderer.  Bails out cleanly when ``registry`` is ``None``
+    or ``repo_name`` is empty (unit-test scaffolding).
     """
     from fido.appstate import IssueSnapshot
 
     if registry is None or not repo_name:
         return
     fido_dir = work_dir / ".git" / "fido"
-    if state_data is None:
+    with _publish_lock_for(repo_name):
         try:
             state_data = State(fido_dir).load()
         except Exception:  # noqa: BLE001  # don't clobber prior snapshot on transient failure
@@ -336,7 +362,6 @@ def publish_repo_snapshot(
                 repo_name,
             )
             return
-    if task_list is None:
         try:
             task_list = Tasks(work_dir).list()
         except Exception:  # noqa: BLE001
@@ -346,47 +371,47 @@ def publish_repo_snapshot(
             )
             return
 
-    pending = sum(1 for t in task_list if t.get("status") == "pending")
-    completed = sum(1 for t in task_list if t.get("status") == "completed")
+        pending = sum(1 for t in task_list if t.get("status") == "pending")
+        completed = sum(1 for t in task_list if t.get("status") == "completed")
 
-    current_task: str | None = None
-    for t in task_list:
-        if t.get("status") == "in_progress":
-            current_task = t.get("title")
-            break
-    if current_task is None:
+        current_task: str | None = None
         for t in task_list:
-            if t.get("status") == "pending":
+            if t.get("status") == "in_progress":
                 current_task = t.get("title")
                 break
+        if current_task is None:
+            for t in task_list:
+                if t.get("status") == "pending":
+                    current_task = t.get("title")
+                    break
 
-    non_completed = [t for t in task_list if t.get("status") != "completed"]
-    task_number: int | None = None
-    task_total: int | None = None
-    if non_completed:
-        task_total = len(non_completed)
-        for idx, t in enumerate(non_completed, start=1):
-            if t.get("status") == "in_progress":
-                task_number = idx
-                break
-        if task_number is None:
-            task_number = 1
+        non_completed = [t for t in task_list if t.get("status") != "completed"]
+        task_number: int | None = None
+        task_total: int | None = None
+        if non_completed:
+            task_total = len(non_completed)
+            for idx, t in enumerate(non_completed, start=1):
+                if t.get("status") == "in_progress":
+                    task_number = idx
+                    break
+            if task_number is None:
+                task_number = 1
 
-    registry.publish_issue_snapshot(
-        repo_name,
-        IssueSnapshot(
-            issue=state_data.get("issue"),
-            issue_title=state_data.get("issue_title"),
-            issue_started_at=state_data.get("issue_started_at"),
-            pr_number=state_data.get("pr_number"),
-            pr_title=state_data.get("pr_title"),
-            pending_task_count=pending,
-            completed_task_count=completed,
-            current_task=current_task,
-            task_number=task_number,
-            task_total=task_total,
-        ),
-    )
+        registry.publish_issue_snapshot(
+            repo_name,
+            IssueSnapshot(
+                issue=state_data.get("issue"),
+                issue_title=state_data.get("issue_title"),
+                issue_started_at=state_data.get("issue_started_at"),
+                pr_number=state_data.get("pr_number"),
+                pr_title=state_data.get("pr_title"),
+                pending_task_count=pending,
+                completed_task_count=completed,
+                current_task=current_task,
+                task_number=task_number,
+                task_total=task_total,
+            ),
+        )
 
 
 def acquire_lock(fido_dir: Path) -> IO[str]:
@@ -1315,6 +1340,7 @@ class Worker:
         session: PromptSession | None = None,
         session_issue: int | None = None,
         _tasks: Tasks | None = None,
+        _state: State | None = None,
         provider_agent: ProviderAgent | None = None,
         provider: Provider | None = None,
         prompts: Prompts | None = None,
@@ -1347,6 +1373,13 @@ class Worker:
         self._next_turn_session_mode = TurnSessionMode.REUSE
 
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        # Composition root passes the registry-owned State so worker
+        # writes go through the publishing-aware on_mutate hook
+        # (#1696).  Tests bypassing the registry get a bare State
+        # whose on_mutate is a no-op.
+        self._state = (
+            _state if _state is not None else State(work_dir / ".git" / "fido")
+        )
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
@@ -5006,6 +5039,18 @@ class WorkerThread(threading.Thread):
                         provider.agent.attach_session(session)
                 if self._registry is not None:
                     self._registry.publish_provider_snapshot(self._repo_name)
+                # Use the registry-owned Tasks/State so worker writes
+                # go through the publishing-aware on_mutate hooks
+                # rather than bare defaults that bypass the snapshot
+                # publisher (#1696 codex P2 round 2).  Safe because
+                # WorkerThread is only ever started by the registry,
+                # which always seeds the Repo first.
+                if self._registry is not None and self._repo_name:
+                    worker_tasks = self._registry.tasks_for(self._repo_name)
+                    worker_state = self._registry.state_for(self._repo_name)
+                else:
+                    worker_tasks = None
+                    worker_state = None
                 worker = Worker(
                     self.work_dir,
                     self._gh,
@@ -5015,6 +5060,8 @@ class WorkerThread(threading.Thread):
                     self._membership,
                     session=session,
                     session_issue=self._session_issue,
+                    _tasks=worker_tasks,
+                    _state=worker_state,
                     config=self._config,
                     repo_cfg=self._repo_cfg,
                     provider_factory=self._provider_factory,

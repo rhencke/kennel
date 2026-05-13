@@ -342,6 +342,8 @@ class TestWorkerRegistry:
         reg, factory, reader = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))
         repo = reg.repo_for("foo/bar")
+        # state_for shorthand returns the same State instance.
+        assert reg.state_for("foo/bar") is repo.state
 
         repo.state.save(
             {

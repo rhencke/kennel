@@ -27,6 +27,7 @@ from fido.provider import PromptSession, Provider
 from fido.repo import Repo
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
+from fido.state import State
 from fido.tasks import Tasks
 from fido.worker import WorkerThread
 
@@ -249,8 +250,6 @@ class WorkerRegistry:
         # publisher via on_mutate (#1696).  Created here, single
         # instance per repo, so every webhook handler / worker /
         # reorder_tasks gets the same collaborators via :meth:`repo_for`.
-        from fido.state import State  # local import to avoid registry → state cycles
-
         fido_dir = repo_cfg.work_dir / ".git" / "fido"
         self._repos[repo_cfg.name] = Repo(
             name=repo_cfg.name,
@@ -578,6 +577,10 @@ class WorkerRegistry:
     def tasks_for(self, repo_name: str) -> Tasks:
         """Convenience accessor for ``self.repo_for(name).tasks``."""
         return self._repos[repo_name].tasks
+
+    def state_for(self, repo_name: str) -> State:
+        """Convenience accessor for ``self.repo_for(name).state``."""
+        return self._repos[repo_name].state
 
     def get_thread_crash_error(self, repo_name: str) -> str | None:
         """Return the crash_error stored on the thread for *repo_name*, or None."""

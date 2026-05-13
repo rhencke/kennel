@@ -55,14 +55,19 @@ class JsonFileStore(ABC):
         """
 
     def on_mutate(self, data: object) -> None:  # noqa: ARG002
-        """Hook fired after every successful write while still holding the
-        exclusive flock.  Default is a no-op; override in subclasses that
-        need to react to data changes (for example, a publishing subclass
-        that pushes the new value into a SCADA snapshot).
+        """Hook fired after every successful write, *after* the exclusive
+        flock has been released.  Default is a no-op; override in
+        subclasses that need to react to data changes (for example, a
+        publishing subclass that pushes the new value into a SCADA
+        snapshot).
 
-        Holding the flock through this call means concurrent writers
-        serialize on the same lock — the callback observes a consistent
-        post-write state and downstream notifications never reorder.
+        Fires post-release rather than under the flock so the callback
+        is free to acquire other locks (e.g. read a sibling JsonFileStore
+        whose data composes into the same snapshot) without risking
+        lock-order inversion.  Concurrent publishers must serialize via
+        their own mechanism (e.g. a per-repo publish lock); see
+        :func:`fido.worker.publish_repo_snapshot` for the canonical
+        pattern (#1696 codex P1).
         """
 
     @contextmanager
@@ -74,8 +79,8 @@ class JsonFileStore(ABC):
         ``with`` block exits, while the exclusive lock is still held —
         preventing interleaved concurrent modifications.
 
-        Fires :meth:`on_mutate` after the write while still holding the
-        flock.
+        Fires :meth:`on_mutate` *after* the flock is released so the
+        callback can safely acquire other locks (#1696 codex P1).
 
         Raises :exc:`ValueError` if the file contains invalid JSON or if
         :meth:`_validate` rejects the loaded data.
@@ -97,7 +102,11 @@ class JsonFileStore(ABC):
             self._validate(data)
             yield data
             data_path.write_text(json.dumps(data))
-            self.on_mutate(data)
+        # Flock released — safe to fire callbacks that may acquire
+        # other locks (e.g. read a sibling JsonFileStore for snapshot
+        # composition).  Concurrent publishers must serialize via their
+        # own mechanism, not via this flock (#1696 codex P1).
+        self.on_mutate(data)
 
 
 class State(JsonFileStore):
@@ -139,10 +148,17 @@ class State(JsonFileStore):
         """Publish a fresh :class:`~fido.appstate.IssueSnapshot` to
         :class:`~fido.appstate.FidoState` after each state.json mutation.
 
-        Fires under the state.lock flock from :meth:`modify`/:meth:`save`,
-        so concurrent writers serialize on it.  No-op when *registry*
-        or *repo_name* were not supplied at construction."""
-        if self._registry is None or not self._repo_name or not isinstance(data, dict):
+        Fires *after* the state.lock flock is released so the callback
+        can safely read tasks.json (sibling JsonFileStore on a
+        different flock) without lock-order inversion against
+        :meth:`Tasks.on_mutate` (#1696 codex P1).
+        ``publish_repo_snapshot`` re-reads state.json fresh rather than
+        trusting the captured *data* — if a sibling mutator wrote
+        between our flock release and our publish, we want the latest
+        disk view.  Per-repo publish lock serializes concurrent
+        publishers."""
+        del data  # see docstring — re-read happens inside publish_repo_snapshot
+        if self._registry is None or not self._repo_name:
             return
         # Lazy import: state is a leaf module imported broadly.
         from fido.worker import publish_repo_snapshot
@@ -151,7 +167,6 @@ class State(JsonFileStore):
             self._work_dir,
             self._repo_name,
             self._registry,  # pyright: ignore[reportArgumentType]
-            state_data=data,
         )
 
     @property
@@ -185,13 +200,14 @@ class State(JsonFileStore):
         """Write *data* to state.json."""
         with self._flock(exclusive=True):
             self._data_path.write_text(json.dumps(data))
-            self.on_mutate(data)
+        # See JsonFileStore.modify for why on_mutate fires post-release.
+        self.on_mutate(data)
 
     def clear(self) -> None:
         """Remove state.json."""
         with self._flock(exclusive=True):
             self._data_path.unlink(missing_ok=True)
-            self.on_mutate({})
+        self.on_mutate({})
 
 
 def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker

@@ -1012,7 +1012,14 @@ def reorder_tasks(
     # exit while the flock is still held, so concurrent writers
     # serialize on the same lock.
     inprogress_affected = False
+    pre_rescope: list[dict[str, Any]] = []
     with tasks.modify() as current:
+        # Snapshot the pre-rescope list so _compute_thread_changes can
+        # diff against it after the in-place slice-assign below (codex
+        # P2 #1696: comparing post-rescope to itself suppresses
+        # _on_changes notifications for thread tasks Opus completed/
+        # modified).
+        pre_rescope = [dict(t) for t in current]
         inprogress = next(
             (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
         )
@@ -1049,7 +1056,7 @@ def reorder_tasks(
         # branch that's hard to reach in tests now that title
         # preservation by the reducer means rescope rarely produces a
         # material change record (#1388).
-        _on_changes(_compute_thread_changes(current, result, original_ids))
+        _on_changes(_compute_thread_changes(pre_rescope, result, original_ids))
 
     if inprogress_affected and _on_inprogress_affected is not None:
         assert inprogress is not None  # inprogress_affected is True
@@ -1124,22 +1131,27 @@ class Tasks(JsonFileStore):
         """Publish a fresh :class:`~fido.appstate.IssueSnapshot` to
         :class:`~fido.appstate.FidoState` after each task-list mutation.
 
-        Fires from inside :meth:`~JsonFileStore.modify` while the
-        tasks.json flock is still held, so concurrent writers serialize
-        on the same lock and the publish order matches the disk-write
-        order — no stale snapshot can overwrite a newer one.
+        Fires *after* :meth:`~JsonFileStore.modify` releases the
+        tasks.json flock so the callback can safely read the sibling
+        state.json without lock-order inversion (#1696 codex P1).
+        ``publish_repo_snapshot`` re-reads tasks.json fresh rather than
+        trusting the captured *data* — if a sibling mutator wrote
+        between our flock release and our publish, we want their value
+        too so the snapshot we install reflects the *current* disk
+        state, not our pre-release capture.  The per-repo publish lock
+        serializes concurrent publishers; the last one to acquire
+        always sees the latest disk state and wins.
 
         No-op when *registry* or *repo_name* were not supplied at
         construction (tests, one-off CLI use)."""
-        if self._registry is None or not self._repo_name or not isinstance(data, list):
+        del data  # see docstring — re-read happens inside publish_repo_snapshot
+        if self._registry is None or not self._repo_name:
             return
         # Lazy import to avoid a tasks → worker cycle (worker imports
         # from tasks for the task-loop).
         from fido.worker import publish_repo_snapshot
 
-        publish_repo_snapshot(
-            self._work_dir, self._repo_name, self._registry, task_list=data
-        )
+        publish_repo_snapshot(self._work_dir, self._repo_name, self._registry)
 
     def list(self) -> list[dict[str, Any]]:
         """Return all tasks."""
