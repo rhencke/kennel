@@ -237,17 +237,21 @@ explicit theorem in that model.
 ## J. Rescope — task identity is the durable id
 
 **Invariant.** Rescope may reorder tasks, mark them completed, insert new
-ones, and revise mutable metadata (title, description) for an existing
-task id. The thread anchor (`source_comment` / `anchor_comment_id`)
-remains immutable identity for now; that lifts under #1714. The
-durable id is the only invariant identity field.
+ones, revise mutable text metadata (title, description) for an existing
+task id, and re-target the source-comment anchor. The durable task id
+is the only invariant identity field. When the anchor changes, the
+previous anchor is preserved in the task's `lineage_comment_ids` origin
+metadata so reply/resolve paths can still walk back to the original
+commenter.
 
 **Bugs.** #1024 (rescope rewrote thread-task titles, collapsing
 unrelated tasks). The "collapse" half is fixed by **#1665** (distinct
 comments at the add boundary always produce distinct tasks — lineage is
 no longer a dedup join key); the "rewrote titles" half is now an
 intentional capability under **#1713** (title flows through the
-reducer as mutable metadata for an existing id).
+reducer as mutable metadata for an existing id). The thread anchor
+joins the mutable-metadata camp under **#1714** (RewriteAnchor in the
+reducer; lineage preservation in the Python adapter).
 
 **Status.** Modeled in **D11 (#749) — model rescope confluence**.
 The original "title is immutable" framing has been reshaped by epic

@@ -115,11 +115,18 @@ class RewriteTask(RescopeOp):
 
 @final
 @dataclass(frozen=True)
+class RewriteAnchor(RescopeOp):
+    task: int
+    new_anchor: int | None
+
+
+@final
+@dataclass(frozen=True)
 class CompleteTask(RescopeOp):
     task: int
 
 
-RescopeOpT = KeepTask | RewriteTask | CompleteTask
+RescopeOpT = KeepTask | RewriteTask | RewriteAnchor | CompleteTask
 
 
 class RescopeReleaseKind:
@@ -501,6 +508,8 @@ def rescope_task_id(op: RescopeOp) -> int:
             return task
         case RewriteTask(task, new_title, new_description):
             return task
+        case RewriteAnchor(task, new_anchor):
+            return task
         case CompleteTask(task):
             return task
         case __impossible:
@@ -580,6 +589,22 @@ def apply_rescope_op(
                     row,
                     title=new_title,
                     description=new_description,
+                )
+                return (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(task),
+                            row_,
+                            rows,
+                        ),
+                        pending_ids + [task],
+                    ),
+                    completed_ids,
+                )
+            case RewriteAnchor(task0, new_anchor):
+                row_ = replace(
+                    row,
+                    source_comment=new_anchor,
                 )
                 return (
                     (
@@ -780,42 +805,6 @@ def task_metadata_changed(
     if task_title_changed(before_row, after_row):
         return True
     return task_description_changed(before_row, after_row)
-
-
-def task_source_comment_changed(
-    before_source: int | None,
-    after_source: int | None,
-) -> bool:
-    return before_source != after_source
-
-
-def task_identity_changed(
-    before_row: TaskRow,
-    after_row: TaskRow,
-) -> bool:
-    before_source = before_row.source_comment
-    after_source = after_row.source_comment
-    return task_source_comment_changed(before_source, after_source)
-
-
-def rescope_preserves_task_identity(
-    snapshot_order: list[int],
-    rows_before: dict[int, TaskRow],
-    rows_after: dict[int, TaskRow],
-) -> bool:
-    for task in snapshot_order:
-        __option = rows_before.get(_rocq_positive_key(task))
-        if __option is None:
-            continue
-        before_row = __option
-        __option = rows_after.get(_rocq_positive_key(task))
-        if __option is None:
-            return False
-        after_row = __option
-        if task_identity_changed(before_row, after_row):
-            return False
-        continue
-    return True
 
 
 def apply_rescope(

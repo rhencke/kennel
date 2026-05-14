@@ -1020,6 +1020,178 @@ class TestApplyReorder:
         result = _apply_reorder([t], items)
         assert result[0]["thread"] == thread
 
+    def test_applies_anchor_change_and_preserves_old_in_lineage(self) -> None:
+        # #1714: rescope can rewrite a task's source-comment anchor for an
+        # existing task id.  The previous anchor moves into
+        # lineage_comment_ids so reply-back paths can still walk back to
+        # the original commenter; the new anchor becomes the primary
+        # comment_id reply/resolve paths read.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [
+            {"id": "1", "title": "Thread task", "anchor_comment_id": 99},
+        ]
+        result = _apply_reorder([t], items)
+        new_thread = result[0]["thread"]
+        assert new_thread["comment_id"] == 99
+        # Old anchor preserved as origin metadata; new anchor also present.
+        lineage = new_thread["lineage_comment_ids"]
+        assert 42 in lineage
+        assert 99 in lineage
+        # Identity is the durable id, unchanged.
+        assert result[0]["id"] == "1"
+
+    def test_anchor_change_keeps_existing_lineage_intact(self) -> None:
+        # If lineage already lists earlier related comments, the anchor
+        # change extends rather than replaces.
+        thread = {
+            "repo": "a/b",
+            "pr": 1,
+            "comment_id": 42,
+            "lineage_comment_ids": [10, 42],
+        }
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 99}]
+        result = _apply_reorder([t], items)
+        lineage = result[0]["thread"]["lineage_comment_ids"]
+        assert lineage == [10, 42, 99]
+
+    def test_anchor_change_takes_precedence_over_text_rewrite(self) -> None:
+        # The model carries one op per task per batch.  When item asks for
+        # both anchor and text changes, the adapter emits RewriteAnchor
+        # (anchor is structural — it re-targets the reply destination).
+        # Title/description changes ride the next rescope iteration.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Old title", task_type="thread", description="old desc")
+        t["thread"] = thread
+        items = [
+            {
+                "id": "1",
+                "title": "New title",
+                "description": "new desc",
+                "anchor_comment_id": 99,
+            },
+        ]
+        result = _apply_reorder([t], items)
+        assert result[0]["thread"]["comment_id"] == 99
+        # Title/description deferred; existing values still in place.
+        assert result[0]["title"] == "Old title"
+        assert result[0]["description"] == "old desc"
+
+    def test_anchor_unchanged_skips_lineage_mutation(self) -> None:
+        # If the proposed anchor equals the existing one, no thread mutation
+        # happens — the apply path stays a KeepTask / RewriteTask only.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 42}]
+        result = _apply_reorder([t], items)
+        assert result[0]["thread"] == thread
+
+    def test_anchor_on_non_thread_task_falls_through_to_text_rewrite(self) -> None:
+        # codex on #1731: a spec task has no thread metadata; an
+        # anchor_comment_id from Opus on it is garbage and must not
+        # suppress a legitimate title/description rewrite.  Without this
+        # gate the elif chain would emit RewriteAnchor against a task
+        # with no thread to update, dropping the text change silently.
+        current = [self._t("1", "Old title", description="old desc")]  # spec, no thread
+        items = [
+            {
+                "id": "1",
+                "title": "New title",
+                "description": "new desc",
+                "anchor_comment_id": 99,
+            },
+        ]
+        result = _apply_reorder(current, items)
+        assert result[0]["title"] == "New title"
+        assert result[0]["description"] == "new desc"
+        assert "thread" not in result[0]
+
+    def test_invalid_anchor_id_falls_through_to_text_rewrite(self) -> None:
+        # codex on #1731: GitHub comment ids are positive non-bool ints.
+        # Reject 0, negatives, booleans (which inherit from int in Python),
+        # and non-int values.  Falling through means the text rewrite still
+        # applies and a bogus anchor is never persisted.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Old title", task_type="thread", description="old")
+        t["thread"] = thread
+        for bad_anchor in (True, False, 0, -1, "99", 1.0, None):
+            items = [
+                {
+                    "id": "1",
+                    "title": "New title",
+                    "description": "new",
+                    "anchor_comment_id": bad_anchor,
+                },
+            ]
+            result = _apply_reorder([dict(t)], items)
+            assert result[0]["thread"]["comment_id"] == 42, (
+                f"bogus anchor {bad_anchor!r} should not overwrite"
+            )
+            assert result[0]["title"] == "New title", (
+                f"bogus anchor {bad_anchor!r} should not suppress text rewrite"
+            )
+
+    def test_anchor_change_drops_stale_per_comment_thread_fields(self) -> None:
+        # codex on #1731: url, author, path, line, diff_hunk, lineage_key
+        # all describe the OLD anchor.  Once the anchor moves they no
+        # longer apply — drop them so worker code can't read stale data
+        # (wrong URL, mis-attributed author).  Lane-level fields (repo,
+        # pr, comment_type) and the lineage list survive.  comment_type
+        # in particular is preserved because _notify_thread_change reads
+        # it to choose the GitHub API; defaulting it to 'issues' would
+        # silently drop review-thread notifications (codex #2 on #1731).
+        thread = {
+            "repo": "a/b",
+            "pr": 1,
+            "comment_id": 42,
+            "comment_type": "pulls",
+            "url": "https://github.com/a/b/pull/1#discussion_r42",
+            "author": "old-commenter",
+            "path": "x.py",
+            "line": 10,
+            "diff_hunk": "@@",
+            "lineage_key": "pulls:a/b:1:thread:42",
+            "lineage_comment_ids": [42],
+        }
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 99}]
+        result = _apply_reorder([t], items)
+        new_thread = result[0]["thread"]
+        assert new_thread["comment_id"] == 99
+        assert new_thread["repo"] == "a/b"
+        assert new_thread["pr"] == 1
+        assert new_thread["comment_type"] == "pulls"
+        assert new_thread["lineage_comment_ids"] == [42, 99]
+        for stale in ("url", "author", "path", "line", "diff_hunk", "lineage_key"):
+            assert stale not in new_thread, (
+                f"{stale} described the old anchor and must be dropped"
+            )
+
+    def test_materializer_normalizes_anchor_comparison(self) -> None:
+        # codex on #1731: a no-op rescope (Opus's anchor matches the
+        # existing one, expressed as int) against a legacy '42'-string
+        # anchor in tasks.json must NOT trip the re-anchor path; without
+        # int-normalized comparison we'd drop url/author/etc. metadata
+        # for an anchor change that didn't actually happen.
+        thread = {
+            "repo": "a/b",
+            "pr": 1,
+            "comment_id": "42",  # legacy string form
+            "url": "https://github.com/a/b/pull/1#discussion_r42",
+            "author": "commenter",
+        }
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 42}]
+        result = _apply_reorder([t], items)
+        # Thread metadata stays put — no anchor change happened.
+        assert result[0]["thread"] == thread
+
     def test_applies_duplicate_titles_at_apply_reorder_layer(self) -> None:
         # _apply_reorder is the low-level reducer; uniqueness is enforced
         # upstream by the rescope nudge loop in reorder_tasks(), not here
@@ -1649,6 +1821,87 @@ class TestReorderTasks:
         # task still in_progress (unchanged by Opus)
         result = Tasks(tmp_path).list()
         assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
+
+    def test_on_inprogress_affected_not_called_when_anchor_id_type_only_differs(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1731: anchor comparison runs through
+        # _task_source_comment_for_oracle (int(comment_id)) so a legacy
+        # str id ('42') in tasks.json compares equal to the
+        # oracle-materialized 42.  Without normalization, a spurious
+        # type-mismatch would abort the in-progress turn.
+        thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": "42",  # legacy string form
+        }
+        t1 = Tasks(tmp_path).add(
+            title="Thread task", task_type=TaskType.THREAD, thread=thread
+        )
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        # Same anchor, expressed as int — must compare equal.
+        raw = self._response(
+            [
+                {
+                    "id": t1["id"],
+                    "title": "Thread task",
+                    "description": "",
+                    "anchor_comment_id": 42,
+                },
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == []
+        result = Tasks(tmp_path).list()
+        assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
+
+    def test_on_inprogress_affected_called_when_anchor_changes(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1731: anchor-only rewrites must trigger the
+        # in-progress affected callback too.  A worker turn that began
+        # under the old anchor must not finish under the new one — the
+        # task gets reset to pending and the worker re-picks it under
+        # the new anchor.
+        thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 42,
+            "url": "https://example.com/c42",
+            "author": "old-commenter",
+        }
+        t1 = Tasks(tmp_path).add(
+            title="Thread task", task_type=TaskType.THREAD, thread=thread
+        )
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        # Same title and description; only anchor differs.
+        raw = self._response(
+            [
+                {
+                    "id": t1["id"],
+                    "title": "Thread task",
+                    "description": "",
+                    "anchor_comment_id": 99,
+                },
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == [t1["id"]]
+        result = Tasks(tmp_path).list()
+        assert result[0]["status"] == str(TaskStatus.PENDING)
+        assert result[0]["thread"]["comment_id"] == 99
 
     def test_on_inprogress_affected_not_called_when_no_inprogress_task(
         self, tmp_path: Path

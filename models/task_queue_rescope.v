@@ -66,13 +66,16 @@ Record ExecutionLease : Type := {
     provider output before comparing against the model.
 
     D11 treats the task id as the only immutable identity for an existing
-    snapped task.  [RewriteTask] applies both [new_title] and [new_description]
-    to the existing row — the title is mutable metadata, like description
-    (#1713).  [source_comment] remains immutable for now; its mutability moves
-    under #1714. *)
+    snapped task — title (#1713) and source-comment anchor (#1714) are both
+    mutable metadata.  [RewriteTask] applies title and description.
+    [RewriteAnchor] applies a new source-comment anchor; the Python adapter
+    is responsible for preserving the previous anchor in the task's
+    [lineage_comment_ids] origin metadata so reply/resolve paths can still
+    reach earlier commenters. *)
 Inductive RescopeOp : Type :=
 | KeepTask (task : positive) : RescopeOp
 | RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
+| RewriteAnchor (task : positive) (new_anchor : option positive) : RescopeOp
 | CompleteTask (task : positive) : RescopeOp.
 
 (** [RescopeReleaseKind] distinguishes the accumulated worker releases that
@@ -348,6 +351,7 @@ Definition rescope_task_id (op : RescopeOp) : positive :=
   match op with
   | KeepTask task => task
   | RewriteTask task _ _ => task
+  | RewriteAnchor task _ => task
   | CompleteTask task => task
   end.
 
@@ -419,6 +423,17 @@ Definition apply_rescope_op
           kind := kind row;
           status := status row;
           source_comment := source_comment row
+        |} in
+        (PositiveMap.add task row' rows,
+          List.app pending_ids [task],
+          completed_ids)
+    | RewriteAnchor _ new_anchor =>
+        let row' := {|
+          title := title row;
+          description := description row;
+          kind := kind row;
+          status := status row;
+          source_comment := new_anchor
         |} in
         (PositiveMap.add task row' rows,
           List.app pending_ids [task],
@@ -537,41 +552,14 @@ Definition task_metadata_changed (before_row after_row : TaskRow) : bool :=
   else
     task_description_changed before_row after_row.
 
-Definition task_source_comment_changed
-    (before_source after_source : option positive) : bool :=
-  match before_source, after_source with
-  | Some before, Some after => negb (Pos.eqb before after)
-  | None, None => false
-  | _, _ => true
-  end.
-
-(** [task_identity_changed] captures the D11 invariant boundary: rescope may
-    reorder tasks, complete tasks, or revise mutable task text including the
-    title (#1713), but it may not rewrite the source-comment anchor of an
-    existing task.  Source-comment mutability moves under #1714. *)
-Definition task_identity_changed
-    (before_row after_row : TaskRow) : bool :=
-  let before_source := source_comment before_row in
-  let after_source := source_comment after_row in
-  task_source_comment_changed before_source after_source.
-
-Fixpoint rescope_preserves_task_identity
-    (snapshot_order : list positive)
-    (rows_before rows_after : PositiveMap.t TaskRow) : bool :=
-  match snapshot_order with
-  | [] => true
-  | task :: rest =>
-      match PositiveMap.find task rows_before,
-            PositiveMap.find task rows_after with
-      | Some before_row, Some after_row =>
-          if task_identity_changed before_row after_row then
-            false
-          else
-            rescope_preserves_task_identity rest rows_before rows_after
-      | Some _, None => false
-      | _, _ => rescope_preserves_task_identity rest rows_before rows_after
-      end
-  end.
+(** Identity is the durable task id (#1340).  Title (#1713) and source-comment
+    anchor (#1714) are both mutable metadata.  The previous
+    [task_identity_changed] / [rescope_preserves_task_identity] predicates are
+    gone — id is preserved by construction (it's the lookup key), so there is
+    no separate identity invariant for the reducer to enforce.  Lineage
+    preservation when the anchor changes is the Python adapter's
+    responsibility (it merges the previous anchor into [lineage_comment_ids]
+    on the task dict, which is metadata outside the modeled [TaskRow]). *)
 
 (** [apply_rescope] applies explicit keep/rewrite/complete decisions to a
     snapped queue while preserving post-snapshot additions and completed rows. *)
@@ -807,4 +795,4 @@ Definition task_still_pending
   end.
 
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch task_identity_changed rescope_preserves_task_identity apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending".

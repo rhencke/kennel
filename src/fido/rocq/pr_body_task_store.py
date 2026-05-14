@@ -107,11 +107,18 @@ class RewriteTask(RescopeOp):
 
 @final
 @dataclass(frozen=True)
+class RewriteAnchor(RescopeOp):
+    task: int
+    new_anchor: int | None
+
+
+@final
+@dataclass(frozen=True)
 class CompleteTask(RescopeOp):
     task: int
 
 
-RescopeOpT = KeepTask | RewriteTask | CompleteTask
+RescopeOpT = KeepTask | RewriteTask | RewriteAnchor | CompleteTask
 
 
 def find_comment_duplicate(
@@ -236,6 +243,8 @@ def rescope_task_id(op: RescopeOp) -> int:
             return task
         case RewriteTask(task, new_title, new_description):
             return task
+        case RewriteAnchor(task, new_anchor):
+            return task
         case CompleteTask(task):
             return task
         case __impossible:
@@ -265,6 +274,22 @@ def apply_rescope_op(
                     row,
                     title=new_title,
                     description=new_description,
+                )
+                return (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(task),
+                            row_,
+                            rows,
+                        ),
+                        pending_ids + [task],
+                    ),
+                    completed_ids,
+                )
+            case RewriteAnchor(task0, new_anchor):
+                row_ = replace(
+                    row,
+                    source_comment=new_anchor,
                 )
                 return (
                     (

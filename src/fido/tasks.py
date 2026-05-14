@@ -181,6 +181,16 @@ def _existing_titles_by_id(current: list[dict[str, Any]]) -> dict[str, str]:
     return {t["id"]: t.get("title", "") for t in current if "id" in t}
 
 
+def _is_valid_anchor_id(value: object) -> bool:
+    """A GitHub comment id is a positive 64-bit int.
+
+    Reject ``bool`` explicitly even though it inherits from ``int``, so a
+    ``"anchor_comment_id": true`` payload from the LLM doesn't become a
+    real anchor write.  Zero and negative values are likewise rejected.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _effective_title(item: dict[str, Any], existing_by_id: dict[str, str]) -> str:
     """Compute the title that this rescope item will land as on disk.
 
@@ -366,11 +376,30 @@ def _rescope_releases_for_oracle(
         else:
             existing_title = task.get("title", "")
             existing_description = task.get("description", "")
+            existing_anchor = _task_source_comment_for_oracle(task)
             new_title = _effective_title(item, existing_by_id)
             new_description = (
                 item["description"] if "description" in item else existing_description
             )
-            if new_title != existing_title or new_description != existing_description:
+            # #1714: anchor change takes precedence over text rewrites when
+            # the task already has a thread — anchor is structural (re-
+            # targets the reply destination).  If Opus also asked for
+            # title/description rewrites alongside the anchor change, they
+            # ride the next rescope iteration.  An ``anchor_comment_id`` on
+            # a non-thread task is garbage and is ignored — fall through
+            # to the text path.  A non-positive or boolean value is also
+            # garbage (Python's ``bool`` is a subclass of ``int``; GitHub
+            # comment ids are positive 64-bit ints).  The materialization
+            # step preserves the previous anchor in lineage_comment_ids.
+            if (
+                isinstance(task.get("thread"), dict)
+                and _is_valid_anchor_id(item.get("anchor_comment_id"))
+                and item["anchor_comment_id"] != existing_anchor
+            ):
+                decision = rescope_oracle.RewriteAnchor(
+                    oracle_id, item["anchor_comment_id"]
+                )
+            elif new_title != existing_title or new_description != existing_description:
                 decision = rescope_oracle.RewriteTask(
                     oracle_id, new_title, new_description
                 )
@@ -399,8 +428,68 @@ def _materialize_rescope_oracle_result(
             task["status"] = str(TaskStatus.BLOCKED)
         else:
             task["status"] = task.get("status", str(TaskStatus.PENDING))
+        # #1714: when rescope changes the source-comment anchor, sync the
+        # task's thread metadata.  The previous anchor moves into
+        # lineage_comment_ids (preserved as origin metadata so reply-back
+        # paths can still walk back to the original commenter) and the
+        # new anchor becomes the primary comment_id reply/resolve paths
+        # read.  Identity is the durable task id; anchor is mutable
+        # metadata.  We only re-target to a non-None int — the adapter
+        # never emits RewriteAnchor with None, and clearing a thread
+        # task's anchor isn't a supported use case in #1714 scope.
+        existing_thread = task.get("thread")
+        new_anchor = row.source_comment
+        # Compare via _task_source_comment_for_oracle so a legacy ``'42'``
+        # string in tasks.json compares equal to the oracle-materialized
+        # ``42`` (codex on #1731).  Without normalization a no-op rescope
+        # would still trip the re-anchor path and drop per-comment
+        # metadata even though the anchor didn't actually change.
+        if (
+            isinstance(existing_thread, dict)
+            and isinstance(new_anchor, int)
+            and new_anchor != _task_source_comment_for_oracle(task)
+        ):
+            task["thread"] = _reanchored_thread(existing_thread, new_anchor)
         materialized.append(task)
     return materialized
+
+
+def _reanchored_thread(
+    existing_thread: dict[str, Any], new_anchor: int
+) -> dict[str, Any]:
+    """Return a copy of ``existing_thread`` re-anchored to ``new_anchor``.
+
+    Per-comment fields populated from the old anchor (``url``, ``author``,
+    review-thread ``path`` / ``line`` / ``diff_hunk``, the legacy
+    ``lineage_key`` chain identifier) are dropped because they no longer
+    describe the new anchor.  Worker code that needs them must re-fetch
+    via the new ``comment_id`` rather than read stale metadata.
+
+    ``comment_type`` is preserved.  It tags the lane (``"pulls"`` for
+    review-thread comments, ``"issues"`` for top-level PR/issue comments)
+    and ``_notify_thread_change`` reads it to choose the correct GitHub
+    API for the rescope reply — a missing value defaults to ``"issues"``
+    and silently drops review-thread notifications.  In #1714 scope the
+    soft adapter contract (``anchor_comment_id``) carries no kind hint;
+    re-anchors are assumed to stay within the same lane.  Cross-lane
+    re-anchoring needs an explicit kind in the rescope item, which is
+    #1247 territory.
+    """
+    refreshed = {
+        key: value
+        for key, value in existing_thread.items()
+        if key not in _STALE_AFTER_REANCHOR
+    }
+    refreshed["comment_id"] = new_anchor
+    refreshed["lineage_comment_ids"] = list(
+        dict.fromkeys([*_thread_lineage_comment_ids(existing_thread), new_anchor])
+    )
+    return refreshed
+
+
+_STALE_AFTER_REANCHOR = frozenset(
+    {"url", "author", "lineage_key", "path", "line", "diff_hunk"}
+)
 
 
 def _assert_rescope_matches_oracle(
@@ -1089,17 +1178,26 @@ def reorder_tasks(
             # The omission ⇒ completed branch is gone (#1357 case A): the
             # rescope reducer now uses KeepTask for omitted snapshot tasks,
             # so the in-progress task always survives the rescope at its
-            # current status.  The only remaining trigger for
-            # _on_inprogress_affected is an explicit modification of the
-            # task's title or description by Opus, which resets the task
-            # to pending so the worker re-picks it under the new scope.
+            # current status.  Triggers for _on_inprogress_affected are
+            # explicit modifications by Opus that change the task's
+            # contract: title, description, or — under #1714 — the
+            # source-comment anchor.  Anchor change is structural (it re-
+            # targets the reply destination), so a worker turn that began
+            # under the old anchor must not finish under the new one.
             inprogress_in_result = next(
                 (t for t in result if t["id"] == inprogress["id"]), None
             )
+            # Compare anchors via _task_source_comment_for_oracle so a
+            # legacy ``'42'`` string in tasks.json compares equal to the
+            # oracle-materialized ``42`` (codex on #1731): int(comment_id)
+            # normalization on both sides means spurious type-mismatch
+            # aborts can't fire.
             if inprogress_in_result is not None and (
                 inprogress_in_result.get("title") != inprogress.get("title")
                 or inprogress_in_result.get("description")
                 != inprogress.get("description")
+                or _task_source_comment_for_oracle(inprogress_in_result)
+                != _task_source_comment_for_oracle(inprogress)
             ):
                 inprogress_affected = True
                 inprogress_in_result["status"] = str(TaskStatus.PENDING)
