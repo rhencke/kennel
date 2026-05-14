@@ -1090,6 +1090,83 @@ class TestApplyReorder:
         result = _apply_reorder([t], items)
         assert result[0]["thread"] == thread
 
+    def test_anchor_on_non_thread_task_falls_through_to_text_rewrite(self) -> None:
+        # codex on #1731: a spec task has no thread metadata; an
+        # anchor_comment_id from Opus on it is garbage and must not
+        # suppress a legitimate title/description rewrite.  Without this
+        # gate the elif chain would emit RewriteAnchor against a task
+        # with no thread to update, dropping the text change silently.
+        current = [self._t("1", "Old title", description="old desc")]  # spec, no thread
+        items = [
+            {
+                "id": "1",
+                "title": "New title",
+                "description": "new desc",
+                "anchor_comment_id": 99,
+            },
+        ]
+        result = _apply_reorder(current, items)
+        assert result[0]["title"] == "New title"
+        assert result[0]["description"] == "new desc"
+        assert "thread" not in result[0]
+
+    def test_invalid_anchor_id_falls_through_to_text_rewrite(self) -> None:
+        # codex on #1731: GitHub comment ids are positive non-bool ints.
+        # Reject 0, negatives, booleans (which inherit from int in Python),
+        # and non-int values.  Falling through means the text rewrite still
+        # applies and a bogus anchor is never persisted.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Old title", task_type="thread", description="old")
+        t["thread"] = thread
+        for bad_anchor in (True, False, 0, -1, "99", 1.0, None):
+            items = [
+                {
+                    "id": "1",
+                    "title": "New title",
+                    "description": "new",
+                    "anchor_comment_id": bad_anchor,
+                },
+            ]
+            result = _apply_reorder([dict(t)], items)
+            assert result[0]["thread"]["comment_id"] == 42, (
+                f"bogus anchor {bad_anchor!r} should not overwrite"
+            )
+            assert result[0]["title"] == "New title", (
+                f"bogus anchor {bad_anchor!r} should not suppress text rewrite"
+            )
+
+    def test_anchor_change_drops_stale_per_comment_thread_fields(self) -> None:
+        # codex on #1731: url, author, path, line, diff_hunk, lineage_key
+        # all describe the OLD anchor.  Once the anchor moves they no
+        # longer apply — drop them so worker code can't read stale data
+        # (wrong URL, mis-attributed author).  Lane-level fields (repo,
+        # pr) and the lineage list survive.
+        thread = {
+            "repo": "a/b",
+            "pr": 1,
+            "comment_id": 42,
+            "url": "https://github.com/a/b/pull/1#discussion_r42",
+            "author": "old-commenter",
+            "path": "x.py",
+            "line": 10,
+            "diff_hunk": "@@",
+            "lineage_key": "pulls:a/b:1:thread:42",
+            "lineage_comment_ids": [42],
+        }
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 99}]
+        result = _apply_reorder([t], items)
+        new_thread = result[0]["thread"]
+        assert new_thread["comment_id"] == 99
+        assert new_thread["repo"] == "a/b"
+        assert new_thread["pr"] == 1
+        assert new_thread["lineage_comment_ids"] == [42, 99]
+        for stale in ("url", "author", "path", "line", "diff_hunk", "lineage_key"):
+            assert stale not in new_thread, (
+                f"{stale} described the old anchor and must be dropped"
+            )
+
     def test_applies_duplicate_titles_at_apply_reorder_layer(self) -> None:
         # _apply_reorder is the low-level reducer; uniqueness is enforced
         # upstream by the rescope nudge loop in reorder_tasks(), not here

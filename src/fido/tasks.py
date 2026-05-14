@@ -181,6 +181,16 @@ def _existing_titles_by_id(current: list[dict[str, Any]]) -> dict[str, str]:
     return {t["id"]: t.get("title", "") for t in current if "id" in t}
 
 
+def _is_valid_anchor_id(value: object) -> bool:
+    """A GitHub comment id is a positive 64-bit int.
+
+    Reject ``bool`` explicitly even though it inherits from ``int``, so a
+    ``"anchor_comment_id": true`` payload from the LLM doesn't become a
+    real anchor write.  Zero and negative values are likewise rejected.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _effective_title(item: dict[str, Any], existing_by_id: dict[str, str]) -> str:
     """Compute the title that this rescope item will land as on disk.
 
@@ -371,17 +381,24 @@ def _rescope_releases_for_oracle(
             new_description = (
                 item["description"] if "description" in item else existing_description
             )
-            proposed_anchor = item.get("anchor_comment_id")
-            # #1714: anchor change takes precedence over text rewrites.
-            # The model only carries one op per task per batch — anchor
-            # change is structural (re-targets the reply destination), so
-            # if Opus also asked for title/description rewrites alongside
-            # the anchor change, they ride the next rescope iteration.
-            # The materialization step below preserves the previous anchor
-            # in lineage_comment_ids so reply-back paths can still reach
-            # the original commenter.
-            if isinstance(proposed_anchor, int) and proposed_anchor != existing_anchor:
-                decision = rescope_oracle.RewriteAnchor(oracle_id, proposed_anchor)
+            # #1714: anchor change takes precedence over text rewrites when
+            # the task already has a thread — anchor is structural (re-
+            # targets the reply destination).  If Opus also asked for
+            # title/description rewrites alongside the anchor change, they
+            # ride the next rescope iteration.  An ``anchor_comment_id`` on
+            # a non-thread task is garbage and is ignored — fall through
+            # to the text path.  A non-positive or boolean value is also
+            # garbage (Python's ``bool`` is a subclass of ``int``; GitHub
+            # comment ids are positive 64-bit ints).  The materialization
+            # step preserves the previous anchor in lineage_comment_ids.
+            if (
+                isinstance(task.get("thread"), dict)
+                and _is_valid_anchor_id(item.get("anchor_comment_id"))
+                and item["anchor_comment_id"] != existing_anchor
+            ):
+                decision = rescope_oracle.RewriteAnchor(
+                    oracle_id, item["anchor_comment_id"]
+                )
             elif new_title != existing_title or new_description != existing_description:
                 decision = rescope_oracle.RewriteTask(
                     oracle_id, new_title, new_description
@@ -427,16 +444,38 @@ def _materialize_rescope_oracle_result(
             and isinstance(new_anchor, int)
             and new_anchor != existing_thread.get("comment_id")
         ):
-            thread = dict(existing_thread)
-            thread["comment_id"] = new_anchor
-            thread["lineage_comment_ids"] = list(
-                dict.fromkeys(
-                    [*_thread_lineage_comment_ids(existing_thread), new_anchor]
-                )
-            )
-            task["thread"] = thread
+            task["thread"] = _reanchored_thread(existing_thread, new_anchor)
         materialized.append(task)
     return materialized
+
+
+def _reanchored_thread(
+    existing_thread: dict[str, Any], new_anchor: int
+) -> dict[str, Any]:
+    """Return a copy of ``existing_thread`` re-anchored to ``new_anchor``.
+
+    Per-comment fields populated from the old anchor (``url``, ``author``,
+    review-thread ``path`` / ``line`` / ``diff_hunk``, the legacy
+    ``lineage_key`` chain identifier) are dropped because they no longer
+    describe the new anchor.  Worker code that needs them must re-fetch
+    via the new ``comment_id`` rather than read stale metadata.
+    Lane-level fields (``repo``, ``pr``) and the lineage are preserved.
+    """
+    refreshed = {
+        key: value
+        for key, value in existing_thread.items()
+        if key not in _STALE_AFTER_REANCHOR
+    }
+    refreshed["comment_id"] = new_anchor
+    refreshed["lineage_comment_ids"] = list(
+        dict.fromkeys([*_thread_lineage_comment_ids(existing_thread), new_anchor])
+    )
+    return refreshed
+
+
+_STALE_AFTER_REANCHOR = frozenset(
+    {"url", "author", "lineage_key", "path", "line", "diff_hunk"}
+)
 
 
 def _assert_rescope_matches_oracle(
