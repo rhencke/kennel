@@ -17,6 +17,7 @@ def _row(
         kind=kind,
         status=status,
         source_comment=None,
+        lineage_comments=[],
     )
 
 

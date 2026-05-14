@@ -64,6 +64,7 @@ def test_fresh_ci_failure_creates_first_pickup_task() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     snapshot = _snapshot(10)
 
@@ -132,6 +133,7 @@ def test_human_resume_restores_retry_task() -> None:
             kind=oracle.TaskCI(),
             status=oracle.StatusBlocked(),
             source_comment=None,
+            lineage_comments=[],
         )
     }
 

@@ -887,6 +887,7 @@ def _ci_oracle_task_rows(
             kind=_ci_oracle_task_kind(task),
             status=_ci_oracle_task_status(task),
             source_comment=int(comment_id) if comment_id is not None else None,
+            lineage_comments=[],
         )
     return order, rows
 
