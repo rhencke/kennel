@@ -460,6 +460,32 @@ def test_no_eviction_when_outstanding_set_but_no_talker(
     )
 
 
+def test_force_release_clears_outstanding_send_at() -> None:
+    """``force_release`` clears ``outstanding_send_at`` before any new
+    acquire can happen (#1710 codex round 2 P1).
+
+    The evicted holder's eventual ``__exit__`` skips the normal
+    ``_fsm_release`` via the ``_evicted_tids`` guard, so the clear
+    inside ``_fsm_release`` doesn't run for evicted holders.  Without
+    a clear in ``force_release`` itself, a new acquirer would inherit
+    the prior turn's stale timestamp and the watchdog could evict
+    them before they sent anything.
+    """
+    # Build a real OwnedSession in OwnedByWorker so ForceRelease has
+    # somewhere to evict from.
+    session = _RecordingSession("FidoCanCode/home")
+    session._fsm_acquire_worker()  # noqa: SLF001
+    session._mark_send_outstanding()  # noqa: SLF001
+    assert session.outstanding_send_at is not None
+    # Override the recording stub's force_release to call the real one
+    # (the recorder otherwise short-circuits to just append to its log).
+    OwnedSession.force_release(session, reason="test wedge")  # type: ignore[arg-type]
+    assert session.outstanding_send_at is None, (
+        "force_release must disarm the no-reply clock so a "
+        "freshly-acquired successor isn't evicted on stale silence"
+    )
+
+
 def test_release_clears_outstanding_send_at(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_fsm_release`` clears ``outstanding_send_at`` so a stale armed
     timestamp from an aborted turn never survives lock release (#1710

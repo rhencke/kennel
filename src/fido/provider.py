@@ -1023,6 +1023,18 @@ class OwnedSession:
                     reason,
                 )
                 return False
+            # Disarm the no-reply watchdog clock as part of the
+            # eviction (#1710 codex round 2 P1).  The evicted holder's
+            # eventual ``__exit__`` returns early via the
+            # ``_evicted_tids`` guard in :meth:`_fsm_release` and so
+            # would skip the clear there — but a subsequent acquire
+            # could happen before that escape and inherit the stale
+            # armed timestamp, causing the watchdog to evict the new
+            # holder based on the prior turn's silence.  Clearing
+            # here, under the FSM lock, guarantees the clock is
+            # disarmed before any new holder can acquire.
+            with self._outstanding_send_lock:
+                self._outstanding_send_at = None
             # Capture the evicted holder's identity before mutating any
             # state.  ``_repo_name`` may be None on test stubs; in that
             # case there is no global talker to consult and we fall back
