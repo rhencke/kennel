@@ -320,13 +320,27 @@ FROM python-test-base AS test
 
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 
-# Per-worker virtual-address-space cap (RLIMIT_AS).  Inherited by every
-# xdist worker subprocess — a leaky worker crashes with MemoryError or
-# can't-start-new-thread instead of OOM-killing the buildkit daemon.
-# 16 GiB AS per process leaves plenty of headroom for thread stack
-# reservations under Python 3.14t free-threading (each thread reserves
-# 8 MiB virtual via RLIMIT_STACK; with hundreds of concurrent threads
-# across xdist workers the AS use is dominated by stack reservation,
-# not heap).  The cap exists to bound runaway leaks, not to be tight.
+# Three guards on the in-bake pytest run:
+#
+# 1. ``timeout 600`` — 10-minute wall clock.  buildx RUN has no native
+#    timeout, so a deadlocked test (e.g. a livelock that holds the GIL
+#    forever) would otherwise block until the outer GHA / pre-commit
+#    timeout.  Match the host-side cap that ``./fido tests`` used to
+#    apply via ``run_fido_pyproject_image_capped``.
+# 2. ``prlimit --as=`` — per-process virtual address space cap
+#    (RLIMIT_AS).  Inherited by every xdist worker subprocess — a leaky
+#    worker crashes with MemoryError or can't-start-new-thread instead
+#    of OOM-killing the buildkit daemon (the original #1248 concern).
+#    16 GiB AS leaves plenty of headroom for thread stack reservations
+#    under Python 3.14t free-threading; the cap is there to bound
+#    runaway leaks, not to be tight.
+# 3. ``python -m fido.tests_main`` (not bare ``pytest``) — keeps the
+#    project's wrappers active: cap xdist at 2 workers (so total in-
+#    flight memory stays bounded; -n auto on a many-CPU runner would
+#    multiply the AS budget by CPU count) and enforce
+#    ``--cov-fail-under=100`` (codex on the prlimit PR caught both as
+#    regressions).
+#
 # prlimit ships in util-linux, installed in python-base.
-RUN prlimit --as=$((16 * 1024 * 1024 * 1024)) -- ./pyproject pytest
+RUN timeout --foreground 600 prlimit --as=$((16 * 1024 * 1024 * 1024)) -- \
+    ./pyproject python -m fido.tests_main

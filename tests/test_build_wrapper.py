@@ -1043,7 +1043,12 @@ class TestModelDockerfile:
         # the bake graph runs everything, and a second ``./fido ci``
         # with no source changes hits the layer cache.
         assert "prlimit --as=" in dockerfile
-        assert "./pyproject pytest" in dockerfile
+        # tests_main keeps the xdist cap (-n 2) and the
+        # --cov-fail-under=100 gate that bare ``pytest`` would skip.
+        assert "python -m fido.tests_main" in dockerfile
+        # ``timeout`` bounds wall-clock to keep deadlocked tests from
+        # blocking the outer GHA / pre-commit timeout.
+        assert "timeout --foreground" in dockerfile
         assert '"$repo_root/fido" tests' not in launcher
         assert "FROM scratch AS ci" not in dockerfile
         assert "touch /tmp" not in dockerfile
