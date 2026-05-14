@@ -381,21 +381,33 @@ def _rescope_releases_for_oracle(
             new_description = (
                 item["description"] if "description" in item else existing_description
             )
-            # #1714: anchor change takes precedence over text rewrites when
-            # the task already has a thread — anchor is structural (re-
-            # targets the reply destination).  If Opus also asked for
-            # title/description rewrites alongside the anchor change, they
-            # ride the next rescope iteration.  An ``anchor_comment_id`` on
-            # a non-thread task is garbage and is ignored — fall through
-            # to the text path.  A non-positive or boolean value is also
-            # garbage (Python's ``bool`` is a subclass of ``int``; GitHub
-            # comment ids are positive 64-bit ints).  The materialization
-            # step preserves the previous anchor in lineage_comment_ids.
-            if (
+            # Op precedence (most structural first):
+            #   1. Explicit completion (#1716): item.status == "completed".
+            #      Removes the task — strictly more structural than any
+            #      metadata change, so it preempts the others.  Omission
+            #      still means keep-as-is (#1357), not delete.
+            #   2. Anchor rewrite (#1714): re-targets the reply destination.
+            #   3. Text rewrite (#1713): title/description.
+            #   4. KeepTask: nothing changed.
+            #
+            # The model carries one op per task per batch, so a combined
+            # request rides multiple rescope iterations — the highest-
+            # precedence change lands first.
+            if item.get("status") == str(TaskStatus.COMPLETED):
+                decision: rescope_oracle.RescopeOp = rescope_oracle.CompleteTask(
+                    oracle_id
+                )
+            elif (
                 isinstance(task.get("thread"), dict)
                 and _is_valid_anchor_id(item.get("anchor_comment_id"))
                 and item["anchor_comment_id"] != existing_anchor
             ):
+                # An ``anchor_comment_id`` on a non-thread task is garbage
+                # and is ignored — fall through to the text path.  A non-
+                # positive or boolean value is also garbage (Python's
+                # ``bool`` is a subclass of ``int``; GitHub comment ids
+                # are positive 64-bit ints).  The materialization step
+                # preserves the previous anchor in lineage_comment_ids.
                 decision = rescope_oracle.RewriteAnchor(
                     oracle_id, item["anchor_comment_id"]
                 )
@@ -1254,14 +1266,12 @@ def reorder_tasks(
             )
             if inprogress is not None:
                 # The omission ⇒ completed branch is gone (#1357 case A): the
-                # rescope reducer now uses KeepTask for omitted snapshot tasks,
-                # so the in-progress task always survives the rescope at its
-                # current status.  Triggers for _on_inprogress_affected are
-                # explicit modifications by Opus that change the task's
-                # contract: title, description, or — under #1714 — the
-                # source-comment anchor.  Anchor change is structural (it re-
-                # targets the reply destination), so a worker turn that began
-                # under the old anchor must not finish under the new one.
+                # rescope reducer now uses KeepTask for omitted snapshot
+                # tasks, so the in-progress task always survives the rescope
+                # at its current status.  Triggers for _on_inprogress_affected
+                # are explicit modifications by Opus that change the task's
+                # contract: title, description, source-comment anchor (#1714),
+                # or — under #1716 — explicit completion.
                 inprogress_in_result = next(
                     (t for t in result if t["id"] == inprogress["id"]), None
                 )
@@ -1270,19 +1280,37 @@ def reorder_tasks(
                 # oracle-materialized ``42`` (codex on #1731): int(comment_id)
                 # normalization on both sides means spurious type-mismatch
                 # aborts can't fire.
-                if inprogress_in_result is not None and (
-                    inprogress_in_result.get("title") != inprogress.get("title")
-                    or inprogress_in_result.get("description")
-                    != inprogress.get("description")
-                    or _task_source_comment_for_oracle(inprogress_in_result)
-                    != _task_source_comment_for_oracle(inprogress)
-                ):
-                    inprogress_affected = True
-                    inprogress_in_result["status"] = str(TaskStatus.PENDING)
-                    log.info(
-                        "reorder_tasks: in-progress task modified by Opus — reset to pending: %s",
-                        inprogress_in_result.get("title", "")[:60],
+                if inprogress_in_result is not None:
+                    completed_by_rescope = inprogress_in_result.get("status") == str(
+                        TaskStatus.COMPLETED
                     )
+                    text_or_anchor_changed = (
+                        inprogress_in_result.get("title") != inprogress.get("title")
+                        or inprogress_in_result.get("description")
+                        != inprogress.get("description")
+                        or _task_source_comment_for_oracle(inprogress_in_result)
+                        != _task_source_comment_for_oracle(inprogress)
+                    )
+                    if completed_by_rescope or text_or_anchor_changed:
+                        inprogress_affected = True
+                        if completed_by_rescope:
+                            # #1716: explicit completion — the task is done;
+                            # the worker just needs to abort its now-stale
+                            # turn.  Don't reset to pending.
+                            log.info(
+                                "reorder_tasks: in-progress task explicitly "
+                                "completed by Opus — aborting turn: %s",
+                                inprogress_in_result.get("title", "")[:60],
+                            )
+                        else:
+                            # Text/anchor change: reset to pending so the
+                            # worker re-picks under the new scope.
+                            inprogress_in_result["status"] = str(TaskStatus.PENDING)
+                            log.info(
+                                "reorder_tasks: in-progress task modified by "
+                                "Opus — reset to pending: %s",
+                                inprogress_in_result.get("title", "")[:60],
+                            )
             # Slice-assign so JsonFileStore.modify writes the recomputed
             # list back (it persists the same dict/list object it yielded).
             current[:] = result
