@@ -1634,10 +1634,11 @@ class TestReorderTasks:
         # Durable list is byte-for-byte identical to pre-call state.
         assert Tasks(tmp_path).list() == before
 
-    def test_invalid_batch_calls_on_done(self, tmp_path: Path) -> None:
-        # Even when validation rejects, _on_done still fires so callers
-        # can clean up (e.g. release a one-shot lock).  Only the commit
-        # and the post-commit notifications are skipped.
+    def test_invalid_batch_skips_on_done(self, tmp_path: Path) -> None:
+        # codex on #1733: _on_done's contract is "post-successful reorder."
+        # Production wires it to sync_tasks (git push) and
+        # _rewrite_pr_description (GitHub API write); firing on rejection
+        # would cause unnecessary churn for invalid Opus output.
         t1 = self._add(tmp_path, "Original")
         raw = self._response([{"id": "ghost-999", "title": "hallucinated"}])
         done_calls: list[int] = []
@@ -1647,7 +1648,7 @@ class TestReorderTasks:
             agent=_client(raw),
             _on_done=lambda: done_calls.append(1),
         )
-        assert done_calls == [1]
+        assert done_calls == []
         assert Tasks(tmp_path).list()[0]["title"] == t1["title"]
 
     def test_invalid_batch_skips_on_changes_callback(self, tmp_path: Path) -> None:

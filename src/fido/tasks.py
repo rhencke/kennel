@@ -1288,8 +1288,10 @@ def reorder_tasks(
             current[:] = result
 
     if rejected:
-        if _on_done is not None:
-            _on_done()
+        # _on_done's contract is "post-successful reorder" — production wires
+        # it to sync_tasks (git push) and _rewrite_pr_description (GitHub API
+        # write).  Neither makes sense after a rejection: nothing committed,
+        # nothing to sync.  Skip every post-commit callback (codex on #1733).
         return
 
     if _on_changes is not None:
