@@ -1981,6 +1981,26 @@ class TestValidateRescopeBatch:
         items = [{"id": None, "title": "Brand new"}]
         assert _validate_rescope_batch(current, items) == []
 
+    def test_null_id_with_falsy_non_list_merge_sources_is_rejected(self) -> None:
+        # codex follow-up on #1738: presence-and-value check catches
+        # malformed-but-falsy values (``""``, ``0``, ``False``) that
+        # truthiness would let slip through.  Empty list stays accepted
+        # as the documented "no merge" sentinel.
+        current = [self._t("a")]
+        for bad in ("", 0, False, "string-not-list", 42):
+            items = [{"id": None, "title": "new", "merge_sources": bad}]
+            errors = _validate_rescope_batch(current, items)
+            assert any("null/missing id" in e for e in errors), (
+                f"merge_sources={bad!r} on null id should be rejected"
+            )
+
+    def test_null_id_with_empty_list_merge_sources_is_accepted(self) -> None:
+        # The empty-list sentinel is the documented "no merge" no-op
+        # and stays accepted on a null-id new task.
+        current = [self._t("a")]
+        items = [{"id": None, "title": "Brand new", "merge_sources": []}]
+        assert _validate_rescope_batch(current, items) == []
+
     def test_same_source_into_multiple_targets_is_rejected(self) -> None:
         # codex Medium on #1738: a source feeding multiple targets
         # duplicates its lineage into each, which is split/rebuild

@@ -1112,7 +1112,15 @@ def _validate_rescope_batch(
             # notification.  The source vanishes without lineage being
             # preserved anywhere.  Until new-target merge is implemented
             # end-to-end (a separate leaf), reject the shape.
-            if item.get("merge_sources"):
+            #
+            # Use presence + value check rather than truthiness: a
+            # malformed-but-falsy value (``""``, ``0``, ``False``) on
+            # the merge_sources key still violates the fail-closed
+            # contract — merge_sources is present but not a list, so the
+            # whole rescope batch must reject, not partially apply (codex
+            # follow-up on #1738).  The empty-list sentinel ``[]`` is
+            # the documented "no merge" no-op and stays accepted.
+            if "merge_sources" in item and item["merge_sources"] != []:
                 errors.append(
                     f"item[{index}].merge_sources on a null/missing id: "
                     "merging into a not-yet-created task isn't implemented "
