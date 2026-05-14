@@ -1181,16 +1181,17 @@ def reorder_tasks(
             inprogress_in_result = next(
                 (t for t in result if t["id"] == inprogress["id"]), None
             )
-
-            def _thread_anchor(task: dict[str, Any]) -> object:
-                thread = task.get("thread")
-                return thread.get("comment_id") if isinstance(thread, dict) else None
-
+            # Compare anchors via _task_source_comment_for_oracle so a
+            # legacy ``'42'`` string in tasks.json compares equal to the
+            # oracle-materialized ``42`` (codex on #1731): int(comment_id)
+            # normalization on both sides means spurious type-mismatch
+            # aborts can't fire.
             if inprogress_in_result is not None and (
                 inprogress_in_result.get("title") != inprogress.get("title")
                 or inprogress_in_result.get("description")
                 != inprogress.get("description")
-                or _thread_anchor(inprogress_in_result) != _thread_anchor(inprogress)
+                or _task_source_comment_for_oracle(inprogress_in_result)
+                != _task_source_comment_for_oracle(inprogress)
             ):
                 inprogress_affected = True
                 inprogress_in_result["status"] = str(TaskStatus.PENDING)

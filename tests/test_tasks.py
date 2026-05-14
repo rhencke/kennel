@@ -1807,6 +1807,45 @@ class TestReorderTasks:
         result = Tasks(tmp_path).list()
         assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
 
+    def test_on_inprogress_affected_not_called_when_anchor_id_type_only_differs(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1731: anchor comparison runs through
+        # _task_source_comment_for_oracle (int(comment_id)) so a legacy
+        # str id ('42') in tasks.json compares equal to the
+        # oracle-materialized 42.  Without normalization, a spurious
+        # type-mismatch would abort the in-progress turn.
+        thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": "42",  # legacy string form
+        }
+        t1 = Tasks(tmp_path).add(
+            title="Thread task", task_type=TaskType.THREAD, thread=thread
+        )
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        # Same anchor, expressed as int — must compare equal.
+        raw = self._response(
+            [
+                {
+                    "id": t1["id"],
+                    "title": "Thread task",
+                    "description": "",
+                    "anchor_comment_id": 42,
+                },
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == []
+        result = Tasks(tmp_path).list()
+        assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
+
     def test_on_inprogress_affected_called_when_anchor_changes(
         self, tmp_path: Path
     ) -> None:
