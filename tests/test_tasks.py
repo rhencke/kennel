@@ -846,15 +846,18 @@ class TestApplyReorder:
         result = _apply_reorder(current, items)
         assert [t["id"] for t in result] == ["1", "2"]
 
-    def test_preserves_title_from_opus(self) -> None:
+    def test_applies_title_from_opus_for_existing_id(self) -> None:
+        # #1713: title is mutable metadata for an existing task id.
         current = [self._t("1", "Old title")]
         items = [self._item("1", "New title")]
         result = _apply_reorder(current, items)
-        assert result[0]["title"] == "Old title"
+        assert result[0]["title"] == "New title"
 
     def test_preserves_title_when_opus_returns_empty(self) -> None:
+        # An empty/missing title is treated as "Opus didn't supply a rename"
+        # — preserves the existing title rather than overwriting with "".
         current = [self._t("1", "Original title")]
-        items = [self._item("1", "")]  # empty title → don't overwrite
+        items = [self._item("1", "")]
         result = _apply_reorder(current, items)
         assert result[0]["title"] == "Original title"
 
@@ -884,11 +887,13 @@ class TestApplyReorder:
         assert result[0]["id"] == "1"
 
     def test_ignores_duplicate_id_from_opus(self) -> None:
+        # First occurrence wins; the second item with the same id is ignored.
+        # The title from the first item is applied (#1713).
         current = [self._t("1", "Task")]
         items = [self._item("1", "Task v1"), self._item("1", "Task v2")]
         result = _apply_reorder(current, items)
         assert len([t for t in result if t["id"] == "1"]) == 1
-        assert result[0]["title"] == "Task"
+        assert result[0]["title"] == "Task v1"
 
     def test_ci_tasks_always_first(self) -> None:
         current = [
@@ -979,14 +984,18 @@ class TestApplyReorder:
         result = _apply_reorder([t], items)
         assert result[0]["thread"] == thread
 
-    def test_preserves_titles_when_opus_proposes_duplicates(self) -> None:
+    def test_applies_duplicate_titles_at_apply_reorder_layer(self) -> None:
+        # _apply_reorder is the low-level reducer; uniqueness is enforced
+        # upstream by the rescope nudge loop in reorder_tasks(), not here
+        # (#1713).  At this layer, whatever titles Opus proposed are applied.
         current = [self._t("1", "Alpha task"), self._t("2", "Beta task")]
         items = [self._item("1", "Shared name"), self._item("2", "Shared name")]
         result = _apply_reorder(current, items)
-        assert next(t for t in result if t["id"] == "1")["title"] == "Alpha task"
-        assert next(t for t in result if t["id"] == "2")["title"] == "Beta task"
+        assert next(t for t in result if t["id"] == "1")["title"] == "Shared name"
+        assert next(t for t in result if t["id"] == "2")["title"] == "Shared name"
 
-    def test_unique_title_rewrites_are_ignored(self) -> None:
+    def test_unique_title_rewrites_are_applied(self) -> None:
+        # #1713: title rewrites for existing task ids flow through.
         current = [self._t("1", "Old A"), self._t("2", "Old B"), self._t("3", "Old C")]
         items = [
             self._item("1", "New A"),
@@ -995,26 +1004,20 @@ class TestApplyReorder:
         ]
         result = _apply_reorder(current, items)
         titles = {t["id"]: t["title"] for t in result}
-        assert titles == {"1": "Old A", "2": "Old B", "3": "Old C"}
-
-    def test_duplicate_title_rewrites_do_not_log_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        current = [self._t("1", "Alpha task"), self._t("2", "Beta task")]
-        items = [self._item("1", "Shared name"), self._item("2", "Shared name")]
-        _apply_reorder(current, items)
-        assert "rejecting rewrite" not in caplog.text
+        assert titles == {"1": "New A", "2": "New B", "3": "New C"}
 
     def test_fails_closed_when_runtime_result_diverges_from_oracle(self) -> None:
+        # The oracle now applies title rewrites, so the "wrong" runtime
+        # result must differ on something it doesn't apply — use status.
         current = [self._t("1", "Original")]
-        bad_result = [self._t("1", "Changed")]
+        diverged = [self._t("1", "Original", status="completed")]
 
         with pytest.raises(AssertionError, match="diverged"):
             _assert_rescope_matches_oracle(
                 current,
-                [self._item("1", "Changed")],
+                [self._item("1", "Original")],
                 {"1"},
-                bad_result,
+                diverged,
             )
 
     def test_creates_new_task_from_opus_null_id(self) -> None:
@@ -1320,13 +1323,15 @@ class TestReorderTasks:
         assert result[0]["id"] == t1["id"]
         assert result[1]["id"] == t2["id"]
 
-    def test_preserves_title_from_opus(self, tmp_path: Path) -> None:
+    def test_applies_title_from_opus_for_existing_id(self, tmp_path: Path) -> None:
+        # #1713: title is mutable for an existing task id; the rewrite
+        # flows end-to-end through reorder_tasks.
         t1 = self._add(tmp_path, "Old title")
         raw = self._response(
             [{"id": t1["id"], "title": "New title", "description": ""}]
         )
         reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
-        assert Tasks(tmp_path).list()[0]["title"] == "Old title"
+        assert Tasks(tmp_path).list()[0]["title"] == "New title"
 
     def test_keeps_task_opus_excludes(self, tmp_path: Path) -> None:
         """#1357: end-to-end — reorder_tasks must not mark a task completed
@@ -1435,10 +1440,8 @@ class TestReorderTasks:
         self, tmp_path: Path
     ) -> None:
         """Pure description rewrites (title preserved) do not fire a
-        reply-back to the commenter.  The reducer currently preserves
-        titles across rescope, so Opus's "Changed title" gets dropped and
-        only the description update lands — that's an internal rephrasing,
-        not a contract change worth notifying the reviewer about (#1388)."""
+        reply-back to the commenter — internal rephrasing isn't a contract
+        change worth notifying the reviewer about (#1388)."""
         thread = {
             "repo": "r/r",
             "pr": 1,
@@ -1452,7 +1455,7 @@ class TestReorderTasks:
         )
         received: list = []
         raw = self._response(
-            [{"id": t1["id"], "title": "Changed title", "description": "new"}]
+            [{"id": t1["id"], "title": "Stable title", "description": "new"}]
         )
         reorder_tasks(
             Tasks(tmp_path),
@@ -1461,11 +1464,39 @@ class TestReorderTasks:
             _on_changes=lambda changes: received.extend(changes),
         )
         assert received == []
-        # The description still gets written; only the reply-back is
-        # suppressed.  Verify the task list reflects the description edit.
         task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
         assert task1["description"] == "new"
         assert task1["title"] == "Stable title"
+
+    def test_on_changes_fires_when_rescope_rewrites_title(self, tmp_path: Path) -> None:
+        """#1713: title is mutable; a title rewrite by Opus is a contract
+        change for thread tasks and notifies the original commenter."""
+        thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 99,
+            "url": "https://example.com",
+        }
+        t1 = Tasks(tmp_path).add(
+            title="Old title",
+            task_type=TaskType.THREAD,
+            thread=thread,
+        )
+        received: list = []
+        raw = self._response(
+            [{"id": t1["id"], "title": "New title", "description": ""}]
+        )
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_changes=lambda changes: received.extend(changes),
+        )
+        assert len(received) == 1
+        assert received[0]["kind"] == "modified"
+        assert received[0]["new_title"] == "New title"
+        task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
+        assert task1["title"] == "New title"
 
     def test_on_changes_not_called_when_no_thread_tasks_changed(
         self, tmp_path: Path
@@ -1525,6 +1556,8 @@ class TestReorderTasks:
     def test_on_inprogress_affected_called_when_inprogress_task_modified(
         self, tmp_path: Path
     ) -> None:
+        # #1713: title is mutable; the rewrite is applied alongside the
+        # in-progress reset-to-pending + abort signal.
         t1 = self._add(tmp_path, "Stable title")
         Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
         raw = self._response(
@@ -1538,9 +1571,8 @@ class TestReorderTasks:
             _on_inprogress_affected=lambda _task_id: affected.append(1),
         )
         assert affected == [1]
-        # task reset to pending with preserved title and updated description
         result = Tasks(tmp_path).list()
-        assert result[0]["title"] == "Stable title"
+        assert result[0]["title"] == "Changed title"
         assert result[0]["description"] == "new"
         assert result[0]["status"] == str(TaskStatus.PENDING)
 
@@ -1650,16 +1682,16 @@ class TestReorderTasks:
         assert done_calls == []
 
     def test_nudges_when_opus_proposes_duplicate_titles(self, tmp_path: Path) -> None:
+        # The nudge succeeds and produces unique titles, which then flow
+        # through (#1713 made title mutable for an existing task id).
         t1 = self._add(tmp_path, "Alpha")
         t2 = self._add(tmp_path, "Beta")
-        # First response has duplicate titles
         dup_response = self._response(
             [
                 {"id": t1["id"], "title": "Shared name", "description": ""},
                 {"id": t2["id"], "title": "Shared name", "description": ""},
             ]
         )
-        # Nudge response has unique titles
         fixed_response = self._response(
             [
                 {"id": t1["id"], "title": "Fixed Alpha", "description": ""},
@@ -1677,12 +1709,15 @@ class TestReorderTasks:
         )
         assert client.run_turn.call_count == 2
         tasks = Tasks(tmp_path).list()
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
-        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Fixed Alpha"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Fixed Beta"
 
-    def test_falls_back_silently_when_nudge_still_has_duplicates(
+    def test_falls_back_to_proposed_titles_when_nudge_still_has_duplicates(
         self, tmp_path: Path
     ) -> None:
+        # When all nudge attempts still yield duplicate titles, the proposed
+        # titles are applied anyway (#1713) — uniqueness during rewrites is
+        # best-effort via the nudge, not a hard constraint.
         t1 = self._add(tmp_path, "Alpha")
         t2 = self._add(tmp_path, "Beta")
         dup_response = self._response(
@@ -1692,17 +1727,15 @@ class TestReorderTasks:
             ]
         )
         client = _client()
-        # All 3 nudge responses still have duplicates → exhaust all retries
         client.run_turn.side_effect = [dup_response] * 4
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
-        # All 3 nudges fired (1 initial + 3 nudge calls = 4 total)
         assert client.run_turn.call_count == 4
         tasks = Tasks(tmp_path).list()
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
-        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Shared name"
 
     def test_attempts_remaining_decrements_across_nudges(self, tmp_path: Path) -> None:
         from unittest.mock import call
@@ -1728,9 +1761,11 @@ class TestReorderTasks:
         assert calls[1] == call(["Shared name"], attempts_remaining=1)
         assert calls[2] == call(["Shared name"], attempts_remaining=0)
 
-    def test_proceeds_with_original_when_nudge_returns_empty(
+    def test_proceeds_with_pre_nudge_titles_when_nudge_returns_empty(
         self, tmp_path: Path
     ) -> None:
+        # An empty nudge response stops the retry loop and the most recent
+        # parseable proposal (the duplicate one) is applied (#1713).
         t1 = self._add(tmp_path, "Alpha")
         t2 = self._add(tmp_path, "Beta")
         dup_response = self._response(
@@ -1746,12 +1781,13 @@ class TestReorderTasks:
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         tasks = Tasks(tmp_path).list()
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
-        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Shared name"
 
-    def test_proceeds_with_original_when_nudge_response_unparseable(
+    def test_proceeds_with_pre_nudge_titles_when_nudge_response_unparseable(
         self, tmp_path: Path
     ) -> None:
+        # Unparseable nudge response: same fallback as empty (#1713).
         t1 = self._add(tmp_path, "Alpha")
         t2 = self._add(tmp_path, "Beta")
         dup_response = self._response(
@@ -1767,8 +1803,8 @@ class TestReorderTasks:
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         tasks = Tasks(tmp_path).list()
-        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
-        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Shared name"
 
     def test_no_nudge_when_titles_all_unique(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "Alpha")

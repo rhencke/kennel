@@ -326,16 +326,23 @@ def _rescope_releases_for_oracle(
             # explicit-completion path; omission here just means Opus didn't
             # speak for this task on this iteration.
             decision: rescope_oracle.RescopeOp = rescope_oracle.KeepTask(oracle_id)
-        elif "description" in item and item["description"] != task.get(
-            "description", ""
-        ):
-            decision = rescope_oracle.RewriteTask(
-                oracle_id,
-                task.get("title", ""),
-                item["description"],
-            )
         else:
-            decision = rescope_oracle.KeepTask(oracle_id)
+            existing_title = task.get("title", "")
+            existing_description = task.get("description", "")
+            # #1713: title is mutable metadata for an existing task id.  Opus's
+            # title flows through the reducer.  An empty/missing title in the
+            # rescope item preserves the existing one — empty title is treated
+            # as "Opus didn't supply a rename" rather than as a real rename.
+            new_title = item.get("title") or existing_title
+            new_description = (
+                item["description"] if "description" in item else existing_description
+            )
+            if new_title != existing_title or new_description != existing_description:
+                decision = rescope_oracle.RewriteTask(
+                    oracle_id, new_title, new_description
+                )
+            else:
+                decision = rescope_oracle.KeepTask(oracle_id)
         releases.append(
             rescope_oracle.RescopeRelease(rescope_oracle.ReleaseACT(), decision)
         )
@@ -801,8 +808,10 @@ def _apply_reorder(
     - Tasks added after the original snapshot (IDs not in the snapshot) are
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
-    - Description is updated from Opus's output; title and thread anchor are
-      immutable task identity and are preserved.
+    - Title and description are updated from Opus's output for an existing
+      task id (#1713 made title mutable); thread anchor is still preserved
+      (#1714 will lift that).
+    - Task identity is the durable task id, not title text or thread anchor.
     - Opus-returned IDs outside the snapshot or duplicated are ignored.
     - Opus-returned items with a null or absent id are treated as new tasks
       and inserted after existing pending tasks (before completed tasks).
@@ -963,9 +972,11 @@ def reorder_tasks(
 
     # Nudge Opus up to _RESCOPE_MAX_NUDGES times if it proposed duplicate
     # titles.  Each turn runs in the same conversation so the model sees its
-    # prior responses and the remaining-attempt count in each nudge.
-    # If duplicates remain after all nudges, _apply_reorder still preserves
-    # immutable task titles while applying any description/order changes.
+    # prior responses and the remaining-attempt count in each nudge.  If
+    # duplicates remain after all nudges, the proposed titles are still
+    # applied (#1713 made title mutable).  Uniqueness during rewrites is
+    # best-effort via the nudge — the durable invariant is on enqueueing
+    # new tasks (find_pending_title_duplicate in the oracle), not on edits.
     for nudge_attempt in range(_RESCOPE_MAX_NUDGES):
         duplicates = _find_duplicate_titles(ordered_items)
         if not duplicates:

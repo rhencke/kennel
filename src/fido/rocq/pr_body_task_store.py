@@ -263,6 +263,7 @@ def apply_rescope_op(
             case RewriteTask(task0, new_title, new_description):
                 row_ = replace(
                     row,
+                    title=new_title,
                     description=new_description,
                 )
                 return (

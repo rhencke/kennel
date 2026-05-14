@@ -65,10 +65,11 @@ Record ExecutionLease : Type := {
     task.  The handwritten adapter can derive these from today's omission-based
     provider output before comparing against the model.
 
-    D11 treats [title] and [source_comment] as immutable task
-    identity.  [RewriteTask] still carries a title because today's Python
-    proposal shape includes one, but the modeled transition must ignore that
-    field and may only revise mutable task text. *)
+    D11 treats the task id as the only immutable identity for an existing
+    snapped task.  [RewriteTask] applies both [new_title] and [new_description]
+    to the existing row — the title is mutable metadata, like description
+    (#1713).  [source_comment] remains immutable for now; its mutability moves
+    under #1714. *)
 Inductive RescopeOp : Type :=
 | KeepTask (task : positive) : RescopeOp
 | RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
@@ -411,9 +412,9 @@ Definition apply_rescope_op
     match op with
     | KeepTask _ =>
         (rows, List.app pending_ids [task], completed_ids)
-    | RewriteTask _ _ new_description =>
+    | RewriteTask _ new_title new_description =>
         let row' := {|
-          title := title row;
+          title := new_title;
           description := new_description;
           kind := kind row;
           status := status row;
@@ -545,16 +546,14 @@ Definition task_source_comment_changed
   end.
 
 (** [task_identity_changed] captures the D11 invariant boundary: rescope may
-    reorder tasks, complete tasks, or revise mutable task text, but it may not
-    rewrite the existing task title or source-comment anchor. *)
+    reorder tasks, complete tasks, or revise mutable task text including the
+    title (#1713), but it may not rewrite the source-comment anchor of an
+    existing task.  Source-comment mutability moves under #1714. *)
 Definition task_identity_changed
     (before_row after_row : TaskRow) : bool :=
-  if task_title_changed before_row after_row then
-    true
-  else
-    let before_source := source_comment before_row in
-    let after_source := source_comment after_row in
-    task_source_comment_changed before_source after_source.
+  let before_source := source_comment before_row in
+  let after_source := source_comment after_row in
+  task_source_comment_changed before_source after_source.
 
 Fixpoint rescope_preserves_task_identity
     (snapshot_order : list positive)

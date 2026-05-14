@@ -234,19 +234,25 @@ explicit theorem in that model.
 
 ---
 
-## J. Rescope — title & anchor preservation
+## J. Rescope — task identity is the durable id
 
-**Invariant.** `reorder_tasks` may reorder, mark-completed, or insert
-tasks. It may **not** mutate any existing task's `title` or
-`anchor_comment_id`. The rescope output is a permutation of the input
-plus optional new entries plus optional terminal status flips —
-nothing else.
+**Invariant.** Rescope may reorder tasks, mark them completed, insert new
+ones, and revise mutable metadata (title, description) for an existing
+task id. The thread anchor (`source_comment` / `anchor_comment_id`)
+remains immutable identity for now; that lifts under #1714. The
+durable id is the only invariant identity field.
 
 **Bugs.** #1024 (rescope rewrote thread-task titles, collapsing
-unrelated tasks).
+unrelated tasks). The "collapse" half is fixed by **#1665** (distinct
+comments at the add boundary always produce distinct tasks — lineage is
+no longer a dedup join key); the "rewrote titles" half is now an
+intentional capability under **#1713** (title flows through the
+reducer as mutable metadata for an existing id).
 
-**Status.** Already filed as **D11 (#749) — model rescope confluence**.
-This bug is the empirical anchor.
+**Status.** Modeled in **D11 (#749) — model rescope confluence**.
+The original "title is immutable" framing has been reshaped by epic
+**#1340**: identity is the id, not the text. See #1665, #1713, #1714,
+#1666, #1667 for the per-leaf invariants.
 
 **E1 flip point.** D11 currently runs as a runtime oracle around
 `reorder_tasks`: Python translates Opus's omission-based result into explicit

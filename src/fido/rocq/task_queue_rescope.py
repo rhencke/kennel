@@ -578,6 +578,7 @@ def apply_rescope_op(
             case RewriteTask(task0, new_title, new_description):
                 row_ = replace(
                     row,
+                    title=new_title,
                     description=new_description,
                 )
                 return (
@@ -792,8 +793,6 @@ def task_identity_changed(
     before_row: TaskRow,
     after_row: TaskRow,
 ) -> bool:
-    if task_title_changed(before_row, after_row):
-        return True
     before_source = before_row.source_comment
     after_source = after_row.source_comment
     return task_source_comment_changed(before_source, after_source)
