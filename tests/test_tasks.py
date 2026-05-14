@@ -1193,6 +1193,70 @@ class TestApplyReorder:
         # Thread metadata stays put — no anchor change happened.
         assert result[0]["thread"] == thread
 
+    def test_explicit_completion_marks_task_completed(self) -> None:
+        # #1716: an item with status="completed" emits CompleteTask, which
+        # the reducer applies as a status flip to COMPLETED.  This is the
+        # only way rescope can remove a snapped task — omission still means
+        # keep-as-is (#1357).
+        current = [self._t("1", "Done work")]
+        items = [{"id": "1", "title": "Done work", "status": "completed"}]
+        result = _apply_reorder(current, items)
+        assert result[0]["status"] == str(TaskStatus.COMPLETED)
+
+    def test_explicit_completion_takes_precedence_over_text_and_anchor(
+        self,
+    ) -> None:
+        # CompleteTask is the most structural op — it removes the task.
+        # When an item asks for both completion and text/anchor changes,
+        # the adapter emits CompleteTask; the metadata changes are moot
+        # because the task is done.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Old title", task_type="thread", description="old desc")
+        t["thread"] = thread
+        items = [
+            {
+                "id": "1",
+                "title": "New title",
+                "description": "new desc",
+                "anchor_comment_id": 99,
+                "status": "completed",
+            },
+        ]
+        result = _apply_reorder([t], items)
+        assert result[0]["status"] == str(TaskStatus.COMPLETED)
+        # Title/desc/anchor at the moment of completion are immaterial —
+        # the row is done.  Existing thread metadata isn't re-anchored.
+        assert result[0]["thread"]["comment_id"] == 42
+
+    def test_omitted_task_is_kept_not_completed(self) -> None:
+        # #1357 / #1716 invariant: omission ≠ deletion.  A pending task
+        # Opus omits from its output survives at its current status.
+        # Only an explicit status="completed" item triggers removal.
+        current = [self._t("1", "Keep me"), self._t("2", "Also keep")]
+        original_ids = frozenset({"1", "2"})
+        items = [self._item("1", "Keep me")]  # task "2" omitted
+        result = _apply_reorder(current, items, original_ids)
+        task2 = next(t for t in result if t["id"] == "2")
+        assert task2["status"] == str(TaskStatus.PENDING)
+        assert task2["title"] == "Also keep"
+
+    def test_explicit_completion_of_thread_task_fires_completed_change_record(
+        self,
+    ) -> None:
+        # _compute_thread_changes already keys completion records on
+        # result.status == COMPLETED, so the explicit completion path
+        # naturally produces "kind=completed" change records that
+        # reply-back consumers (#1256) will eventually filter and post.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "status": "completed"}]
+        result = _apply_reorder([t], items)
+        changes = _compute_thread_changes([t], result, frozenset({"1"}))
+        assert len(changes) == 1
+        assert changes[0]["kind"] == "completed"
+        assert changes[0]["task"]["id"] == "1"
+
     def test_applies_duplicate_titles_at_apply_reorder_layer(self) -> None:
         # _apply_reorder is the low-level reducer; uniqueness is enforced
         # upstream by the rescope nudge loop in reorder_tasks(), not here
@@ -2041,6 +2105,37 @@ class TestReorderTasks:
         result = Tasks(tmp_path).list()
         assert result[0]["status"] == str(TaskStatus.PENDING)
         assert result[0]["thread"]["comment_id"] == 99
+
+    def test_on_inprogress_affected_called_when_explicitly_completed(
+        self, tmp_path: Path
+    ) -> None:
+        # #1716: when Opus explicitly completes the in-progress task, the
+        # worker turn must abort.  Unlike text/anchor changes, the task is
+        # NOT reset to pending — it's done.  The callback fires so the
+        # worker can stop running on a now-completed task.
+        t1 = self._add(tmp_path, "Active task")
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [
+                {
+                    "id": t1["id"],
+                    "title": "Active task",
+                    "description": "",
+                    "status": "completed",
+                },
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == [t1["id"]]
+        # Task stays completed — not reset to pending.
+        result = Tasks(tmp_path).list()
+        assert result[0]["status"] == str(TaskStatus.COMPLETED)
 
     def test_on_inprogress_affected_not_called_when_no_inprogress_task(
         self, tmp_path: Path
