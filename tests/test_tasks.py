@@ -1885,6 +1885,28 @@ class TestValidateRescopeBatch:
         assert any("must be non-empty string" in e and "42" in e for e in errors)
         assert any("must be non-empty string" in e and "''" in e for e in errors)
 
+    def test_merge_sources_on_completed_target_is_rejected(self) -> None:
+        # codex on #1738: explicit-completion precedence (#1716) wins
+        # over merge in _rescope_releases_for_oracle, so a batch with
+        # both status="completed" and merge_sources on the same target
+        # would silently drop the merge AND suppress the source's
+        # completion notification — the source vanishes without lineage
+        # being preserved anywhere.  Reject the contradictory shape.
+        current = [self._t("target"), self._t("source")]
+        items = [
+            {
+                "id": "target",
+                "title": "T",
+                "status": "completed",
+                "merge_sources": ["source"],
+            },
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "merging into a completed task is contradictory" in e for e in errors
+        )
+
     def test_thread_source_into_non_thread_target_is_rejected(self) -> None:
         # codex P1 on #1738: a thread source contributes comment lineage
         # via thread.lineage_comment_ids on disk; a non-thread target has

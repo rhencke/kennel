@@ -1091,6 +1091,26 @@ def _validate_rescope_batch(
                     f"item[{index}].merge_sources: must be a list, "
                     f"got {type(merge_sources).__name__}"
                 )
+            elif item.get("status") == str(TaskStatus.COMPLETED):
+                # codex on #1738: explicit-completion precedence (#1716)
+                # wins over merge in _rescope_releases_for_oracle, so a
+                # batch with both ``status="completed"`` and
+                # ``merge_sources`` on the same target emits CompleteTask
+                # and silently drops the merge.  But _merge_source_ids()
+                # still reads the raw payload and treats sources as
+                # merged, so their completion notifications get
+                # suppressed too — the source tasks vanish from
+                # reply-back without lineage actually being preserved
+                # anywhere.  Rather than thread the emitted ops through
+                # the suppression path, reject the contradictory shape
+                # at the validator: completing the target means there is
+                # no pending work to absorb merged sources.
+                errors.append(
+                    f"item[{index}].merge_sources on {item_id!r}: target "
+                    'is also marked status="completed"; merging into a '
+                    "completed task is contradictory (CompleteTask wins "
+                    "over MergeTasks in the reducer; no merge would run)"
+                )
             else:
                 source_strs: list[str] = []
                 for source_index, source in enumerate(merge_sources):
