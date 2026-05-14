@@ -2016,6 +2016,22 @@ class TestValidateRescopeBatch:
         errors = _validate_rescope_batch(current, items)
         assert any("may merge into at most one target" in e for e in errors)
 
+    def test_merge_into_blocked_target_is_rejected(self) -> None:
+        # codex on #1738: a blocked target accepts merge_sources today,
+        # but the worker picker skips blocked tasks — the source flips
+        # to completed and its notification is suppressed while the
+        # merged work parks indefinitely on a row Fido won't pick up.
+        # Same shape of silent drop as the completed-target case.
+        target = self._t("target")
+        target["status"] = "blocked"
+        items = [
+            {"id": "target", "title": "T", "merge_sources": ["source"]},
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        current = [target, self._t("source")]
+        errors = _validate_rescope_batch(current, items)
+        assert any("target") and any("blocked" in e for e in errors)
+
     def test_merge_into_already_completed_target_on_disk_is_rejected(
         self,
     ) -> None:

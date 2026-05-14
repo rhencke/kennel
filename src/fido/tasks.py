@@ -1095,6 +1095,16 @@ def _validate_rescope_batch(
         for t in current
         if "id" in t and t.get("status") == str(TaskStatus.COMPLETED)
     }
+    # Tasks currently blocked on disk: a merge into one of these
+    # silently parks the merged work — the worker picker skips blocked
+    # tasks (worker.py:_pick_next_task), so the source completes and
+    # suppresses its notification but the merged target never runs
+    # (codex on #1738).
+    currently_blocked_ids = {
+        t["id"]
+        for t in current
+        if "id" in t and t.get("status") == str(TaskStatus.BLOCKED)
+    }
     seen_ids: set[str] = set()
     explicitly_completed_ids: set[str] = set()
     merge_targets: list[tuple[int, str, list[str]]] = []
@@ -1180,6 +1190,23 @@ def _validate_rescope_batch(
                     "disk); merging into a completed task is contradictory "
                     "(no MergeTasks would run; the source's lineage would "
                     "be silently lost)"
+                )
+            elif merge_sources and item_id in currently_blocked_ids:
+                # codex on #1738: a blocked target accepts the merge,
+                # but the worker picker (_pick_next_task) skips blocked
+                # tasks — the source flips to completed and its
+                # completion notification gets suppressed, while the
+                # merged work parks indefinitely on a row Fido won't
+                # pick up.  Same shape of silent drop as the completed-
+                # target case.  If Opus wants to merge into a blocked
+                # task, the prompt vocabulary needs an explicit
+                # unblock signal (#1247 territory); for now reject.
+                errors.append(
+                    f"item[{index}].merge_sources on {item_id!r}: target "
+                    "is blocked; the worker picker skips blocked tasks, "
+                    "so the merged work would never run while the "
+                    "source's lineage was already absorbed and its "
+                    "completion notification suppressed"
                 )
             else:
                 source_strs: list[str] = []
