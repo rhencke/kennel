@@ -1096,6 +1096,20 @@ def _validate_rescope_batch(
             continue
         item_id = item.get("id")
         if item_id is None:
+            # codex on #1738: a null-id item carrying merge_sources
+            # bypasses every merge check below — _make_new_tasks_from_opus
+            # creates the new task without folding lineage, and
+            # _merge_source_ids still suppresses the source's completion
+            # notification.  The source vanishes without lineage being
+            # preserved anywhere.  Until new-target merge is implemented
+            # end-to-end (a separate leaf), reject the shape.
+            if item.get("merge_sources"):
+                errors.append(
+                    f"item[{index}].merge_sources on a null/missing id: "
+                    "merging into a not-yet-created task isn't implemented "
+                    "(would lose source lineage); declare the target as an "
+                    "existing task id or drop merge_sources"
+                )
             continue
         if not isinstance(item_id, str) or not item_id:
             errors.append(

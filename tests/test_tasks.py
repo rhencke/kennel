@@ -1953,6 +1953,32 @@ class TestValidateRescopeBatch:
             "merging into a completed task is contradictory" in e for e in errors
         )
 
+    def test_merge_sources_on_null_id_target_is_rejected(self) -> None:
+        # codex on #1738: a null-id item carrying merge_sources slips
+        # past every merge check today.  _make_new_tasks_from_opus
+        # creates the new task without folding the source's lineage,
+        # and _merge_source_ids still suppresses the source's
+        # completion notification — the source vanishes without
+        # lineage preservation, violating the no-origin-loss invariant.
+        current = [self._t("source")]
+        items = [
+            {
+                "id": None,
+                "title": "New merged task",
+                "merge_sources": ["source"],
+            },
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("null/missing id" in e for e in errors)
+
+    def test_null_id_without_merge_sources_is_still_valid(self) -> None:
+        # Negative regression: ordinary new-task items (null id, no
+        # merge_sources) stay valid.
+        current = [self._t("a")]
+        items = [{"id": None, "title": "Brand new"}]
+        assert _validate_rescope_batch(current, items) == []
+
     def test_same_source_into_multiple_targets_is_rejected(self) -> None:
         # codex Medium on #1738: a source feeding multiple targets
         # duplicates its lineage into each, which is split/rebuild
