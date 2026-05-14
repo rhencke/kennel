@@ -1020,6 +1020,76 @@ class TestApplyReorder:
         result = _apply_reorder([t], items)
         assert result[0]["thread"] == thread
 
+    def test_applies_anchor_change_and_preserves_old_in_lineage(self) -> None:
+        # #1714: rescope can rewrite a task's source-comment anchor for an
+        # existing task id.  The previous anchor moves into
+        # lineage_comment_ids so reply-back paths can still walk back to
+        # the original commenter; the new anchor becomes the primary
+        # comment_id reply/resolve paths read.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [
+            {"id": "1", "title": "Thread task", "anchor_comment_id": 99},
+        ]
+        result = _apply_reorder([t], items)
+        new_thread = result[0]["thread"]
+        assert new_thread["comment_id"] == 99
+        # Old anchor preserved as origin metadata; new anchor also present.
+        lineage = new_thread["lineage_comment_ids"]
+        assert 42 in lineage
+        assert 99 in lineage
+        # Identity is the durable id, unchanged.
+        assert result[0]["id"] == "1"
+
+    def test_anchor_change_keeps_existing_lineage_intact(self) -> None:
+        # If lineage already lists earlier related comments, the anchor
+        # change extends rather than replaces.
+        thread = {
+            "repo": "a/b",
+            "pr": 1,
+            "comment_id": 42,
+            "lineage_comment_ids": [10, 42],
+        }
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 99}]
+        result = _apply_reorder([t], items)
+        lineage = result[0]["thread"]["lineage_comment_ids"]
+        assert lineage == [10, 42, 99]
+
+    def test_anchor_change_takes_precedence_over_text_rewrite(self) -> None:
+        # The model carries one op per task per batch.  When item asks for
+        # both anchor and text changes, the adapter emits RewriteAnchor
+        # (anchor is structural — it re-targets the reply destination).
+        # Title/description changes ride the next rescope iteration.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Old title", task_type="thread", description="old desc")
+        t["thread"] = thread
+        items = [
+            {
+                "id": "1",
+                "title": "New title",
+                "description": "new desc",
+                "anchor_comment_id": 99,
+            },
+        ]
+        result = _apply_reorder([t], items)
+        assert result[0]["thread"]["comment_id"] == 99
+        # Title/description deferred; existing values still in place.
+        assert result[0]["title"] == "Old title"
+        assert result[0]["description"] == "old desc"
+
+    def test_anchor_unchanged_skips_lineage_mutation(self) -> None:
+        # If the proposed anchor equals the existing one, no thread mutation
+        # happens — the apply path stays a KeepTask / RewriteTask only.
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 42}]
+        result = _apply_reorder([t], items)
+        assert result[0]["thread"] == thread
+
     def test_applies_duplicate_titles_at_apply_reorder_layer(self) -> None:
         # _apply_reorder is the low-level reducer; uniqueness is enforced
         # upstream by the rescope nudge loop in reorder_tasks(), not here

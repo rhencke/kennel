@@ -206,15 +206,13 @@ def test_model_rescope_and_abort_helpers() -> None:
 
     order, updated_rows = oracle.apply_rescope(snapshot_order, current_order, rows, ops)
     assert order == [2, 3, 1, 4, 5]
-    # #1713: title is mutable for an existing task id; the new title flows
-    # through the reducer.
+    # #1713 + #1714: title and source_comment are both mutable metadata for
+    # an existing task id.  Identity is the durable id (the lookup key);
+    # there is no separate identity predicate to assert.
     assert updated_rows[2].title == "thread two rewritten"
     assert type(updated_rows[1].status).__name__ == "StatusCompleted"
     assert updated_rows[2].description == "new"
     assert updated_rows[2].source_comment == 42
-    # source_comment is still part of identity (source-comment mutability
-    # arrives in #1714); a title-only rewrite still preserves identity.
-    assert oracle.rescope_preserves_task_identity(snapshot_order, rows, updated_rows)
 
     lease = 2
     assert oracle.rescope_affects_active_task(lease, rows, updated_rows)
@@ -312,10 +310,10 @@ def test_apply_reorder_matches_oracle() -> None:
     ]
 
 
-def test_rescope_applies_title_rewrites_and_rejects_comment_drift() -> None:
-    # #1713: title is mutable; the rewrite flows through and the identity
-    # predicate still accepts it.  source_comment remains immutable
-    # identity (until #1714 lifts that).
+def test_rescope_applies_title_and_anchor_rewrites() -> None:
+    # #1713 + #1714: title and source-comment anchor are both mutable
+    # metadata for an existing task id.  Identity is the durable id (the
+    # row's lookup key); there is no separate identity predicate.
     before = oracle.TaskRow(
         title="Thread follow-up",
         description="old",
@@ -325,28 +323,27 @@ def test_rescope_applies_title_rewrites_and_rejects_comment_drift() -> None:
     )
     rows_before = {1: before}
 
-    _order, rows_after = oracle.apply_rescope(
+    _order, after_title = oracle.apply_rescope(
         [1],
         [1],
         rows_before,
         [oracle.RewriteTask(1, "Different title", "new")],
     )
-    assert rows_after[1].title == "Different title"
-    assert rows_after[1].source_comment == 55
-    assert rows_after[1].description == "new"
-    assert oracle.rescope_preserves_task_identity([1], rows_before, rows_after)
+    assert after_title[1].title == "Different title"
+    assert after_title[1].description == "new"
+    # RewriteTask leaves source_comment alone — text-only.
+    assert after_title[1].source_comment == 55
 
-    # source_comment drift still violates identity.
-    changed_comment = oracle.TaskRow(
-        title="Thread follow-up",
-        description="new",
-        kind=oracle.TaskThread(),
-        status=oracle.StatusPending(),
-        source_comment=77,
+    _order, after_anchor = oracle.apply_rescope(
+        [1],
+        [1],
+        rows_before,
+        [oracle.RewriteAnchor(1, 77)],
     )
-    assert not oracle.rescope_preserves_task_identity(
-        [1], rows_before, {1: changed_comment}
-    )
+    # RewriteAnchor changes source_comment, leaves title and description.
+    assert after_anchor[1].source_comment == 77
+    assert after_anchor[1].title == "Thread follow-up"
+    assert after_anchor[1].description == "old"
 
 
 def test_batched_rescope_converges_for_permuted_releases() -> None:
@@ -417,7 +414,6 @@ def test_batched_rescope_converges_for_permuted_releases() -> None:
     assert left_rows[1].title == "Title rewritten"
     assert left_rows[1].description == "new detail"
     assert type(left_rows[2].status).__name__ == "StatusCompleted"
-    assert oracle.rescope_preserves_task_identity(snapshot_order, rows, left_rows)
     assert oracle.batched_rescope_materially_significant(
         snapshot_order, current_order, rows, left_releases
     )

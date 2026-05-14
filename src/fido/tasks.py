@@ -366,11 +366,23 @@ def _rescope_releases_for_oracle(
         else:
             existing_title = task.get("title", "")
             existing_description = task.get("description", "")
+            existing_anchor = _task_source_comment_for_oracle(task)
             new_title = _effective_title(item, existing_by_id)
             new_description = (
                 item["description"] if "description" in item else existing_description
             )
-            if new_title != existing_title or new_description != existing_description:
+            proposed_anchor = item.get("anchor_comment_id")
+            # #1714: anchor change takes precedence over text rewrites.
+            # The model only carries one op per task per batch — anchor
+            # change is structural (re-targets the reply destination), so
+            # if Opus also asked for title/description rewrites alongside
+            # the anchor change, they ride the next rescope iteration.
+            # The materialization step below preserves the previous anchor
+            # in lineage_comment_ids so reply-back paths can still reach
+            # the original commenter.
+            if isinstance(proposed_anchor, int) and proposed_anchor != existing_anchor:
+                decision = rescope_oracle.RewriteAnchor(oracle_id, proposed_anchor)
+            elif new_title != existing_title or new_description != existing_description:
                 decision = rescope_oracle.RewriteTask(
                     oracle_id, new_title, new_description
                 )
@@ -399,6 +411,30 @@ def _materialize_rescope_oracle_result(
             task["status"] = str(TaskStatus.BLOCKED)
         else:
             task["status"] = task.get("status", str(TaskStatus.PENDING))
+        # #1714: when rescope changes the source-comment anchor, sync the
+        # task's thread metadata.  The previous anchor moves into
+        # lineage_comment_ids (preserved as origin metadata so reply-back
+        # paths can still walk back to the original commenter) and the
+        # new anchor becomes the primary comment_id reply/resolve paths
+        # read.  Identity is the durable task id; anchor is mutable
+        # metadata.  We only re-target to a non-None int — the adapter
+        # never emits RewriteAnchor with None, and clearing a thread
+        # task's anchor isn't a supported use case in #1714 scope.
+        existing_thread = task.get("thread")
+        new_anchor = row.source_comment
+        if (
+            isinstance(existing_thread, dict)
+            and isinstance(new_anchor, int)
+            and new_anchor != existing_thread.get("comment_id")
+        ):
+            thread = dict(existing_thread)
+            thread["comment_id"] = new_anchor
+            thread["lineage_comment_ids"] = list(
+                dict.fromkeys(
+                    [*_thread_lineage_comment_ids(existing_thread), new_anchor]
+                )
+            )
+            task["thread"] = thread
         materialized.append(task)
     return materialized
 
