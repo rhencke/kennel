@@ -8,7 +8,7 @@ ARG DOCKER_BUILDX_VERSION=0.17.1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        curl git jq libatomic1 openssh-client docker.io \
+        curl git jq libatomic1 openssh-client docker.io util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # buildx is not packaged in bookworm; pull the plugin binary directly.
@@ -288,17 +288,26 @@ COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright
 RUN --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     ./pyproject python -m fido.rocq_generated_pyright /tmp/generated-pyright
 
-# Test image: NOT in the ci bake group (#1248). ``./fido tests`` runs against
-# the bind-mounted fido-test image with a host-side memory cap, so this stage
-# exists only as a legacy assembly target. Editing ruff rules / pyright config
-# does NOT invalidate it — those configs are only seen at runtime via the
-# bind mount.
+# Test stage: assembles tests + Rocq pytest artefacts and runs pytest
+# inside the buildkit cgroup.  The buildx daemon has no per-target
+# memory cap (which is what kicked tests out under #1248), so we
+# protect the host with ``prlimit --as`` on the pytest invocation:
+# RLIMIT_AS is inherited by xdist worker subprocesses, so a leaky
+# worker hits ENOMEM (Python: MemoryError) cleanly and the worker dies
+# without OOM-killing the daemon or the box.  4 GiB AS per process is
+# generous for a pytest worker (matches today's host-side container
+# cap, but applied per process rather than across the whole pytest
+# tree).  The total in-flight AS for 4 xdist workers + the controller
+# is bounded above by 5 * 4 GiB = 20 GiB; RSS in practice stays far
+# lower because Python's overcommit doesn't materialise pages until
+# touched.
 FROM python-workspace-base AS python-test-base
 
 COPY pyproject.tools.toml ./
 COPY .python-version uv.lock ./
 COPY src src
 COPY tests tests
+COPY sub sub
 COPY rocq-python-extraction rocq-python-extraction
 COPY tools/build_graph.sh tools/gen_workflows.py tools/measure_build_graph.py tools/
 COPY models/Dockerfile models/dune-project models/dune models/*.v models/
@@ -311,10 +320,27 @@ FROM python-test-base AS test
 
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 
-# Tests are NOT executed inside this buildkit-managed RUN — buildx bake
-# offers no per-target memory cap (unlike host ``docker run --memory=``)
-# so a leaky test could grow unbounded inside the buildkit cgroup and
-# soft-lock the host (#1248).  The bake target now only assembles the
-# image with tests + Rocq pytest artefacts; ``./fido ci`` invokes the
-# capped host-side runner ``./fido tests`` after bake completes.
-RUN echo "test image assembled — see ./fido tests for capped execution"
+# Three guards on the in-bake pytest run:
+#
+# 1. ``timeout 600`` — 10-minute wall clock.  buildx RUN has no native
+#    timeout, so a deadlocked test (e.g. a livelock that holds the GIL
+#    forever) would otherwise block until the outer GHA / pre-commit
+#    timeout.  Match the host-side cap that ``./fido tests`` used to
+#    apply via ``run_fido_pyproject_image_capped``.
+# 2. ``prlimit --as=`` — per-process virtual address space cap
+#    (RLIMIT_AS).  Inherited by every xdist worker subprocess — a leaky
+#    worker crashes with MemoryError or can't-start-new-thread instead
+#    of OOM-killing the buildkit daemon (the original #1248 concern).
+#    16 GiB AS leaves plenty of headroom for thread stack reservations
+#    under Python 3.14t free-threading; the cap is there to bound
+#    runaway leaks, not to be tight.
+# 3. ``python -m fido.tests_main`` (not bare ``pytest``) — keeps the
+#    project's wrappers active: cap xdist at 2 workers (so total in-
+#    flight memory stays bounded; -n auto on a many-CPU runner would
+#    multiply the AS budget by CPU count) and enforce
+#    ``--cov-fail-under=100`` (codex on the prlimit PR caught both as
+#    regressions).
+#
+# prlimit ships in util-linux, installed in python-base.
+RUN timeout --foreground 600 prlimit --as=$((16 * 1024 * 1024 * 1024)) -- \
+    ./pyproject python -m fido.tests_main

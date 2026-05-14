@@ -4,7 +4,7 @@
 fido_build_targets_for_group() {
   case "$1" in
     ci)
-      printf '%s\n' fido format generated-typecheck lint make-rocq rocq-image rocq-repl typecheck
+      printf '%s\n' fido format generated-typecheck lint make-rocq rocq-image rocq-repl test typecheck
       ;;
     default)
       printf '%s\n' ci fido-test make-rocq
@@ -143,6 +143,42 @@ models/Dockerfile
 rocq-python-extraction/Dockerfile
 rocq-python-extraction/dune-project
 rocq-python-extraction/rocq-python-extraction.opam
+EOF
+      ;;
+    test)
+      cat <<'EOF'
+.dockerignore
+.githooks/pre-commit
+.github/workflows/ci.yml
+.lsp.json
+.python-version
+docker-bake.hcl
+dune-workspace
+fido
+models/*.v
+models/Dockerfile
+models/dune
+models/dune-project
+package-lock.json
+package.json
+pyproject
+pyproject.build.toml
+pyproject.project.toml
+pyproject.tools.toml
+rocq-python-extraction
+rocq-python-extraction/Dockerfile
+rocq-python-extraction/dune-project
+rocq-python-extraction/rocq-python-extraction.opam
+rocq-python-extraction/test
+src
+sub
+tests
+tools/build_graph.sh
+tools/compose_pyproject.py
+tools/gen_workflows.py
+tools/measure_build_graph.py
+tools/rocq_model_outputs.sh
+uv.lock
 EOF
       ;;
     typecheck)

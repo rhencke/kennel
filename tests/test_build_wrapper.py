@@ -856,12 +856,13 @@ class TestModelDockerfile:
         assert 'target "lint"' in bake
         assert 'target "typecheck"' in bake
         assert 'target "generated-typecheck"' in bake
-        # The ``test`` target was removed from the ci bake group (#1248):
-        # buildx bake offers no per-target memory cap, so tests now run
-        # host-side via ``./fido tests`` after bake completes.  The
-        # ``test`` Dockerfile stage still exists for legacy
-        # compatibility but the bake target definition is gone.
-        assert 'target "test"' not in bake
+        # The ``test`` target is back in the ci bake group: per-process
+        # RLIMIT_AS via prlimit caps each xdist worker so a leaky worker
+        # crashes with MemoryError without OOM-killing the buildkit
+        # daemon (the original #1248 concern).  Big win: a second
+        # ``./fido ci`` with no source changes hits the layer cache and
+        # skips pytest entirely.
+        assert 'target "test"' in bake
         assert 'group "ci"' in bake
         assert 'dockerfile = "models/Dockerfile"' in bake
         assert 'dockerfile = "Dockerfile"' in bake
@@ -869,13 +870,13 @@ class TestModelDockerfile:
         assert 'target = "fido-test"' in bake
         assert 'target = "export"' in bake
         assert 'target = "format"' in bake
-        assert 'target = "test"' not in bake
+        assert 'target = "test"' in bake
         assert 'rocq_image = "target:rocq-image"' in bake
         assert 'rocq_models_cache = ".cache/rocq-models/context"' in bake
         assert ".lsp.json" in dockerfile
         assert (
             'targets = ["format", "lint", "typecheck", "generated-typecheck", '
-            '"fido", "rocq-repl"]' in bake
+            '"test", "fido", "rocq-repl"]' in bake
         )
         assert 'output = ["type=docker"]' in bake
         assert "FIDO_TEST_IMAGE" in bake
@@ -1034,13 +1035,21 @@ class TestModelDockerfile:
         assert "FROM python-pyright-base AS typecheck" in dockerfile
         assert "FROM python-pyright-base AS generated-typecheck" in dockerfile
         assert "FROM python-test-base AS test" in dockerfile
-        # Tests are NOT executed inside the buildkit-managed `test` stage
-        # — buildx bake has no per-target memory cap so a leaky test
-        # could grow unbounded inside the buildkit cgroup and soft-lock
-        # the host (#1248).  ``./fido ci`` runs ``./fido tests`` after
-        # bake; that path goes through ``run_container --memory=4g``.
-        assert "RUN ./pyproject python -m fido.tests_main" not in dockerfile
-        assert '"$repo_root/fido" tests' in launcher
+        # The test stage runs pytest under prlimit RLIMIT_AS so a leaky
+        # xdist worker crashes with MemoryError without OOM-killing the
+        # buildkit daemon (#1248 concern, now solved at the per-process
+        # cap rather than by routing around buildx).  ``./fido ci``
+        # therefore no longer needs a separate host-side tests step —
+        # the bake graph runs everything, and a second ``./fido ci``
+        # with no source changes hits the layer cache.
+        assert "prlimit --as=" in dockerfile
+        # tests_main keeps the xdist cap (-n 2) and the
+        # --cov-fail-under=100 gate that bare ``pytest`` would skip.
+        assert "python -m fido.tests_main" in dockerfile
+        # ``timeout`` bounds wall-clock to keep deadlocked tests from
+        # blocking the outer GHA / pre-commit timeout.
+        assert "timeout --foreground" in dockerfile
+        assert '"$repo_root/fido" tests' not in launcher
         assert "FROM scratch AS ci" not in dockerfile
         assert "touch /tmp" not in dockerfile
         assert "-ready" not in dockerfile

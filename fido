@@ -1108,15 +1108,15 @@ case "$command" in
     exit 0
     ;;
   ci)
+    # pytest runs inside the bake ``test`` target now: per-process
+    # RLIMIT_AS via prlimit caps each xdist worker, so a leaky worker
+    # crashes with MemoryError instead of OOM-killing the buildkit
+    # daemon (the original #1248 concern).  Big win: a second ``./fido
+    # ci`` with no source changes hits the layer cache and skips pytest
+    # entirely — same for the pre-commit hook and GHA.
     ci_images "${@:2}"
     check_committed_model_mirrors
     check_generated_workflow_files
-    # Run pytest host-side via the capped run_container path (#1248) —
-    # the bake ``test`` target only assembles the image; per-target
-    # memory caps don't exist in buildx bake, so executing pytest inside
-    # the bake graph is unbounded.
-    log INFO "running tests via capped host runner"
-    "$repo_root/fido" tests
     ;;
   gen-workflows)
     ensure_buildx_builder
