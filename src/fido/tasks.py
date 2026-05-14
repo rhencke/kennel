@@ -474,7 +474,15 @@ def _reanchored_thread(
 
 
 _STALE_AFTER_REANCHOR = frozenset(
-    {"url", "author", "lineage_key", "path", "line", "diff_hunk"}
+    {
+        "url",
+        "author",
+        "comment_type",
+        "lineage_key",
+        "path",
+        "line",
+        "diff_hunk",
+    }
 )
 
 
@@ -1164,17 +1172,25 @@ def reorder_tasks(
             # The omission ⇒ completed branch is gone (#1357 case A): the
             # rescope reducer now uses KeepTask for omitted snapshot tasks,
             # so the in-progress task always survives the rescope at its
-            # current status.  The only remaining trigger for
-            # _on_inprogress_affected is an explicit modification of the
-            # task's title or description by Opus, which resets the task
-            # to pending so the worker re-picks it under the new scope.
+            # current status.  Triggers for _on_inprogress_affected are
+            # explicit modifications by Opus that change the task's
+            # contract: title, description, or — under #1714 — the
+            # source-comment anchor.  Anchor change is structural (it re-
+            # targets the reply destination), so a worker turn that began
+            # under the old anchor must not finish under the new one.
             inprogress_in_result = next(
                 (t for t in result if t["id"] == inprogress["id"]), None
             )
+
+            def _thread_anchor(task: dict[str, Any]) -> object:
+                thread = task.get("thread")
+                return thread.get("comment_id") if isinstance(thread, dict) else None
+
             if inprogress_in_result is not None and (
                 inprogress_in_result.get("title") != inprogress.get("title")
                 or inprogress_in_result.get("description")
                 != inprogress.get("description")
+                or _thread_anchor(inprogress_in_result) != _thread_anchor(inprogress)
             ):
                 inprogress_affected = True
                 inprogress_in_result["status"] = str(TaskStatus.PENDING)

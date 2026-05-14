@@ -1136,15 +1136,17 @@ class TestApplyReorder:
             )
 
     def test_anchor_change_drops_stale_per_comment_thread_fields(self) -> None:
-        # codex on #1731: url, author, path, line, diff_hunk, lineage_key
-        # all describe the OLD anchor.  Once the anchor moves they no
-        # longer apply — drop them so worker code can't read stale data
-        # (wrong URL, mis-attributed author).  Lane-level fields (repo,
-        # pr) and the lineage list survive.
+        # codex on #1731: url, author, comment_type, path, line, diff_hunk,
+        # lineage_key all describe the OLD anchor.  Once the anchor moves
+        # they no longer apply — drop them so worker code can't read stale
+        # data (wrong URL, mis-attributed author, wrong reply endpoint
+        # via a stale comment_type pointing at a different comment kind).
+        # Lane-level fields (repo, pr) and the lineage list survive.
         thread = {
             "repo": "a/b",
             "pr": 1,
             "comment_id": 42,
+            "comment_type": "pulls",
             "url": "https://github.com/a/b/pull/1#discussion_r42",
             "author": "old-commenter",
             "path": "x.py",
@@ -1162,7 +1164,15 @@ class TestApplyReorder:
         assert new_thread["repo"] == "a/b"
         assert new_thread["pr"] == 1
         assert new_thread["lineage_comment_ids"] == [42, 99]
-        for stale in ("url", "author", "path", "line", "diff_hunk", "lineage_key"):
+        for stale in (
+            "url",
+            "author",
+            "comment_type",
+            "path",
+            "line",
+            "diff_hunk",
+            "lineage_key",
+        ):
             assert stale not in new_thread, (
                 f"{stale} described the old anchor and must be dropped"
             )
@@ -1796,6 +1806,48 @@ class TestReorderTasks:
         # task still in_progress (unchanged by Opus)
         result = Tasks(tmp_path).list()
         assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
+
+    def test_on_inprogress_affected_called_when_anchor_changes(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1731: anchor-only rewrites must trigger the
+        # in-progress affected callback too.  A worker turn that began
+        # under the old anchor must not finish under the new one — the
+        # task gets reset to pending and the worker re-picks it under
+        # the new anchor.
+        thread = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 42,
+            "url": "https://example.com/c42",
+            "author": "old-commenter",
+        }
+        t1 = Tasks(tmp_path).add(
+            title="Thread task", task_type=TaskType.THREAD, thread=thread
+        )
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        # Same title and description; only anchor differs.
+        raw = self._response(
+            [
+                {
+                    "id": t1["id"],
+                    "title": "Thread task",
+                    "description": "",
+                    "anchor_comment_id": 99,
+                },
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == [t1["id"]]
+        result = Tasks(tmp_path).list()
+        assert result[0]["status"] == str(TaskStatus.PENDING)
+        assert result[0]["thread"]["comment_id"] == 99
 
     def test_on_inprogress_affected_not_called_when_no_inprogress_task(
         self, tmp_path: Path
