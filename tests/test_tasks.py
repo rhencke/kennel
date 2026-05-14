@@ -1803,6 +1803,33 @@ class TestValidateRescopeBatch:
         assert any("must be non-empty string" in e and "42" in e for e in errors)
         assert any("must be non-empty string" in e and "''" in e for e in errors)
 
+    def test_thread_source_into_non_thread_target_is_rejected(self) -> None:
+        # codex P1 on #1738: a thread source contributes comment lineage
+        # via thread.lineage_comment_ids on disk; a non-thread target has
+        # nowhere to store that lineage, so the materializer would
+        # silently drop it.  Reject the merge atomically.
+        spec_target = self._t("spec", "Spec target")
+        thread_source = self._t("thread", "Thread source")
+        thread_source["type"] = "thread"
+        thread_source["thread"] = {"repo": "r/r", "pr": 1, "comment_id": 99}
+        items = [
+            {"id": "spec", "title": "Merged", "merge_sources": ["thread"]},
+            {"id": "thread", "title": "Thread source", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch([spec_target, thread_source], items)
+        assert any("thread source" in e and "non-thread target" in e for e in errors)
+
+    def test_spec_to_spec_merge_is_accepted(self) -> None:
+        # Negative regression: same-kind merges (no thread anywhere) stay
+        # valid — the lineage-loss rule only fires when a thread source
+        # would feed a non-thread target.
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        assert _validate_rescope_batch(current, items) == []
+
 
 # ── reorder_tasks ─────────────────────────────────────────────────────────────
 

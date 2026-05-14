@@ -1009,6 +1009,17 @@ def _validate_rescope_batch(
     """
     errors: list[str] = []
     known_ids = {t["id"] for t in current if "id" in t}
+    # Lineage on disk lives in thread.lineage_comment_ids — a
+    # non-thread target has nowhere to store comment origins.  If a
+    # merge folds thread-bearing sources into a non-thread target, the
+    # materializer can't sync row.lineage_comments and every source
+    # comment id is silently lost, violating the "no source origin
+    # lost" invariant this leaf is meant to enforce (codex P1 on #1738).
+    # Same-kind merges (spec→spec, thread→thread) are fine; the rule
+    # only fires when a thread source would feed a non-thread target.
+    thread_bearing_ids = {
+        t["id"] for t in current if isinstance(t.get("thread"), dict) and "id" in t
+    }
     seen_ids: set[str] = set()
     explicitly_completed_ids: set[str] = set()
     merge_targets: list[tuple[int, str, list[str]]] = []
@@ -1071,13 +1082,23 @@ def _validate_rescope_batch(
     # Every source named in a merge_sources list must also appear in the
     # batch with status="completed" so the model's per-task coverage
     # invariant still holds (each source needs its own CompleteTask op).
-    for index, _target_id, sources in merge_targets:
+    # Additionally, if a thread-bearing source feeds a non-thread
+    # target, the merge would silently drop the source's comment lineage
+    # at materialization time (codex P1 on #1738).
+    for index, target_id, sources in merge_targets:
+        target_has_thread = target_id in thread_bearing_ids
         for source in sources:
             if source not in explicitly_completed_ids:
                 errors.append(
                     f"item[{index}].merge_sources={source!r}: "
                     "source must also appear in the batch with "
                     'status="completed" so the rescope reducer closes it'
+                )
+            if not target_has_thread and source in thread_bearing_ids:
+                errors.append(
+                    f"item[{index}].merge_sources={source!r}: thread source "
+                    f"into non-thread target {target_id!r} would drop its "
+                    "comment lineage on disk"
                 )
 
     return errors
