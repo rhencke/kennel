@@ -11,6 +11,7 @@ from fido.rocq import thread_auto_resolve as thread_oracle
 from fido.tasks import (
     Tasks,
     _apply_reorder,
+    _assert_merge_lineage_preserved,
     _assert_rescope_matches_oracle,
     _build_task_list_snapshot,
     _compute_thread_changes,
@@ -1243,6 +1244,87 @@ class TestApplyReorder:
             src = next(t for t in result if t["id"] == src_id)
             assert src["status"] == str(TaskStatus.COMPLETED)
 
+    def test_merge_lineage_assertion_raises_on_dropped_source(self) -> None:
+        # The runtime assertion catches a (hypothetical) oracle/adapter
+        # divergence that drops source lineage from the target row.
+        # Build a synthetic before/after pair where the target row's
+        # lineage_comments doesn't contain the source's anchor.
+        from fido.rocq import task_queue_rescope as oracle
+
+        src_row = oracle.TaskRow(
+            title="src",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=200,
+            lineage_comments=[200],
+        )
+        target_after = oracle.TaskRow(
+            title="tgt",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=100,
+            lineage_comments=[100],  # missing 200 — source lineage dropped
+        )
+        rows_before = {1: target_after, 2: src_row}
+        rows_after = {1: target_after, 2: src_row}
+        merge_release = oracle.RescopeRelease(
+            oracle.ReleaseACT(), oracle.MergeTasks(1, [2], "tgt", "")
+        )
+        with pytest.raises(AssertionError, match="dropped source lineage"):
+            _assert_merge_lineage_preserved([merge_release], rows_before, rows_after)
+
+    def test_merge_lineage_assertion_raises_on_missing_target(self) -> None:
+        # If the target row is somehow missing from the oracle output,
+        # fail fast rather than silently produce a half-applied merge.
+        from fido.rocq import task_queue_rescope as oracle
+
+        src_row = oracle.TaskRow(
+            title="src",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=200,
+            lineage_comments=[200],
+        )
+        rows_before = {2: src_row}
+        rows_after: dict[int, oracle.TaskRow] = {2: src_row}  # no target
+        merge_release = oracle.RescopeRelease(
+            oracle.ReleaseACT(), oracle.MergeTasks(1, [2], "tgt", "")
+        )
+        with pytest.raises(AssertionError, match="missing from rescope output"):
+            _assert_merge_lineage_preserved([merge_release], rows_before, rows_after)
+
+    def test_merge_apply_runs_lineage_preservation_assertion(self) -> None:
+        # codex on #1738 (medium): the Rocq predicate
+        # merge_preserves_source_lineage is asserted at runtime for
+        # every MergeTasks op the adapter emits — so any divergence
+        # between the executable model predicate and the materialized
+        # output fails closed instead of silently dropping a source
+        # comment.  This test exercises the happy path; the predicate
+        # itself is exercised by test_merge_uses_oracle_predicate_to_*.
+        thread_a = {"repo": "r/r", "pr": 1, "comment_id": 100}
+        thread_b = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 200,
+            "lineage_comment_ids": [50, 200],
+        }
+        a = self._t("a", "Task A", task_type="thread")
+        a["thread"] = thread_a
+        b = self._t("b", "Task B", task_type="thread")
+        b["thread"] = thread_b
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "Task B", "status": "completed"},
+        ]
+        # Should not raise; if assertion fired we'd get AssertionError.
+        result = _apply_reorder([a, b], items)
+        target = next(t for t in result if t["id"] == "a")
+        assert 50 in target["thread"]["lineage_comment_ids"]
+        assert 200 in target["thread"]["lineage_comment_ids"]
+
     def test_merge_with_unhashable_source_does_not_crash(self) -> None:
         # codex on #1738: _apply_reorder must not raise TypeError when
         # called with a malformed merge_sources list (e.g. nested list /
@@ -2295,6 +2377,96 @@ class TestReorderTasks:
         result = Tasks(tmp_path).list()
         assert result[0]["status"] == str(TaskStatus.PENDING)
         assert result[0]["thread"]["comment_id"] == 99
+
+    def test_on_inprogress_affected_called_when_merge_grows_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1738: a MergeTasks that folds source lineage into
+        # the in-progress target only grows thread.lineage_comment_ids;
+        # title/desc/anchor/status stay the same.  The worker prompt
+        # captured the old lineage, so the callback must still fire and
+        # reset the task to pending.
+        t_target = Tasks(tmp_path).add(
+            title="Target",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 100},
+        )
+        t_source = Tasks(tmp_path).add(
+            title="Source",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 200},
+        )
+        Tasks(tmp_path).update(t_target["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [
+                {
+                    "id": t_target["id"],
+                    "title": "Target",
+                    "description": "",
+                    "merge_sources": [t_source["id"]],
+                },
+                {"id": t_source["id"], "title": "Source", "status": "completed"},
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == [t_target["id"]]
+        result = Tasks(tmp_path).list()
+        target = next(t for t in result if t["id"] == t_target["id"])
+        assert target["status"] == str(TaskStatus.PENDING)
+        # Lineage grew with the source's anchor.
+        assert 200 in target["thread"]["lineage_comment_ids"]
+
+    def test_on_changes_skips_merge_source_completion_notifications(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1738: a merge source's status flip to COMPLETED is
+        # bookkeeping for the rescope reducer's per-task coverage —
+        # the work was MOVED to the target, not finished by commits.
+        # _compute_thread_changes must NOT fire a "covered by recent
+        # commits" change record for it; the merged target will fire
+        # its own record when it eventually completes.
+        t_target = Tasks(tmp_path).add(
+            title="Target",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 100, "url": "x"},
+        )
+        t_source = Tasks(tmp_path).add(
+            title="Source",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 200, "url": "y"},
+        )
+        raw = self._response(
+            [
+                {
+                    "id": t_target["id"],
+                    "title": "Target",
+                    "description": "",
+                    "merge_sources": [t_source["id"]],
+                },
+                {"id": t_source["id"], "title": "Source", "status": "completed"},
+            ]
+        )
+        received: list[dict] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_changes=lambda changes: received.extend(changes),
+        )
+        # Source's COMPLETED transition is suppressed (it was merged,
+        # not completed).  Only the target — still pending — would
+        # generate a future change record when it completes.
+        for change in received:
+            assert change["task"]["id"] != t_source["id"], (
+                "merge-source completion must not fire on_changes — "
+                "the work moved to the target, not 'covered by commits'"
+            )
 
     def test_on_inprogress_affected_called_when_explicitly_completed(
         self, tmp_path: Path

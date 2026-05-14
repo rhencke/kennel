@@ -607,9 +607,45 @@ def _apply_reorder_with_oracle(
     oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
         snapshot_order, current_order, rows, releases
     )
+    _assert_merge_lineage_preserved(releases, rows, oracle_rows)
     return _materialize_rescope_oracle_result(
         oracle_order, oracle_rows, tasks_by_oracle_id
     )
+
+
+def _assert_merge_lineage_preserved(
+    releases: list[rescope_oracle.RescopeRelease],
+    rows_before: dict[int, rescope_oracle.TaskRow],
+    rows_after: dict[int, rescope_oracle.TaskRow],
+) -> None:
+    """Per-merge runtime assertion of the Rocq lineage-preservation predicate.
+
+    The model's ``merge_preserves_source_lineage`` predicate proves "no
+    source comment id is lost" computationally; we evaluate it for every
+    actual MergeTasks op the adapter emits, so the per-run agreement
+    between the executable predicate and the materialized output is
+    surfaced as a fail-closed assertion (issue #1717 acceptance criteria
+    "Rocq proves no source lineage comment id is lost; runtime oracle
+    agrees with Python").  Any divergence raises immediately rather than
+    silently dropping a source comment.
+    """
+    for release in releases:
+        op = release.release_decision
+        if not isinstance(op, rescope_oracle.MergeTasks):
+            continue
+        target_after = rows_after.get(op.task)
+        if target_after is None:
+            raise AssertionError(
+                f"merge target {op.task} missing from rescope output rows"
+            )
+        if not rescope_oracle.merge_preserves_source_lineage(
+            op.sources, rows_before, target_after
+        ):
+            raise AssertionError(
+                f"merge into task {op.task} dropped source lineage "
+                f"(sources={op.sources!r}); merge_preserves_source_lineage "
+                "returned False"
+            )
 
 
 def _locked(path: Path) -> "_TaskFileLock":
@@ -1186,15 +1222,40 @@ def _apply_reorder(
     return ci_oracle + ci_new + non_ci_oracle + non_ci_new + oracle_completed
 
 
+def _merge_source_ids(ordered_items: list[dict[str, Any]]) -> set[str]:
+    """Collect the set of task ids that appear as merge-sources in this batch.
+
+    A merged source's status flips to COMPLETED (its own CompleteTask op),
+    but the work isn't really done — it's been folded into another
+    still-pending task.  ``_compute_thread_changes`` uses this set to
+    suppress the "covered by recent commits" notification that would
+    otherwise mislead the original commenter (codex on #1738).
+    """
+    merged: set[str] = set()
+    for item in ordered_items:
+        sources = item.get("merge_sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if isinstance(source, str) and source:
+                merged.add(source)
+    return merged
+
+
 def _compute_thread_changes(
     original: list[dict[str, Any]],
     result: list[dict[str, Any]],
     original_ids: frozenset[str],
+    merge_source_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return change records for thread tasks that were completed or materially modified.
 
     Only tasks in *original_ids* (those Opus knew about) with a ``thread``
     attachment are reported.  Already-completed tasks are excluded.
+    Tasks listed in *merge_source_ids* are also excluded — their
+    completion is bookkeeping for the rescope reducer's per-task
+    coverage invariant, not "Fido finished your work."  The merged
+    target will fire its own change record when it eventually completes.
 
     Each record is one of:
     - ``{"task": ..., "kind": "completed"}`` — Opus omitted or marked it done
@@ -1215,10 +1276,13 @@ def _compute_thread_changes(
     the task dict set by ``_apply_reorder``) so the reply body distinguishes
     "done" from "cancelled".
     """
+    merged_sources = merge_source_ids or set()
     result_by_id = {t["id"]: t for t in result}
     changes: list[dict[str, Any]] = []
     for t in original:
         if t["id"] not in original_ids:
+            continue
+        if t["id"] in merged_sources:
             continue
         if not t.get("thread"):
             continue
@@ -1418,12 +1482,24 @@ def reorder_tasks(
                     completed_by_rescope = inprogress_in_result.get("status") == str(
                         TaskStatus.COMPLETED
                     )
+                    # Anchor and lineage are both compared via the canonical
+                    # oracle helpers so int/string drift can't trigger a
+                    # spurious abort (codex on #1731).  Lineage drift covers
+                    # the merge case (codex on #1738): a MergeTasks op only
+                    # adds entries to thread.lineage_comment_ids and leaves
+                    # title/desc/anchor/status untouched, so without this
+                    # check a worker turn that started with the OLD lineage
+                    # would never see the merged-in source comments.
                     text_or_anchor_changed = (
                         inprogress_in_result.get("title") != inprogress.get("title")
                         or inprogress_in_result.get("description")
                         != inprogress.get("description")
                         or _task_source_comment_for_oracle(inprogress_in_result)
                         != _task_source_comment_for_oracle(inprogress)
+                        or _thread_lineage_comment_ids(
+                            inprogress_in_result.get("thread")
+                        )
+                        != _thread_lineage_comment_ids(inprogress.get("thread"))
                     )
                     if completed_by_rescope or text_or_anchor_changed:
                         inprogress_affected = True
@@ -1437,8 +1513,8 @@ def reorder_tasks(
                                 inprogress_in_result.get("title", "")[:60],
                             )
                         else:
-                            # Text/anchor change: reset to pending so the
-                            # worker re-picks under the new scope.
+                            # Text/anchor/lineage change: reset to pending so
+                            # the worker re-picks under the new scope.
                             inprogress_in_result["status"] = str(TaskStatus.PENDING)
                             log.info(
                                 "reorder_tasks: in-progress task modified by "
@@ -1462,7 +1538,14 @@ def reorder_tasks(
         # branch that's hard to reach in tests now that title
         # preservation by the reducer means rescope rarely produces a
         # material change record (#1388).
-        _on_changes(_compute_thread_changes(pre_rescope, result, original_ids))
+        _on_changes(
+            _compute_thread_changes(
+                pre_rescope,
+                result,
+                original_ids,
+                merge_source_ids=_merge_source_ids(ordered_items),
+            )
+        )
 
     if inprogress_affected and _on_inprogress_affected is not None:
         assert inprogress is not None  # inprogress_affected is True
