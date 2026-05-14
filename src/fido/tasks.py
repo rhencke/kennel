@@ -330,10 +330,18 @@ def _rescope_releases_for_oracle(
             existing_title = task.get("title", "")
             existing_description = task.get("description", "")
             # #1713: title is mutable metadata for an existing task id.  Opus's
-            # title flows through the reducer.  An empty/missing title in the
-            # rescope item preserves the existing one — empty title is treated
-            # as "Opus didn't supply a rename" rather than as a real rename.
-            new_title = item.get("title") or existing_title
+            # title flows through the reducer when it is a non-empty string.
+            # Anything else — empty string, missing key, or a non-string JSON
+            # value (number, object, null) — preserves the existing title.
+            # The string check is a system-boundary guard: persisting a
+            # non-string into tasks.json would crash later code paths that
+            # call .upper() / .startswith() on the title.
+            proposed_title = item.get("title")
+            new_title = (
+                proposed_title
+                if isinstance(proposed_title, str) and proposed_title
+                else existing_title
+            )
             new_description = (
                 item["description"] if "description" in item else existing_description
             )

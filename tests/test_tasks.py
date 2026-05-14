@@ -861,6 +861,19 @@ class TestApplyReorder:
         result = _apply_reorder(current, items)
         assert result[0]["title"] == "Original title"
 
+    def test_preserves_title_when_opus_returns_non_string(self) -> None:
+        # System-boundary guard: a non-string title from the LLM (number,
+        # object, null, list) must not be persisted, since downstream code
+        # calls .upper() / .startswith() on the title and would crash on the
+        # next rescope.  Preserve the existing title instead.
+        current = [self._t("1", "Original title")]
+        for bad_title in (123, None, {"oops": True}, ["list"]):
+            items = [{"id": "1", "title": bad_title}]
+            result = _apply_reorder(current, items)
+            assert result[0]["title"] == "Original title", (
+                f"non-string title {bad_title!r} should not overwrite"
+            )
+
     def test_updates_description_from_opus(self) -> None:
         current = [self._t("1", "Task", description="old desc")]
         items = [self._item("1", "Task", description="new desc")]
