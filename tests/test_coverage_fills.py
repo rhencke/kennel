@@ -27,10 +27,8 @@ from fido.atomic import create_atomic
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.tasks import (
-    _merge_thread_lineage,
     _review_thread_contains_comment,
     _thread_lineage_comment_ids,
-    _thread_lineage_key,
     _thread_task_for_auto_resolve_oracle,
     review_thread_for_auto_resolve_oracle,
 )
@@ -162,20 +160,6 @@ class TestTasksHelpers:
         """Cover the early-return for missing thread (tasks.py:169)."""
         assert _thread_lineage_comment_ids(None) == []
         assert _thread_lineage_comment_ids({}) == []
-
-    def test_thread_lineage_key_with_no_thread_returns_none(self) -> None:
-        """Cover _thread_lineage_key's None branch."""
-        assert _thread_lineage_key(None) is None
-        assert _thread_lineage_key({}) is None
-
-    def test_merge_thread_lineage_inherits_lineage_key(self) -> None:
-        """Cover the ``existing_thread["lineage_key"] = new_thread[...]``
-        branch (tasks.py:200)."""
-        existing = {"comment_id": 1}  # no lineage_key
-        incoming = {"comment_id": 1, "lineage_key": "k1"}
-        changed = _merge_thread_lineage(existing, incoming)
-        assert changed
-        assert existing["lineage_key"] == "k1"
 
 
 # ---------------------------------------------------------------------------

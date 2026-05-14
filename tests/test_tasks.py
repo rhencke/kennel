@@ -385,21 +385,23 @@ class TestAddTask:
         assert t1["id"] == t2["id"]
         assert len(Tasks(tmp_path).list()) == 1
 
-    def test_deduplicates_by_comment_lineage_and_merges_sources(
+    def test_distinct_comments_in_same_lineage_produce_distinct_tasks(
         self, tmp_path: Path
     ) -> None:
+        """#1665: lineage stops being a join key.  Three distinct
+        comments on the same PR thread produce three distinct tasks
+        — combine / split decisions move to the rescope reducer
+        (#1666 / #1667), not the add boundary."""
         first_thread = {
             "repo": "r/r",
             "pr": 1,
             "comment_id": 101,
-            "lineage_key": "pulls:r/r:1:thread:100",
             "lineage_comment_ids": [100, 101],
         }
         second_thread = {
             "repo": "r/r",
             "pr": 1,
             "comment_id": 102,
-            "lineage_key": "pulls:r/r:1:thread:100",
             "lineage_comment_ids": [100, 102],
         }
 
@@ -414,11 +416,11 @@ class TestAddTask:
             thread=second_thread,
         )
 
-        assert first["id"] == second["id"]
+        assert first["id"] != second["id"]
         tasks = Tasks(tmp_path).list()
-        assert len(tasks) == 1
+        assert len(tasks) == 2
         assert tasks[0]["thread"]["comment_id"] == 101
-        assert tasks[0]["thread"]["lineage_comment_ids"] == [100, 101, 102]
+        assert tasks[1]["thread"]["comment_id"] == 102
 
     def test_different_comment_ids_are_not_deduplicated(self, tmp_path: Path) -> None:
         t1 = Tasks(tmp_path).add(
@@ -469,22 +471,22 @@ class TestAddTask:
         tasks = Tasks(tmp_path).list()
         assert len(tasks) == 2
 
-    def test_in_progress_lineage_deduplicates_new_task_with_different_comment(
+    def test_in_progress_sibling_does_not_block_new_distinct_comment(
         self, tmp_path: Path
     ) -> None:
-        """An in-progress sibling task in the same lineage should coalesce
-        the new task — one active worker is already on it."""
+        """#1665: even an in-progress sibling task in the same lineage
+        does not coalesce a new distinct comment.  The combine
+        decision moves to the rescope reducer (#1667) — at the add
+        boundary every distinct comment yields its own task."""
         thread_a = {
             "repo": "r/r",
             "pr": 1,
             "comment_id": 100,
-            "lineage_key": "issues:r/r:1",
         }
         thread_b = {
             "repo": "r/r",
             "pr": 1,
             "comment_id": 200,
-            "lineage_key": "issues:r/r:1",
         }
 
         t1 = Tasks(tmp_path).add(
@@ -500,8 +502,8 @@ class TestAddTask:
             thread=thread_b,
         )
 
-        assert t1["id"] == t2["id"], "in-progress sibling must coalesce"
-        assert len(Tasks(tmp_path).list()) == 1
+        assert t1["id"] != t2["id"]
+        assert len(Tasks(tmp_path).list()) == 2
 
     def test_task_type_required(self, tmp_path: Path) -> None:
         import pytest

@@ -167,13 +167,6 @@ def _review_thread_contains_comment(
     return False
 
 
-def _thread_lineage_key(thread: dict[str, Any] | None) -> str | None:
-    if not thread:
-        return None
-    key = thread.get("lineage_key")
-    return str(key) if key else None
-
-
 def _thread_lineage_comment_ids(thread: dict[str, Any] | None) -> list[int]:
     if not thread:
         return []
@@ -197,7 +190,15 @@ def _thread_lineage_comment_ids(thread: dict[str, Any] | None) -> list[int]:
 def _merge_thread_lineage(
     existing_thread: dict[str, Any], new_thread: dict[str, Any]
 ) -> bool:
-    """Merge related source comment ids into an existing task thread."""
+    """Merge related source-comment ids into an existing task thread.
+
+    ``lineage_comment_ids`` is the only lineage metadata that survives —
+    it answers "which comments contributed to this task" so a future
+    reply-back filter (#1256) can reach every commenter whose intent
+    materially shaped the task.  The legacy ``lineage_key`` join field
+    is dropped (#1665) — lineage is no longer a dedup key, so the
+    canonical chain identifier serves no purpose.
+    """
     merged = _thread_lineage_comment_ids(existing_thread)
     changed = False
     for comment_id in _thread_lineage_comment_ids(new_thread):
@@ -206,9 +207,6 @@ def _merge_thread_lineage(
             changed = True
     if changed:
         existing_thread["lineage_comment_ids"] = merged
-    if not existing_thread.get("lineage_key") and new_thread.get("lineage_key"):
-        existing_thread["lineage_key"] = new_thread["lineage_key"]
-        changed = True
     return changed
 
 
@@ -1230,14 +1228,20 @@ class Tasks(JsonFileStore):
         if thread:
             task["thread"] = thread
         comment_id = (thread or {}).get("comment_id")
-        lineage_key = _thread_lineage_key(thread)
         with self.modify() as existing:
             for t in existing:
                 existing_thread = t.get("thread") or {}
                 existing_comment_id = existing_thread.get("comment_id")
-                existing_lineage_key = _thread_lineage_key(existing_thread)
 
-                # Same comment: always dedup, regardless of status.
+                # Exact-comment-id replay protection: the only dedup at the
+                # add boundary (#1665).  Lineage stops being a join key —
+                # three distinct comments on the same PR thread produce
+                # three distinct tasks.  Lineage stays on the task as
+                # origin metadata via :func:`_merge_thread_lineage`,
+                # answering "which comments contributed to this task,"
+                # not "is this task the same as that one."  Combine /
+                # split / rewrite decisions move to the rescope reducer
+                # under #1340 (#1666 / #1667).
                 if comment_id is not None and existing_comment_id == comment_id:
                     if _merge_thread_lineage(existing_thread, thread or {}):
                         t["thread"] = existing_thread
@@ -1248,36 +1252,11 @@ class Tasks(JsonFileStore):
                     )
                     return t
 
-                # Same lineage, different comment: dedup only when the sibling
-                # task is in-progress, or when the new comment's lineage overlaps
-                # the existing task's lineage (replies to the same review thread).
-                # A completed or pending task with non-overlapping lineage
-                # represents independent work and must not block new task creation.
-                if lineage_key is not None and lineage_key == existing_lineage_key:
-                    new_lineage_ids = set(_thread_lineage_comment_ids(thread))
-                    existing_lineage_ids = set(
-                        _thread_lineage_comment_ids(existing_thread)
-                    )
-                    lineage_overlaps = bool(new_lineage_ids & existing_lineage_ids)
-                    if t["status"] == TaskStatus.IN_PROGRESS or lineage_overlaps:
-                        if _merge_thread_lineage(existing_thread, thread or {}):
-                            t["thread"] = existing_thread
-                        if (
-                            t["status"] == TaskStatus.IN_PROGRESS
-                            and not lineage_overlaps
-                        ):
-                            log.info(
-                                "task already in progress for lineage %s — coalescing",
-                                lineage_key,
-                            )
-                        else:
-                            log.info(
-                                "task already exists for lineage %s (status: %s)",
-                                lineage_key,
-                                t["status"],
-                            )
-                        return t
-
+                # Title-match dedup for non-comment-derived tasks (CI
+                # failures, spec setup): a pending task with the same
+                # title is the same work; don't double-add.  Comment-
+                # derived adds skip this — exact comment_id is the only
+                # dedup for them (#1665).
                 if (
                     comment_id is None
                     and t["status"] == TaskStatus.PENDING
