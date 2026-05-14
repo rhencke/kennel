@@ -16,6 +16,7 @@ from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
     ProviderAgent,
+    ThreadKind,
     safe_voice_turn,
     set_thread_kind,
     set_thread_repo,
@@ -2391,18 +2392,25 @@ def _reorder_tasks_background(
         current_intents: list[RescopeIntent] = list(intents or [])
         release_untriaged = 0
         iteration = 0
-        # Register as "webhook" so the session talker reflects the true nature of
-        # this thread: it is triggered by webhooks and should not be treated as the
-        # worker for preemption purposes.  Without this, current_thread_kind()
-        # defaults to "worker", causing real webhooks to fire _fire_worker_cancel
-        # against the reorder thread and misidentify it as the running worker (#955).
+        # Register as "background" so:
+        # 1. real webhooks see kind != "worker" on this thread and so
+        #    don't fire _fire_worker_cancel against the rescope thread
+        #    (the protection from #955), AND
+        # 2. THIS thread, when its session.prompt() consults
+        #    try_preempt_worker, identifies as background and so does
+        #    NOT preempt a running worker turn.  Background-as-webhook
+        #    triggered the livelock in #1711 — every rescope iteration
+        #    cancelled the worker mid-flight, the worker retried, the
+        #    next iteration cancelled again, indefinitely.  Background
+        #    rescope is system-internal and has no priority claim on
+        #    interrupting the worker.
         #
         # IMPORTANT: every line from here through the end of the finally must be
         # inside the try/finally — if a prelude line (set_thread_kind,
         # set_rescoping, etc.) raises, the finally still has to release the
         # inbox holds; otherwise the worker parks forever (#1280).
         try:
-            set_thread_kind("webhook")
+            set_thread_kind(ThreadKind.BACKGROUND)
             set_thread_repo(repo_cfg.name)
             registry.set_rescoping(repo_cfg.name, True)
             log.info("rescope BG: starting (work_dir=%s)", work_dir)

@@ -44,6 +44,7 @@ from fido.provider import (
     ProviderModel,
     ProviderPressureStatus,
     SessionLeakError,
+    ThreadKind,
     TurnSessionMode,
     safe_voice_turn,
     set_thread_kind,
@@ -4905,7 +4906,7 @@ class WorkerThread(threading.Thread):
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
         set_thread_repo(self._repo_name)
-        set_thread_kind("worker")
+        set_thread_kind(ThreadKind.WORKER)
         try:
             while not self._stop.is_set():
                 if self._registry is not None:

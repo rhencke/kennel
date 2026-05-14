@@ -36,6 +36,7 @@ from fido.provider import (
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
+    ThreadKind,
     model_name,
 )
 from fido.rocq import claude_session as stream_fsm
@@ -398,7 +399,7 @@ def _run_streaming(
             provider.SessionTalker(
                 repo_name=repo_name,
                 thread_id=thread_id,
-                kind="webhook",
+                kind=ThreadKind.WEBHOOK,
                 description=f"one-shot claude --print (pid {proc.pid})",
                 subprocess_pid=proc.pid,
                 started_at=provider.talker_now(),
