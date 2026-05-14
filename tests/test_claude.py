@@ -37,6 +37,7 @@ from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
+    ThreadKind,
     TurnSessionMode,
 )
 
@@ -2161,7 +2162,7 @@ class TestClaudeSessionLock:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         try:
             with (
                 patch(
@@ -2184,7 +2185,7 @@ class TestClaudeSessionLock:
         attribute that prompt() wrote and __enter__ read.  Cross-thread
         race: a webhook thread's "webhook" write could clobber a worker
         thread's "worker" write between the worker's prompt() and the
-        worker's __enter__, registering the worker with kind="webhook".
+        worker's __enter__, registering the worker with kind=ThreadKind.WEBHOOK.
 
         This test simulates that hazard directly: the *current thread* is
         a worker, but a session-level "webhook" annotation has been
@@ -2200,7 +2201,7 @@ class TestClaudeSessionLock:
         # no-op for the kind decision.
         session._pending_talker_kind = "webhook"  # type: ignore[attr-defined]
 
-        provider.set_thread_kind("worker")
+        provider.set_thread_kind(ThreadKind.WORKER)
         try:
             session.__enter__()
             talker = provider.get_talker(session._repo_name)
@@ -2478,7 +2479,7 @@ class TestClaudeSessionLock:
             SessionTalker(
                 repo_name="owner/repo",
                 thread_id=999,
-                kind="webhook",
+                kind=ThreadKind.WEBHOOK,
                 description="leaked",
                 subprocess_pid=555,
                 started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),

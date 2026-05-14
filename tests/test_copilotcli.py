@@ -43,6 +43,7 @@ from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
     ProviderModel,
+    ThreadKind,
     TurnSessionMode,
 )
 
@@ -1211,11 +1212,11 @@ class TestCopilotCLISession:
         release = threading.Event()
 
         # Holder enters as worker so the shared talker registry reports it.
-        provider.set_thread_kind("worker")
+        provider.set_thread_kind(ThreadKind.WORKER)
         session.__enter__()
 
         def contender() -> None:
-            provider.set_thread_kind("webhook")
+            provider.set_thread_kind(ThreadKind.WEBHOOK)
             try:
                 with session:
                     acquired.set()
@@ -1256,11 +1257,11 @@ class TestCopilotCLISession:
         acquired = threading.Event()
         release = threading.Event()
 
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         session.__enter__()
 
         def contender() -> None:
-            provider.set_thread_kind("webhook")
+            provider.set_thread_kind(ThreadKind.WEBHOOK)
             try:
                 with session:
                     acquired.set()
@@ -1303,7 +1304,7 @@ class TestCopilotCLISession:
             provider.SessionTalker(
                 repo_name="owner/repo",
                 thread_id=999_999,
-                kind="worker",
+                kind=ThreadKind.WORKER,
                 description="squatter",
                 subprocess_pid=None,
                 started_at=provider.talker_now(),
@@ -1338,11 +1339,11 @@ class TestCopilotCLISession:
         acquired = threading.Event()
         release = threading.Event()
 
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         session.__enter__()
 
         def contender() -> None:
-            provider.set_thread_kind("worker")
+            provider.set_thread_kind(ThreadKind.WORKER)
             try:
                 with session:
                     acquired.set()

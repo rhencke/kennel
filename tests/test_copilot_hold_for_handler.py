@@ -6,6 +6,7 @@ import pytest
 
 from fido import provider
 from fido.copilotcli import CopilotCLIClient, CopilotCLISession
+from fido.provider import ThreadKind
 
 
 class FakeRuntime:
@@ -54,7 +55,7 @@ def test_hold_for_handler_allows_nested_with(tmp_path: Path) -> None:
     single talker registration across both entries (mirrors the claude
     behaviour in #658)."""
     session = _session(tmp_path)
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             assert provider.get_talker("owner/repo") is not None
@@ -72,7 +73,7 @@ def test_hold_for_handler_does_not_fire_runtime_cancel_when_free(
     """No holder + no ``preempt_worker=True`` → no runtime cancel."""
     session = _session(tmp_path)
     assert isinstance(session._runtime, FakeRuntime)
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             pass
@@ -94,14 +95,14 @@ def test_hold_for_handler_preempt_fires_runtime_cancel_on_worker_holder(
         return provider.SessionTalker(
             repo_name="owner/repo",
             thread_id=999_999,
-            kind="worker",
+            kind=ThreadKind.WORKER,
             description="fake-worker",
             subprocess_pid=None,
             started_at=provider.talker_now(),
         )
 
     monkeypatch.setattr(provider, "get_talker", fake_talker)
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             pass

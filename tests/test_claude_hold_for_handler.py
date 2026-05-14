@@ -8,7 +8,7 @@ import pytest
 
 from fido import provider
 from fido.claude import ClaudeSession
-from fido.provider import SessionTalker, talker_now
+from fido.provider import SessionTalker, ThreadKind, talker_now
 
 
 def _make_session_proc(lines: list[str]) -> MagicMock:
@@ -44,7 +44,7 @@ def test_hold_acquires_lock_and_registers_talker(tmp_path: Path) -> None:
     from fido.rocq.transition import Free, OwnedByHandler
 
     session = _setup_session(tmp_path)
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             talker = provider.get_talker("owner/repo")
@@ -73,7 +73,7 @@ def test_nested_with_inside_hold_does_not_double_register(
         real_register(talker)
 
     monkeypatch.setattr(provider, "register_talker", counting_register)
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             assert len(register_calls) == 1  # outer entry registered once
@@ -107,7 +107,7 @@ def test_hold_preempt_fires_cancel_when_worker_holds(
     monkeypatch.setattr(provider, "get_talker", lambda _repo: fake_talker("worker"))
     cancel_calls = []
     monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             pass
@@ -128,7 +128,7 @@ def test_hold_preempt_no_fire_when_no_worker_holder(
     monkeypatch.setattr(provider, "get_talker", lambda _repo: None)
     cancel_calls = []
     monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             pass
@@ -177,7 +177,7 @@ def test_other_thread_blocks_while_held(tmp_path: Path) -> None:
     other_finished = threading.Event()
 
     def holder() -> None:
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         try:
             with session.hold_for_handler():
                 holder_entered.set()
@@ -186,7 +186,7 @@ def test_other_thread_blocks_while_held(tmp_path: Path) -> None:
             provider.set_thread_kind(None)
 
     def other() -> None:
-        provider.set_thread_kind("worker")
+        provider.set_thread_kind(ThreadKind.WORKER)
         try:
             with session:
                 other_acquired.set()
@@ -254,7 +254,7 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
     webhook_done = threading.Event()
 
     def worker() -> None:
-        provider.set_thread_kind("worker")
+        provider.set_thread_kind(ThreadKind.WORKER)
         try:
             with session:
                 worker_in_turn.set()
@@ -265,7 +265,7 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
             provider.set_thread_kind(None)
 
     def webhook() -> None:
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         try:
             # Wait until worker is actually blocked, then preempt.
             worker_blocked.wait(timeout=2.0)
@@ -343,7 +343,7 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
         session, "_selector", MagicMock(return_value=([proc.stdout], [], []))
     )
 
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
             # _fire_worker_cancel set _cancel.  Handler's first prompt() must
@@ -378,7 +378,7 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
     errors: list[Exception] = []
 
     def webhook_a() -> None:
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         try:
             with session.hold_for_handler():
                 webhook_a_holding.set()
@@ -396,7 +396,7 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
             provider.set_thread_kind(None)
 
     def webhook_b() -> None:
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         try:
             assert webhook_a_holding.wait(timeout=2.0), "webhook_a_holding timed out"
             webhook_b_queuing.set()
@@ -409,7 +409,7 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
             provider.set_thread_kind(None)
 
     def worker() -> None:
-        provider.set_thread_kind("worker")
+        provider.set_thread_kind(ThreadKind.WORKER)
         try:
             assert webhook_b_queuing.wait(timeout=2.0), "webhook_b_queuing timed out"
             import time as _time
@@ -453,13 +453,13 @@ def test_hold_reraises_leak_error_and_releases_lock(
         SessionTalker(
             repo_name="owner/repo",
             thread_id=111_111,  # different tid — triggers leak
-            kind="worker",
+            kind=ThreadKind.WORKER,
             description="squatter",
             subprocess_pid=None,
             started_at=talker_now(),
         )
     )
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with pytest.raises(provider.SessionLeakError):
             with session.hold_for_handler():
@@ -671,7 +671,7 @@ def test_force_release_unblocks_wedged_holder_end_to_end(tmp_path: Path) -> None
         finally:
             holder_done.set()
 
-    provider.set_thread_kind("worker")
+    provider.set_thread_kind(ThreadKind.WORKER)
     try:
         t = threading.Thread(target=holder, daemon=True)
         t.start()

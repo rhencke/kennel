@@ -9,16 +9,17 @@ paths live in ``test_claude_hold_for_handler.py`` and ``test_server.py``.
 """
 
 from fido import provider
+from fido.provider import ThreadKind
 
 
 def test_set_thread_kind_roundtrip() -> None:
     provider.set_thread_kind(None)
     assert provider.current_thread_kind() == "worker"
-    provider.set_thread_kind("webhook")
+    provider.set_thread_kind(ThreadKind.WEBHOOK)
     assert provider.current_thread_kind() == "webhook"
-    provider.set_thread_kind("worker")
+    provider.set_thread_kind(ThreadKind.WORKER)
     assert provider.current_thread_kind() == "worker"
-    provider.set_thread_kind("background")
+    provider.set_thread_kind(ThreadKind.BACKGROUND)
     assert provider.current_thread_kind() == "background"
     provider.set_thread_kind(None)
     assert provider.current_thread_kind() == "worker"
@@ -32,14 +33,14 @@ def test_try_preempt_worker_webhook_preempts_worker() -> None:
     talker = provider.SessionTalker(
         repo_name=repo,
         thread_id=42,
-        kind="worker",
+        kind=ThreadKind.WORKER,
         description="long worker turn",
         subprocess_pid=1,
         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     try:
         provider.register_talker(talker)
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         cancelled: list[bool] = []
         preempted, current_kind = provider.try_preempt_worker(
             repo, lambda: cancelled.append(True)
@@ -63,14 +64,14 @@ def test_try_preempt_worker_background_does_not_preempt() -> None:
     talker = provider.SessionTalker(
         repo_name=repo,
         thread_id=42,
-        kind="worker",
+        kind=ThreadKind.WORKER,
         description="long worker turn",
         subprocess_pid=1,
         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     try:
         provider.register_talker(talker)
-        provider.set_thread_kind("background")
+        provider.set_thread_kind(ThreadKind.BACKGROUND)
         cancelled: list[bool] = []
         preempted, current_kind = provider.try_preempt_worker(
             repo, lambda: cancelled.append(True)
@@ -94,14 +95,14 @@ def test_try_preempt_worker_background_holder_not_preempted_by_webhook() -> None
     talker = provider.SessionTalker(
         repo_name=repo,
         thread_id=42,
-        kind="background",
+        kind=ThreadKind.BACKGROUND,
         description="rescope iteration in flight",
         subprocess_pid=1,
         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     try:
         provider.register_talker(talker)
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         cancelled: list[bool] = []
         preempted, current_kind = provider.try_preempt_worker(
             repo, lambda: cancelled.append(True)

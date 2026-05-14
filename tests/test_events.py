@@ -42,7 +42,7 @@ from fido.events import (
     reply_to_review,
     thread_lineage_comment_ids,
 )
-from fido.provider import ProviderID
+from fido.provider import ProviderID, ThreadKind
 from fido.rocq import replied_comment_claims as oracle
 from fido.state import State
 from fido.store import FidoStore, ReplyPromiseRecord
@@ -5160,7 +5160,9 @@ class TestReorderTasksBackground:
         started: list = []
         _, mock_reorder = self._capture_reorder_calls()
 
-        set_thread_kind("webhook")  # pre-set to confirm the finally block clears it
+        set_thread_kind(
+            ThreadKind.WEBHOOK
+        )  # pre-set to confirm the finally block clears it
         _reorder_tasks_background(
             tmp_path,
             "cs",

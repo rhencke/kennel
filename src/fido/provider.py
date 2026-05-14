@@ -64,6 +64,30 @@ class ProviderID(StrEnum):
     CODEX = "codex"
 
 
+class ThreadKind(StrEnum):
+    """Caller kind for the per-thread preempt-decision plumbing.
+
+    Tracked in :data:`_thread_local` and consulted by
+    :func:`try_preempt_worker` to decide whether the current thread may
+    cancel a running worker turn.
+
+    * :attr:`WORKER` — the per-repo :class:`~fido.worker.WorkerThread`.
+    * :attr:`WEBHOOK` — a real, user-initiated webhook handler (set by
+      :meth:`fido.server.WebhookHandler._process_action`).  Webhook
+      callers may preempt a running worker turn (#637).
+    * :attr:`BACKGROUND` — an internal system trigger such as the
+      background rescope thread in :mod:`fido.events` (#1711).
+      Background callers identify as non-worker so OTHER threads'
+      preempt decisions don't cancel them, but they themselves never
+      preempt a running worker — that would livelock long worker turns
+      against bursty rescope iterations.
+    """
+
+    WORKER = "worker"
+    WEBHOOK = "webhook"
+    BACKGROUND = "background"
+
+
 @dataclass(frozen=True)
 class ProviderPalette:
     """ANSI truecolor palette for a provider's status rendering.
@@ -474,7 +498,7 @@ class SessionTalker:
 
     repo_name: str
     thread_id: int
-    kind: Literal["worker", "webhook", "background"]
+    kind: ThreadKind
     description: str
     subprocess_pid: int | None
     started_at: datetime
@@ -537,7 +561,7 @@ def current_repo() -> str | None:
     return getattr(_thread_local, "repo_name", None)
 
 
-def set_thread_kind(kind: Literal["worker", "webhook", "background"] | None) -> None:
+def set_thread_kind(kind: ThreadKind | None) -> None:
     """Set (or clear, with ``None``) the caller kind for this thread.
 
     Three kinds:
@@ -562,15 +586,17 @@ def set_thread_kind(kind: Literal["worker", "webhook", "background"] | None) -> 
         _thread_local.kind = kind
 
 
-def current_thread_kind() -> Literal["worker", "webhook", "background"]:
-    """Return the caller kind for this thread.  Defaults to ``"worker"``
-    when not set (non-entry code paths and tests)."""
-    return getattr(_thread_local, "kind", "worker")
+def current_thread_kind() -> ThreadKind:
+    """Return the caller kind for this thread.  Defaults to
+    :attr:`ThreadKind.WORKER` when not set (non-entry code paths
+    and tests)."""
+    kind = getattr(_thread_local, "kind", None)
+    return kind if isinstance(kind, ThreadKind) else ThreadKind.WORKER
 
 
 def try_preempt_worker(
     repo_name: str | None, cancel_fn: Callable[[], None]
-) -> tuple[bool, Literal["worker", "webhook", "background"] | None]:
+) -> tuple[bool, ThreadKind | None]:
     """Invoke *cancel_fn* iff the calling thread is a real webhook AND the
     session's current lock holder is a worker.  Otherwise do nothing.
 

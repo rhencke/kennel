@@ -16,6 +16,7 @@ from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
     ProviderAgent,
+    ThreadKind,
     safe_voice_turn,
     set_thread_kind,
     set_thread_repo,
@@ -2409,7 +2410,7 @@ def _reorder_tasks_background(
         # set_rescoping, etc.) raises, the finally still has to release the
         # inbox holds; otherwise the worker parks forever (#1280).
         try:
-            set_thread_kind("background")
+            set_thread_kind(ThreadKind.BACKGROUND)
             set_thread_repo(repo_cfg.name)
             registry.set_rescoping(repo_cfg.name, True)
             log.info("rescope BG: starting (work_dir=%s)", work_dir)

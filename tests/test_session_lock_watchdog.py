@@ -25,6 +25,7 @@ from fido.provider import (
     OwnedSession,
     ProviderID,
     SessionTalker,
+    ThreadKind,
     register_talker,
     unregister_talker,
 )
@@ -133,7 +134,7 @@ def test_run_skips_holder_within_deadline(
         SessionTalker(
             repo_name=repo_name,
             thread_id=42,
-            kind="worker",
+            kind=ThreadKind.WORKER,
             description="recent turn",
             subprocess_pid=1,
             started_at=sent_at,
@@ -179,7 +180,7 @@ def test_run_evicts_holder_past_deadline(monkeypatch: pytest.MonkeyPatch) -> Non
         SessionTalker(
             repo_name=repo_name,
             thread_id=99999,
-            kind="webhook",
+            kind=ThreadKind.WEBHOOK,
             description="wedged synthesis turn",
             subprocess_pid=1,
             started_at=sent_at,
@@ -226,7 +227,7 @@ def test_run_handles_multiple_repos_independently(
         SessionTalker(
             repo_name="FidoCanCode/home",
             thread_id=1,
-            kind="webhook",
+            kind=ThreadKind.WEBHOOK,
             description="long",
             subprocess_pid=1,
             started_at=sent_at,
@@ -236,7 +237,7 @@ def test_run_handles_multiple_repos_independently(
         SessionTalker(
             repo_name="rhencke/confusio",
             thread_id=2,
-            kind="worker",
+            kind=ThreadKind.WORKER,
             description="short",
             subprocess_pid=1,
             started_at=sent_at + timedelta(seconds=55),
@@ -344,7 +345,7 @@ def test_module_level_run_evicts_past_deadline(
         SessionTalker(
             repo_name=repo_name,
             thread_id=7,
-            kind="worker",
+            kind=ThreadKind.WORKER,
             description="wedged",
             subprocess_pid=1,
             started_at=sent_at,
@@ -389,7 +390,7 @@ def test_idle_session_with_no_outstanding_send_is_left_alone(
         SessionTalker(
             repo_name=repo_name,
             thread_id=42,
-            kind="worker",
+            kind=ThreadKind.WORKER,
             description="lock held but no send pending",
             subprocess_pid=1,
             started_at=started_at,

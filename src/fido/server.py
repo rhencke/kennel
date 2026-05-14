@@ -50,6 +50,7 @@ from fido.infra import (
     ProcessRunner,
     real_infra,
 )
+from fido.provider import ThreadKind
 from fido.provider_factory import DefaultProviderFactory
 from fido.provider_pressure import ProviderPressureMonitor
 from fido.rate_limit import RateLimitMonitor
@@ -625,7 +626,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             tid,
         )
         provider.set_thread_repo(repo_cfg.name)
-        provider.set_thread_kind("webhook")
+        provider.set_thread_kind(ThreadKind.WEBHOOK)
         session = self.registry.get_session(repo_cfg.name)
         needs_model = self._action_uses_model(action)
         preempts_worker = self._action_preempts_worker(action)
