@@ -439,10 +439,15 @@ def _materialize_rescope_oracle_result(
         # task's anchor isn't a supported use case in #1714 scope.
         existing_thread = task.get("thread")
         new_anchor = row.source_comment
+        # Compare via _task_source_comment_for_oracle so a legacy ``'42'``
+        # string in tasks.json compares equal to the oracle-materialized
+        # ``42`` (codex on #1731).  Without normalization a no-op rescope
+        # would still trip the re-anchor path and drop per-comment
+        # metadata even though the anchor didn't actually change.
         if (
             isinstance(existing_thread, dict)
             and isinstance(new_anchor, int)
-            and new_anchor != existing_thread.get("comment_id")
+            and new_anchor != _task_source_comment_for_oracle(task)
         ):
             task["thread"] = _reanchored_thread(existing_thread, new_anchor)
         materialized.append(task)
@@ -459,7 +464,16 @@ def _reanchored_thread(
     ``lineage_key`` chain identifier) are dropped because they no longer
     describe the new anchor.  Worker code that needs them must re-fetch
     via the new ``comment_id`` rather than read stale metadata.
-    Lane-level fields (``repo``, ``pr``) and the lineage are preserved.
+
+    ``comment_type`` is preserved.  It tags the lane (``"pulls"`` for
+    review-thread comments, ``"issues"`` for top-level PR/issue comments)
+    and ``_notify_thread_change`` reads it to choose the correct GitHub
+    API for the rescope reply — a missing value defaults to ``"issues"``
+    and silently drops review-thread notifications.  In #1714 scope the
+    soft adapter contract (``anchor_comment_id``) carries no kind hint;
+    re-anchors are assumed to stay within the same lane.  Cross-lane
+    re-anchoring needs an explicit kind in the rescope item, which is
+    #1247 territory.
     """
     refreshed = {
         key: value
@@ -474,15 +488,7 @@ def _reanchored_thread(
 
 
 _STALE_AFTER_REANCHOR = frozenset(
-    {
-        "url",
-        "author",
-        "comment_type",
-        "lineage_key",
-        "path",
-        "line",
-        "diff_hunk",
-    }
+    {"url", "author", "lineage_key", "path", "line", "diff_hunk"}
 )
 
 

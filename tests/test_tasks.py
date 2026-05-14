@@ -1136,12 +1136,14 @@ class TestApplyReorder:
             )
 
     def test_anchor_change_drops_stale_per_comment_thread_fields(self) -> None:
-        # codex on #1731: url, author, comment_type, path, line, diff_hunk,
-        # lineage_key all describe the OLD anchor.  Once the anchor moves
-        # they no longer apply — drop them so worker code can't read stale
-        # data (wrong URL, mis-attributed author, wrong reply endpoint
-        # via a stale comment_type pointing at a different comment kind).
-        # Lane-level fields (repo, pr) and the lineage list survive.
+        # codex on #1731: url, author, path, line, diff_hunk, lineage_key
+        # all describe the OLD anchor.  Once the anchor moves they no
+        # longer apply — drop them so worker code can't read stale data
+        # (wrong URL, mis-attributed author).  Lane-level fields (repo,
+        # pr, comment_type) and the lineage list survive.  comment_type
+        # in particular is preserved because _notify_thread_change reads
+        # it to choose the GitHub API; defaulting it to 'issues' would
+        # silently drop review-thread notifications (codex #2 on #1731).
         thread = {
             "repo": "a/b",
             "pr": 1,
@@ -1163,19 +1165,32 @@ class TestApplyReorder:
         assert new_thread["comment_id"] == 99
         assert new_thread["repo"] == "a/b"
         assert new_thread["pr"] == 1
+        assert new_thread["comment_type"] == "pulls"
         assert new_thread["lineage_comment_ids"] == [42, 99]
-        for stale in (
-            "url",
-            "author",
-            "comment_type",
-            "path",
-            "line",
-            "diff_hunk",
-            "lineage_key",
-        ):
+        for stale in ("url", "author", "path", "line", "diff_hunk", "lineage_key"):
             assert stale not in new_thread, (
                 f"{stale} described the old anchor and must be dropped"
             )
+
+    def test_materializer_normalizes_anchor_comparison(self) -> None:
+        # codex on #1731: a no-op rescope (Opus's anchor matches the
+        # existing one, expressed as int) against a legacy '42'-string
+        # anchor in tasks.json must NOT trip the re-anchor path; without
+        # int-normalized comparison we'd drop url/author/etc. metadata
+        # for an anchor change that didn't actually happen.
+        thread = {
+            "repo": "a/b",
+            "pr": 1,
+            "comment_id": "42",  # legacy string form
+            "url": "https://github.com/a/b/pull/1#discussion_r42",
+            "author": "commenter",
+        }
+        t = self._t("1", "Thread task", task_type="thread")
+        t["thread"] = thread
+        items = [{"id": "1", "title": "Thread task", "anchor_comment_id": 42}]
+        result = _apply_reorder([t], items)
+        # Thread metadata stays put — no anchor change happened.
+        assert result[0]["thread"] == thread
 
     def test_applies_duplicate_titles_at_apply_reorder_layer(self) -> None:
         # _apply_reorder is the low-level reducer; uniqueness is enforced
