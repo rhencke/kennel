@@ -97,14 +97,44 @@ def _thread_task_for_auto_resolve_oracle(
     )
 
 
+def _thread_tasks_for_auto_resolve_oracle_one(
+    task: dict[str, Any],
+) -> list[thread_resolve_oracle.ThreadTask]:
+    """Project one task into the auto-resolve oracle's per-comment view.
+
+    A non-merged thread task contributes one ThreadTask: its primary
+    anchor.  A merged thread task (lineage_comment_ids carries the
+    folded-in source anchors after #1717) contributes one ThreadTask
+    per lineage comment, all with the same status.  Without this
+    expansion, a still-pending merged target's lineage comments would
+    be invisible to the auto-resolve oracle and the source review
+    threads would resolve before the merged target is actually done
+    (codex on #1738).
+    """
+    primary = _thread_task_for_auto_resolve_oracle(task)
+    if primary is None:
+        return []
+    status = primary.thread_task_status
+    seen: set[int] = {primary.thread_task_comment}
+    out: list[thread_resolve_oracle.ThreadTask] = [primary]
+    for cid in _thread_lineage_comment_ids(task.get("thread")):
+        if cid in seen:
+            continue
+        seen.add(cid)
+        out.append(
+            thread_resolve_oracle.ThreadTask(
+                thread_task_comment=cid, thread_task_status=status
+            )
+        )
+    return out
+
+
 def thread_tasks_for_auto_resolve_oracle(
     task_list: list[dict[str, Any]],
 ) -> list[thread_resolve_oracle.ThreadTask]:
     tasks: list[thread_resolve_oracle.ThreadTask] = []
     for task in task_list:
-        oracle_task = _thread_task_for_auto_resolve_oracle(task)
-        if oracle_task is not None:
-            tasks.append(oracle_task)
+        tasks.extend(_thread_tasks_for_auto_resolve_oracle_one(task))
     return tasks
 
 
@@ -1091,10 +1121,10 @@ def _validate_rescope_batch(
                     f"item[{index}].merge_sources: must be a list, "
                     f"got {type(merge_sources).__name__}"
                 )
-            elif item.get("status") == str(TaskStatus.COMPLETED):
+            elif merge_sources and item.get("status") == str(TaskStatus.COMPLETED):
                 # codex on #1738: explicit-completion precedence (#1716)
                 # wins over merge in _rescope_releases_for_oracle, so a
-                # batch with both ``status="completed"`` and
+                # batch with both ``status="completed"`` and a NON-EMPTY
                 # ``merge_sources`` on the same target emits CompleteTask
                 # and silently drops the merge.  But _merge_source_ids()
                 # still reads the raw payload and treats sources as
@@ -1104,7 +1134,10 @@ def _validate_rescope_batch(
                 # anywhere.  Rather than thread the emitted ops through
                 # the suppression path, reject the contradictory shape
                 # at the validator: completing the target means there is
-                # no pending work to absorb merged sources.
+                # no pending work to absorb merged sources.  An empty
+                # ``merge_sources`` is the documented "no merge"
+                # sentinel (_merge_source_oracle_ids returns []) and is
+                # harmless on a completed target — don't reject.
                 errors.append(
                     f"item[{index}].merge_sources on {item_id!r}: target "
                     'is also marked status="completed"; merging into a '

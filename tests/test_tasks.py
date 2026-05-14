@@ -32,6 +32,7 @@ from fido.tasks import (
     _validate_rescope_batch,
     reorder_tasks,
     review_thread_for_auto_resolve_oracle,
+    thread_tasks_for_auto_resolve_oracle,
 )
 from fido.types import RescopeIntent, TaskStatus, TaskType
 
@@ -1296,6 +1297,51 @@ class TestApplyReorder:
         with pytest.raises(AssertionError, match="missing from rescope output"):
             _assert_merge_lineage_preserved([merge_release], rows_before, rows_after)
 
+    def test_auto_resolve_projection_skips_non_thread_tasks(self) -> None:
+        # A task with no thread contributes zero ThreadTask entries —
+        # the auto-resolve oracle only cares about review-thread
+        # comments, not spec/CI work.
+        spec = self._t("spec", "Spec")  # no thread dict
+        assert thread_tasks_for_auto_resolve_oracle([spec]) == []
+
+    def test_merged_target_lineage_blocks_source_thread_auto_resolve(self) -> None:
+        # codex on #1738 (high): the auto-resolve oracle's projection
+        # must cover every comment in a pending merged target's
+        # lineage, not just the primary anchor.  Otherwise after a
+        # merge the source thread auto-resolves before the merged
+        # target is actually done, because no pending task carries the
+        # source's comment_id as primary anymore (the source is
+        # COMPLETED, the target's primary is its own anchor).
+        thread_a = {"repo": "r/r", "pr": 1, "comment_id": 100}
+        thread_b = {"repo": "r/r", "pr": 1, "comment_id": 200}
+        a = self._t("a", "Task A", task_type="thread")
+        a["thread"] = thread_a
+        b = self._t("b", "Task B", task_type="thread")
+        b["thread"] = thread_b
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "Task B", "status": "completed"},
+        ]
+        result = _apply_reorder([a, b], items)
+        oracle_tasks = thread_tasks_for_auto_resolve_oracle(result)
+        # Comment 200 (the source's anchor) appears as a PENDING
+        # ThreadTask via the merged target's lineage — the auto-resolve
+        # oracle will see it and refuse to resolve thread 200 until the
+        # merged target completes.
+        from fido.rocq import thread_auto_resolve as resolve_oracle
+
+        pending_for_200 = [
+            t
+            for t in oracle_tasks
+            if t.thread_task_comment == 200
+            and isinstance(t.thread_task_status, resolve_oracle.StatusPending)
+        ]
+        assert pending_for_200, (
+            "merged target's lineage must surface as a pending ThreadTask "
+            "for each absorbed source's anchor — otherwise auto-resolve "
+            "fires prematurely on the source thread"
+        )
+
     def test_merge_apply_runs_lineage_preservation_assertion(self) -> None:
         # codex on #1738 (medium): the Rocq predicate
         # merge_preserves_source_lineage is asserted at runtime for
@@ -1906,6 +1952,21 @@ class TestValidateRescopeBatch:
         assert any(
             "merging into a completed task is contradictory" in e for e in errors
         )
+
+    def test_empty_merge_sources_on_completed_target_is_harmless(self) -> None:
+        # codex on #1738 (low): an empty merge_sources is the
+        # documented "no merge" sentinel and shouldn't be rejected on a
+        # completed target — there's no contradiction to fail closed on.
+        current = [self._t("target")]
+        items = [
+            {
+                "id": "target",
+                "title": "T",
+                "status": "completed",
+                "merge_sources": [],
+            },
+        ]
+        assert _validate_rescope_batch(current, items) == []
 
     def test_thread_source_into_non_thread_target_is_rejected(self) -> None:
         # codex P1 on #1738: a thread source contributes comment lineage
