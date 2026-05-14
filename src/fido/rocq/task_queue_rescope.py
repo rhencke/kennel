@@ -85,6 +85,7 @@ class TaskRow:
     kind: TaskKind
     status: TaskStatus
     source_comment: int | None
+    lineage_comments: list[int]
 
 
 # ExecutionLease: singleton inductive, constructor was Build_ExecutionLease

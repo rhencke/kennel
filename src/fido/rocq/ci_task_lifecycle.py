@@ -85,6 +85,7 @@ class TaskRow:
     kind: TaskKind
     status: TaskStatus
     source_comment: int | None
+    lineage_comments: list[int]
 
 
 # ExecutionLease: singleton inductive, constructor was Build_ExecutionLease
@@ -427,6 +428,7 @@ class CIFailureSnapshot:
             kind=TaskCI(),
             status=StatusPending(),
             source_comment=None,
+            lineage_comments=[],
         )
 
     def update_latest(

@@ -82,7 +82,8 @@ Definition ci_task_row (snapshot : CIFailureSnapshot) : TaskRow := {|
   description := "";
   kind := TaskCI;
   status := StatusPending;
-  source_comment := None
+  source_comment := None;
+  lineage_comments := []
 |}.
 
 Definition ci_live_task (row : CIRow) : option positive :=
@@ -232,7 +233,8 @@ Definition block_task_if_present
             description := description row;
             kind := kind row;
             status := StatusBlocked;
-            source_comment := source_comment row
+            source_comment := source_comment row;
+            lineage_comments := lineage_comments row
           |} in
           PositiveMap.add task_id row' task_rows
       end
@@ -333,7 +335,8 @@ Definition sample_spec_row : TaskRow := {|
   description := "";
   kind := TaskSpec;
   status := StatusPending;
-  source_comment := None
+  source_comment := None;
+  lineage_comments := []
 |}.
 
 Definition sample_snapshot_old : CIFailureSnapshot := {|
@@ -450,7 +453,8 @@ Lemma human_resume_restores_retry :
     description := "";
     kind := TaskCI;
     status := StatusBlocked;
-    source_comment := None
+    source_comment := None;
+    lineage_comments := []
   |} in
   let ci_store := PositiveMap.add 1 row (PositiveMap.empty CIRow) in
   let task_rows := PositiveMap.add 7 blocked_row (PositiveMap.empty TaskRow) in

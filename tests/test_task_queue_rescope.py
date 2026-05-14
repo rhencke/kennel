@@ -43,6 +43,7 @@ def _row(task: dict) -> object:
         kind=_kind(task.get("type", "spec"), task["title"]),
         status=_status(task.get("status", "pending")),
         source_comment=comment_id,
+        lineage_comments=[],
     )
 
 
@@ -122,6 +123,7 @@ def test_model_enqueue_pick_and_lease_lifecycle() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     row2 = oracle.TaskRow(
         title="Fix CI",
@@ -129,6 +131,7 @@ def test_model_enqueue_pick_and_lease_lifecycle() -> None:
         kind=oracle.TaskCI(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     row3 = oracle.TaskRow(
         title="ASK: should we widen this?",
@@ -136,6 +139,7 @@ def test_model_enqueue_pick_and_lease_lifecycle() -> None:
         kind=oracle.TaskAsk(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
 
     order: list[int] = []
@@ -162,6 +166,7 @@ def test_model_enqueue_dedups_by_comment_and_pending_title() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=77,
+        lineage_comments=[],
     )
     spec_row = oracle.TaskRow(
         title="Implement feature",
@@ -169,6 +174,7 @@ def test_model_enqueue_dedups_by_comment_and_pending_title() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     order, rows, first = _enqueue(1, thread_row, [], {})
     order, rows, duplicate = _enqueue(2, thread_row, order, rows)
@@ -183,18 +189,20 @@ def test_model_enqueue_dedups_by_comment_and_pending_title() -> None:
 def test_model_rescope_and_abort_helpers() -> None:
     rows = {
         1: oracle.TaskRow(
-            "spec one", "old", oracle.TaskSpec(), oracle.StatusPending(), None
+            "spec one", "old", oracle.TaskSpec(), oracle.StatusPending(), None, []
         ),
         2: oracle.TaskRow(
-            "thread two", "", oracle.TaskThread(), oracle.StatusPending(), 42
+            "thread two", "", oracle.TaskThread(), oracle.StatusPending(), 42, [42]
         ),
         3: oracle.TaskRow(
-            "done", "", oracle.TaskSpec(), oracle.StatusCompleted(), None
+            "done", "", oracle.TaskSpec(), oracle.StatusCompleted(), None, []
         ),
         4: oracle.TaskRow(
-            "late arrival", "", oracle.TaskSpec(), oracle.StatusPending(), None
+            "late arrival", "", oracle.TaskSpec(), oracle.StatusPending(), None, []
         ),
-        5: oracle.TaskRow("ci fix", "", oracle.TaskCI(), oracle.StatusPending(), None),
+        5: oracle.TaskRow(
+            "ci fix", "", oracle.TaskCI(), oracle.StatusPending(), None, []
+        ),
     }
     snapshot_order = [1, 2]
     current_order = [1, 2, 3, 4, 5]
@@ -224,10 +232,10 @@ def test_model_rescope_and_abort_helpers() -> None:
 def test_model_unblock_tasks() -> None:
     rows = {
         1: oracle.TaskRow(
-            "blocked", "", oracle.TaskSpec(), oracle.StatusBlocked(), None
+            "blocked", "", oracle.TaskSpec(), oracle.StatusBlocked(), None, []
         ),
         2: oracle.TaskRow(
-            "done", "", oracle.TaskSpec(), oracle.StatusCompleted(), None
+            "done", "", oracle.TaskSpec(), oracle.StatusCompleted(), None, []
         ),
     }
     unblocked = oracle.unblock_tasks([1, 2], rows)
@@ -320,6 +328,7 @@ def test_rescope_applies_title_and_anchor_rewrites() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=55,
+        lineage_comments=[],
     )
     rows_before = {1: before}
 
@@ -354,6 +363,7 @@ def test_batched_rescope_converges_for_permuted_releases() -> None:
             oracle.TaskThread(),
             oracle.StatusPending(),
             55,
+            [55],
         ),
         2: oracle.TaskRow(
             "Spec task",
@@ -361,6 +371,7 @@ def test_batched_rescope_converges_for_permuted_releases() -> None:
             oracle.TaskSpec(),
             oracle.StatusPending(),
             None,
+            [],
         ),
         3: oracle.TaskRow(
             "Fix CI",
@@ -368,6 +379,7 @@ def test_batched_rescope_converges_for_permuted_releases() -> None:
             oracle.TaskCI(),
             oracle.StatusPending(),
             None,
+            [],
         ),
         4: oracle.TaskRow(
             "Already done",
@@ -375,6 +387,7 @@ def test_batched_rescope_converges_for_permuted_releases() -> None:
             oracle.TaskSpec(),
             oracle.StatusCompleted(),
             None,
+            [],
         ),
         5: oracle.TaskRow(
             "Late arrival",
@@ -382,6 +395,7 @@ def test_batched_rescope_converges_for_permuted_releases() -> None:
             oracle.TaskSpec(),
             oracle.StatusPending(),
             None,
+            [],
         ),
     }
     snapshot_order = [1, 2, 3]
@@ -484,6 +498,7 @@ def test_complete_task_visible_idempotency() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=99,
+        lineage_comments=[],
     )
     rows: dict[int, object] = {1: thread_row}
     rows_after, comment_id = oracle.complete_task_visible(1, rows)
@@ -502,6 +517,7 @@ def test_complete_task_visible_idempotency() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     rows2: dict[int, object] = {2: spec_row}
     rows2_after, comment_id3 = oracle.complete_task_visible(2, rows2)
@@ -515,6 +531,7 @@ def test_complete_task_visible_idempotency() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusBlocked(),
         source_comment=77,
+        lineage_comments=[],
     )
     rows3: dict[int, object] = {3: blocked_thread_row}
     rows3_after, comment_id4 = oracle.complete_task_visible(3, rows3)
@@ -534,6 +551,7 @@ def test_task_change_detection() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=101,
+        lineage_comments=[],
     )
     thread2_row = oracle.TaskRow(
         title="Second review",
@@ -541,6 +559,7 @@ def test_task_change_detection() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=202,
+        lineage_comments=[],
     )
     spec_row = oracle.TaskRow(
         title="Spec task",
@@ -548,6 +567,7 @@ def test_task_change_detection() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     rows_before: dict[int, object] = {1: thread1_row, 2: thread2_row, 3: spec_row}
 
@@ -558,6 +578,7 @@ def test_task_change_detection() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=101,
+        lineage_comments=[],
     )
     rows_rewritten = {1: rewritten_row, 2: thread2_row, 3: spec_row}
     change = oracle.task_change(1, rows_before, rows_rewritten)
@@ -573,6 +594,7 @@ def test_task_change_detection() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusCompleted(),
         source_comment=101,
+        lineage_comments=[],
     )
     rows_completed = {1: completed_row, 2: thread2_row, 3: spec_row}
     change2 = oracle.task_change(1, rows_before, rows_completed)
@@ -592,6 +614,7 @@ def test_task_change_detection() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     rows_spec_changed = {1: thread1_row, 2: thread2_row, 3: spec_rewritten}
     change4 = oracle.task_change(3, rows_before, rows_spec_changed)
@@ -609,6 +632,7 @@ def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=101,
+        lineage_comments=[],
     )
     thread2_row = oracle.TaskRow(
         title="Second review",
@@ -616,6 +640,7 @@ def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=202,
+        lineage_comments=[],
     )
     spec_row = oracle.TaskRow(
         title="Spec task",
@@ -623,6 +648,7 @@ def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     late_row = oracle.TaskRow(
         title="Late thread task",
@@ -630,6 +656,7 @@ def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=303,
+        lineage_comments=[],
     )
     rows_before: dict[int, object] = {
         1: thread1_row,
@@ -646,6 +673,7 @@ def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusCompleted(),
         source_comment=101,
+        lineage_comments=[],
     )
     rewritten_row = oracle.TaskRow(
         title="Second review (updated)",
@@ -653,6 +681,7 @@ def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=202,
+        lineage_comments=[],
     )
     rows_after: dict[int, object] = {
         1: completed_row,
@@ -684,6 +713,7 @@ def test_active_task_ownership_lifecycle() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     ask_row = oracle.TaskRow(
         title="ASK: should we widen?",
@@ -691,6 +721,7 @@ def test_active_task_ownership_lifecycle() -> None:
         kind=oracle.TaskAsk(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     rows: dict[int, object] = {1: spec_row, 2: ask_row}
 
@@ -750,6 +781,7 @@ def test_cleanup_aborted_task() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     other_row = oracle.TaskRow(
         title="Other task",
@@ -757,6 +789,7 @@ def test_cleanup_aborted_task() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     rows: dict[int, object] = {1: spec_row, 2: other_row}
     order = [1, 2]
@@ -816,6 +849,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     thread_row = oracle.TaskRow(
         title="Review follow-up",
@@ -823,6 +857,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=42,
+        lineage_comments=[],
     )
     ci_row = oracle.TaskRow(
         title="Fix CI",
@@ -830,6 +865,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskCI(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
 
     # Enqueue spec task (id 1)
@@ -848,6 +884,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=42,
+        lineage_comments=[],
     )
     order, rows, dup_thread = _enqueue(3, thread_row_dup, order, rows)
     assert dup_thread == 2  # deduped to existing
@@ -860,6 +897,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     order, rows, dup_spec = _enqueue(4, spec_row_dup, order, rows)
     assert dup_spec == 1  # deduped to existing
@@ -889,6 +927,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskThread(),
         status=oracle.StatusPending(),
         source_comment=99,
+        lineage_comments=[],
     )
     order, rows, created_thread2 = _enqueue(7, thread_row2, order, rows)
     assert oracle.should_abort_for_new_task(7, lease, rows) is True
@@ -900,6 +939,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskSpec(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     order, rows, created_spec2 = _enqueue(8, spec_row2, order, rows)
     assert oracle.should_abort_for_new_task(8, lease, rows) is False
@@ -911,6 +951,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskAsk(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     order, rows, created_ask = _enqueue(9, ask_row, order, rows)
     assert oracle.should_abort_for_new_task(9, lease, rows) is False
@@ -922,6 +963,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskDefer(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     order, rows, created_defer = _enqueue(10, defer_row, order, rows)
     assert oracle.should_abort_for_new_task(10, lease, rows) is False
@@ -954,6 +996,7 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
         kind=oracle.TaskCI(),
         status=oracle.StatusPending(),
         source_comment=None,
+        lineage_comments=[],
     )
     order, rows, created_ci2 = _enqueue(11, ci_row2, order, rows)
     assert oracle.should_abort_for_new_task(11, ci_lease, rows) is False

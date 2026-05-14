@@ -440,6 +440,7 @@ class TestTasksMoreBranches:
                 kind=rescope_oracle.TaskSpec(),
                 status=rescope_oracle.StatusBlocked(),
                 source_comment=None,
+                lineage_comments=[],
             )
         }
         result = _materialize_rescope_oracle_result([oracle_id], rows, tasks_by_id)

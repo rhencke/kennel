@@ -271,6 +271,7 @@ def _task_store_for_oracle(
             kind=_task_kind_for_oracle(task),
             status=_task_status_for_oracle(task),
             source_comment=_task_source_comment_for_oracle(task),
+            lineage_comments=_thread_lineage_comment_ids(task.get("thread")),
         )
     return task_store_oracle.TaskStore(order, rows), tasks_by_oracle_id
 
@@ -330,6 +331,11 @@ def _rescope_state_for_oracle(
             kind=_rescope_task_kind_for_oracle(task),
             status=_rescope_task_status_for_oracle(task),
             source_comment=_rescope_task_source_comment_for_oracle(task),
+            # #1717 plumbing: lineage_comments mirrors the task's
+            # thread.lineage_comment_ids origin metadata.  Today the
+            # existing reducer ops preserve it unchanged; the next leaf
+            # adds the merge op that writes it.
+            lineage_comments=_thread_lineage_comment_ids(task.get("thread")),
         )
     return ids_by_task_id, tasks_by_oracle_id, order, rows
 

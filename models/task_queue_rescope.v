@@ -46,13 +46,24 @@ Inductive TaskStatus : Type :=
 | StatusCompleted
 | StatusBlocked.
 
-(** [TaskRow] carries the durable task metadata relevant to D3. *)
+(** [TaskRow] carries the durable task metadata relevant to D3.
+
+    [source_comment] is the primary anchor (#1714 made it mutable).
+    [lineage_comments] is the ordered set of comments that contributed to
+    this task — a superset that always includes [source_comment] when set.
+    The plumbing for [lineage_comments] arrives ahead of the merge
+    operation that will write to it (#1717 split: this leaf adds the
+    field; the next leaf adds the [MergeTasks] reducer and the
+    lineage-preservation theorem).  Today the existing reducer ops
+    (KeepTask / RewriteTask / RewriteAnchor / CompleteTask) preserve
+    [lineage_comments] unchanged. *)
 Record TaskRow : Type := {
   title : string;
   description : string;
   kind : TaskKind;
   status : TaskStatus;
-  source_comment : option positive
+  source_comment : option positive;
+  lineage_comments : list positive
 }.
 
 (** [ExecutionLease] represents the single task currently being executed for a
@@ -288,7 +299,8 @@ Definition complete_task
         description := description row;
         kind := kind row;
         status := StatusCompleted;
-        source_comment := source_comment row
+        source_comment := source_comment row;
+        lineage_comments := lineage_comments row
       |} in
       (lease', PositiveMap.add task row' rows)
   end.
@@ -319,7 +331,8 @@ Definition unblock_task_row
         description := description row;
         kind := kind row;
         status := StatusPending;
-        source_comment := source_comment row
+        source_comment := source_comment row;
+        lineage_comments := lineage_comments row
       |} in
       PositiveMap.add task row' rows
   | _ => rows
@@ -422,7 +435,8 @@ Definition apply_rescope_op
           description := new_description;
           kind := kind row;
           status := status row;
-          source_comment := source_comment row
+          source_comment := source_comment row;
+          lineage_comments := lineage_comments row
         |} in
         (PositiveMap.add task row' rows,
           List.app pending_ids [task],
@@ -433,7 +447,8 @@ Definition apply_rescope_op
           description := description row;
           kind := kind row;
           status := status row;
-          source_comment := new_anchor
+          source_comment := new_anchor;
+          lineage_comments := lineage_comments row
         |} in
         (PositiveMap.add task row' rows,
           List.app pending_ids [task],
@@ -444,7 +459,8 @@ Definition apply_rescope_op
           description := description row;
           kind := kind row;
           status := StatusCompleted;
-          source_comment := source_comment row
+          source_comment := source_comment row;
+          lineage_comments := lineage_comments row
         |} in
         (PositiveMap.add task row' rows,
           pending_ids,
@@ -645,7 +661,8 @@ Definition complete_task_visible
             description := description row;
             kind := kind row;
             status := StatusCompleted;
-            source_comment := source_comment row
+            source_comment := source_comment row;
+            lineage_comments := lineage_comments row
           |} in
           (PositiveMap.add task row' rows, source_comment row)
       end
