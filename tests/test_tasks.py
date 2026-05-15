@@ -1604,12 +1604,13 @@ class TestApplyReorder:
         assert len(child_ids) == 1
         assert child_ids[0] not in {"src", "other-1234567890-0001"}
 
-    def test_split_children_and_new_tasks_share_used_id_set(self) -> None:
-        # codex P2: split-child ids and `_make_new_tasks_from_opus` ids
-        # are minted via the same shared ``used`` set in _apply_reorder
-        # so a (timestamp, suffix) collision can't silently let one
-        # row shadow another.  Smoke-check that a batch combining a
-        # split with a null-id new task produces all-distinct ids.
+    def test_split_children_and_new_tasks_have_distinct_ids(self) -> None:
+        # Split-child ids and ``_make_new_tasks_from_opus`` ids both
+        # come from ``uuid.uuid7()`` (74 bits of entropy per ms), so
+        # collisions across the two generators — and with existing
+        # on-disk ids — are statistically impossible.  Smoke-check
+        # that a batch combining a split with a null-id new task
+        # produces all-distinct ids.
         from fido.tasks import _apply_reorder as apply_reorder
 
         src = self._t("src", "Original")
@@ -1627,10 +1628,11 @@ class TestApplyReorder:
         assert len(fresh_ids) == 2
 
     def test_allocate_split_child_ids_shares_created_at_across_children(self) -> None:
-        # codex P1: created_at is captured once per call so the apply
-        # and verify passes (which both hit this allocator output)
-        # produce identical materializations even if real-time crosses
-        # a second boundary between them.
+        # created_at is captured once per call so the apply and
+        # verify passes (which both hit this allocator output)
+        # produce identical materializations even if real-time
+        # crosses a second boundary between them.  (Ids themselves
+        # are UUIDv7, distinct by construction.)
         from fido.tasks import _allocate_split_child_ids
 
         items = [
