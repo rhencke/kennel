@@ -526,7 +526,7 @@ class TestRescopePrompt:
             )
         ]
         result = Prompts("").rescope_prompt(tasks, "", intents=intents)
-        assert "Pending change requests from PR comments:" in result
+        assert "Pending change requests from PR comments" in result
         assert "comment #123" in result
         assert "Add logging to the parser" in result
         assert "2024-01-15T10:00:00+00:00" in result
@@ -547,6 +547,50 @@ class TestRescopePrompt:
         assert "comment #222" in result
         assert "Add logging" in result
         assert "Refactor tests" in result
+
+    def test_intents_rendered_in_timestamp_order(self) -> None:
+        # #1720: out-of-order arrival → timestamp-ordered prompt.  The
+        # rescope prompt sorts by timestamp before rendering so the
+        # "newer overrides older on conflict" rule has a stable
+        # referent that doesn't depend on webhook delivery order or
+        # rescope batching reshuffles.
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent("Newest", 333, "2024-03-01T12:00:00+00:00"),
+            RescopeIntent("Oldest", 111, "2024-01-15T10:00:00+00:00"),
+            RescopeIntent("Middle", 222, "2024-02-15T11:00:00+00:00"),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        oldest_pos = result.index("Oldest")
+        middle_pos = result.index("Middle")
+        newest_pos = result.index("Newest")
+        assert oldest_pos < middle_pos < newest_pos, (
+            "intents must render oldest-first regardless of arrival order"
+        )
+
+    def test_newer_overrides_older_conflict_rule_stated(self) -> None:
+        # #1720: the conflict-resolution rule must be present so Opus
+        # knows how to interpret two intents pointing at the same task.
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent("First take", 111, "2024-01-15T10:00:00+00:00"),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "newer one" in result and "overrides" in result
+        # And the inverse: unrelated intents are preserved (not absorbed
+        # by a "newer wins" reading).
+        assert "don't conflict" in result
+
+    def test_intents_block_header_announces_ordering(self) -> None:
+        # The header line tells Opus the list is chronological so the
+        # ordering itself is a signal, not just visual sugar.
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent("X", 111, "2024-01-15T10:00:00+00:00"),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "timestamp order" in result
+        assert "oldest first" in result
 
     def test_explicit_operations_framing_present(self) -> None:
         tasks = [self._task("Do thing", task_id="1")]

@@ -437,15 +437,26 @@ class Prompts:
 
         intents_block = ""
         if intents:
+            # Render in timestamp order, regardless of arrival order
+            # (#1720).  Webhook delivery, rescope batching, and
+            # post-snapshot create_task can re-order intents in the
+            # list passed in here; the prompt should always show them
+            # chronologically so the "newer overrides older on
+            # conflict" rule below has a stable referent.
+            ordered_intents = sorted(intents, key=lambda i: i.timestamp)
             lines = [
                 f"- comment #{intent.comment_id} ({intent.timestamp}): "
                 f"{intent.change_request}"
-                for intent in intents
+                for intent in ordered_intents
             ]
             intents_block = (
-                "Pending change requests from PR comments:\n"
-                + "\n".join(lines)
-                + "\n\n"
+                "Pending change requests from PR comments "
+                "(in timestamp order, oldest first):\n" + "\n".join(lines) + "\n\n"
+                "When two of these intents conflict, the newer one (later in "
+                "the list) overrides the older one's text — express the result "
+                "via the appropriate operation on the existing task id.  "
+                "Intents that don't conflict stay independent and each get "
+                "their own operation.\n\n"
             )
 
         return (
