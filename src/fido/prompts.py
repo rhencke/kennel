@@ -508,7 +508,22 @@ class Prompts:
             "convert one into actionable work).\n"
             "6. If a pending task already covers an intent above (by content "
             'or thread metadata), use "keep" or "rewrite" on its id — do '
-            'NOT emit "new" for the same intent (#1337).\n\n'
+            'NOT emit "new" for the same intent (#1337).\n'
+            "7. Omitting a pending id means KEEP it (no implicit removal).  "
+            "To wipe a task you must emit an explicit "
+            '"remove" op for it.  An empty operations array means "keep '
+            'everything as-is".\n\n'
+            "Full rebuild example — to throw out the entire pending plan and "
+            "replace it with a fresh one, emit an explicit `remove` for "
+            "every snapped id PLUS one `new` per replacement task:\n"
+            '  {"operations": [\n'
+            '    {"op": "remove", "id": "<snapped-id-1>"},\n'
+            '    {"op": "remove", "id": "<snapped-id-2>"},\n'
+            '    {"op": "new", "title": "Replacement A", '
+            '"description": "...", "type": "spec"},\n'
+            '    {"op": "new", "title": "Replacement B", '
+            '"description": "...", "type": "spec"}\n'
+            "  ]}\n\n"
             'Reply with ONLY a JSON object in the form {"operations": [...]}.\n'
             "No other text before or after the JSON."
         )

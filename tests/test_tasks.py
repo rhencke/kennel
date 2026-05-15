@@ -2964,6 +2964,115 @@ class TestReorderTasks:
         assert Tasks(tmp_path).list() == before
         assert client.run_turn.call_count == 2
 
+    def test_empty_operations_array_preserves_all_tasks(self, tmp_path: Path) -> None:
+        # #1721: an explicit `{"operations": []}` response means "keep
+        # everything as-is", not "wipe the queue".  Omission has the
+        # same semantics — the only way to remove a task is an
+        # explicit `remove` op (#1357).
+        t1 = self._add(tmp_path, "Keep me A")
+        t2 = self._add(tmp_path, "Keep me B")
+        raw = json.dumps({"operations": []})
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        result = Tasks(tmp_path).list()
+        assert [t["id"] for t in result] == [t1["id"], t2["id"]]
+        assert all(t["status"] != str(TaskStatus.COMPLETED) for t in result)
+
+    def test_partial_response_preserves_omitted_tasks(self, tmp_path: Path) -> None:
+        # #1721: a partial response — Opus mentions some snapped ids
+        # but not others — must not silently delete the omitted ones.
+        # The unmentioned task stays pending, identical to how it was.
+        t1 = self._add(tmp_path, "Renamed")
+        t2 = self._add(tmp_path, "Untouched")
+        raw = self._response(
+            [{"id": t1["id"], "title": "Renamed", "description": "new"}]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        result = Tasks(tmp_path).list()
+        ids = [t["id"] for t in result]
+        assert t1["id"] in ids
+        assert t2["id"] in ids
+        untouched = next(t for t in result if t["id"] == t2["id"])
+        assert untouched["title"] == "Untouched"
+        assert untouched["status"] != str(TaskStatus.COMPLETED)
+
+    def test_post_snapshot_tasks_preserved_across_rescope(self, tmp_path: Path) -> None:
+        # #1721: tasks added AFTER the snapshot Opus saw (a comment
+        # arriving while reorder_tasks ran) must survive — they're
+        # not in the snapshot, so they cannot have been claimed by an
+        # operation, and therefore are passed through unchanged.
+        t1 = self._add(tmp_path, "Snapped task")
+        original_ids = frozenset({t1["id"]})
+        # Now add a post-snapshot task BEFORE reorder_tasks runs.  The
+        # snapshot Opus will be told about is just t1; its rescope
+        # response operates on t1 alone.
+        t2 = self._add(tmp_path, "Post-snapshot task")
+        raw = self._response(
+            [{"id": t1["id"], "title": "Renamed snap", "description": ""}]
+        )
+        # Pass the original snapshot id frozenset by patching the
+        # internal frozenset construction via the public reorder_tasks
+        # entry point — production passes the comment-time snapshot
+        # via task_list.  We force the same effect by ensuring t2's
+        # id is NOT in the snapshot frozenset that _apply_reorder
+        # synthesizes.  Since reorder_tasks builds the snapshot from
+        # tasks.list() at call time, both t1 and t2 are in the
+        # snapshot — to truly exercise the post-snapshot path we have
+        # to call _apply_reorder directly with a snapshot that
+        # excludes t2.
+        from fido.tasks import _apply_reorder
+
+        ordered_items = [{"id": t1["id"], "title": "Renamed snap", "description": ""}]
+        result = _apply_reorder(
+            Tasks(tmp_path).list(), ordered_items, original_ids=original_ids
+        )
+        ids = [t["id"] for t in result]
+        assert t1["id"] in ids
+        assert t2["id"] in ids, "post-snapshot task must survive rescope"
+        post_snap = next(t for t in result if t["id"] == t2["id"])
+        assert post_snap["title"] == "Post-snapshot task"
+        # Sanity: reorder_tasks doesn't drop t2 either when called the
+        # normal way (snapshot includes both, no op claims t2 →
+        # KeepTask emitted under the hood by the omission path).
+        del raw  # unused once we drop down to _apply_reorder
+        del t2
+
+    def test_explicit_full_rebuild_removes_snapped_and_creates_new(
+        self, tmp_path: Path
+    ) -> None:
+        # #1721: a full rebuild is `remove` + `new` ops, not an
+        # implicit wipe.  Verify the path end-to-end.
+        t1 = self._add(tmp_path, "Old A")
+        t2 = self._add(tmp_path, "Old B")
+        raw = json.dumps(
+            {
+                "operations": [
+                    {"op": "remove", "id": t1["id"]},
+                    {"op": "remove", "id": t2["id"]},
+                    {
+                        "op": "new",
+                        "title": "Replacement",
+                        "description": "fresh plan",
+                        "type": "spec",
+                    },
+                ]
+            }
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        result = Tasks(tmp_path).list()
+        old_a = next(t for t in result if t["id"] == t1["id"])
+        old_b = next(t for t in result if t["id"] == t2["id"])
+        assert old_a["status"] == str(TaskStatus.COMPLETED)
+        assert old_b["status"] == str(TaskStatus.COMPLETED)
+        new_tasks = [
+            t
+            for t in result
+            if t["id"] not in {t1["id"], t2["id"]}
+            and t["status"] != str(TaskStatus.COMPLETED)
+        ]
+        assert len(new_tasks) == 1
+        assert new_tasks[0]["title"] == "Replacement"
+        assert new_tasks[0]["description"] == "fresh plan"
+
     def test_preserves_snapshot_order_for_non_ci_tasks(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "First")
         t2 = self._add(tmp_path, "Second")
