@@ -1604,6 +1604,28 @@ class TestApplyReorder:
         assert len(child_ids) == 1
         assert child_ids[0] not in {"src", "other-1234567890-0001"}
 
+    def test_split_children_and_new_tasks_share_used_id_set(self) -> None:
+        # codex P2: split-child ids and `_make_new_tasks_from_opus` ids
+        # are minted via the same shared ``used`` set in _apply_reorder
+        # so a (timestamp, suffix) collision can't silently let one
+        # row shadow another.  Smoke-check that a batch combining a
+        # split with a null-id new task produces all-distinct ids.
+        from fido.tasks import _apply_reorder as apply_reorder
+
+        src = self._t("src", "Original")
+        items = [
+            {"id": "src", "split_targets": [{"title": "Child A"}]},
+            {"id": None, "title": "Brand new"},
+        ]
+        result = apply_reorder([src], items)
+        ids = [t["id"] for t in result]
+        assert len(ids) == len(set(ids)), f"duplicate ids in result: {ids}"
+        # The split source kept its id (now closed); two fresh ids
+        # were minted (one for the child, one for the new task).
+        assert "src" in ids
+        fresh_ids = {i for i in ids if i != "src"}
+        assert len(fresh_ids) == 2
+
     def test_allocate_split_child_ids_shares_created_at_across_children(self) -> None:
         # codex P1: created_at is captured once per call so the apply
         # and verify passes (which both hit this allocator output)

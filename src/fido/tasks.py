@@ -427,9 +427,26 @@ def _split_target_specs(item: dict[str, Any]) -> list[dict[str, Any]] | None:
     return targets
 
 
+def _fresh_task_id(used: set[str]) -> str:
+    """Mint a unique timestamp+random task id, mutating ``used``.
+
+    The retry loop skips any id already in ``used`` so a collision can't
+    silently let one row shadow another (codex P2).  ``used`` is
+    mutated to add the freshly minted id, so a single shared set
+    threaded across both ``_allocate_split_child_ids`` and
+    ``_make_new_tasks_from_opus`` keeps split children and new tasks
+    from colliding with each other in the same batch.
+    """
+    while True:
+        candidate = f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+
+
 def _allocate_split_child_ids(
     ordered_items: list[dict[str, Any]],
-    existing_ids: frozenset[str] = frozenset(),
+    used: set[str] | None = None,
 ) -> dict[str, list[tuple[str, str]]]:
     """Pre-allocate a fresh ``(id, created_at)`` per declared split child.
 
@@ -443,13 +460,14 @@ def _allocate_split_child_ids(
     that crosses a second boundary; allocating both fields once at the
     top removes the race surface entirely (codex P1).
 
-    ``existing_ids`` lets the allocator avoid colliding with any id
-    already on disk (or with a sibling child allocated earlier in the
-    same call).  Without that, two timestamp+random outputs that
-    happen to match would silently let one task shadow another, and
-    later rescope/completion ops would target the wrong row (codex P2).
+    ``used`` is the shared set of ids already taken (existing on-disk
+    rows + any new ids minted earlier in this same batch).  Mutated to
+    add every freshly minted child id so a downstream
+    ``_make_new_tasks_from_opus`` call can keep avoiding collisions
+    (codex P2).
     """
-    used: set[str] = set(existing_ids)
+    if used is None:
+        used = set()
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     out: dict[str, list[tuple[str, str]]] = {}
     for item in ordered_items:
@@ -459,15 +477,7 @@ def _allocate_split_child_ids(
         targets = _split_target_specs(item)
         if targets is None:
             continue
-        ids: list[tuple[str, str]] = []
-        for _ in targets:
-            while True:
-                fresh = f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}"
-                if fresh not in used:
-                    used.add(fresh)
-                    break
-            ids.append((fresh, created_at))
-        out[item_id] = ids
+        out[item_id] = [(_fresh_task_id(used), created_at) for _ in targets]
     return out
 
 
@@ -789,7 +799,7 @@ def _assert_rescope_matches_oracle(
         split_child_ids=split_child_ids
         if split_child_ids is not None
         else _allocate_split_child_ids(
-            ordered_items, frozenset(t["id"] for t in current if "id" in t)
+            ordered_items, {t["id"] for t in current if "id" in t}
         ),
         tasks_by_oracle_id=tasks_by_oracle_id,
     )
@@ -823,7 +833,7 @@ def _apply_reorder_with_oracle(
         split_child_ids=split_child_ids
         if split_child_ids is not None
         else _allocate_split_child_ids(
-            ordered_items, frozenset(t["id"] for t in current if "id" in t)
+            ordered_items, {t["id"] for t in current if "id" in t}
         ),
         tasks_by_oracle_id=tasks_by_oracle_id,
     )
@@ -1201,6 +1211,7 @@ def _make_new_tasks_from_opus(
     snapshot_ids: frozenset[str],
     current: list[dict[str, Any]] | None = None,
     intents: list[RescopeIntent] | None = None,
+    used: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Create fresh task dicts for items Opus returned with a null or absent id.
 
@@ -1213,6 +1224,11 @@ def _make_new_tasks_from_opus(
     and ``type: "spec"`` unless Opus specified a different type.  Items with
     blank titles are silently skipped.
 
+    ``used`` is the shared set of already-claimed ids (existing rows +
+    split-child ids minted earlier in this same batch).  Mutated to add
+    every new id so the two generators can't collide on a duplicate
+    timestamp+random tuple (codex P2).
+
     Dedup against post-snapshot thread tasks (#1337): when *current* and
     *intents* are provided, any rescope intent whose ``comment_id`` is already
     covered by a thread task added since the snapshot was taken is treated as
@@ -1221,6 +1237,8 @@ def _make_new_tasks_from_opus(
     the same intent is a duplicate.  We suppress one null-id item per covered
     intent (in arrival order) to keep at most one task per intent.
     """
+    if used is None:
+        used = set()
     covered_intents = 0
     if current is not None and intents:
         post_snapshot_lineage: set[int] = set()
@@ -1254,7 +1272,7 @@ def _make_new_tasks_from_opus(
             skipped += 1
             continue
         task: dict[str, Any] = {
-            "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
+            "id": _fresh_task_id(used),
             "title": title,
             "type": item.get("type") or "spec",
             "description": item.get("description") or "",
@@ -1684,15 +1702,17 @@ def _apply_reorder(
     snapshot_ids = original_ids or frozenset(
         t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
     )
-    # Pre-allocate split-child (id, created_at) tuples once per call so
-    # the apply and verify passes (which both re-derive ops from the
-    # same items) mint identical ids AND timestamps — otherwise the
-    # divergence assertion would spuriously fire on a batch that
-    # straddled a second boundary (codex P1).  Pass every existing
-    # task id so the allocator's retry loop can avoid colliding with
-    # an id already on disk (codex P2).
-    existing_task_ids = frozenset(t["id"] for t in current if "id" in t)
-    split_child_ids = _allocate_split_child_ids(ordered_items, existing_task_ids)
+    # Single shared ``used`` set threaded through every id-minting
+    # path in this batch: split-child allocation and new-task
+    # creation.  Without this, the two generators each independently
+    # call ``time.time() + random.randint`` and could collide on the
+    # same ``(timestamp_ms, suffix)`` tuple, silently letting one row
+    # shadow another (codex P2).  Pre-allocate split children's
+    # ``(id, created_at)`` tuples once so the apply and verify passes
+    # mint identical metadata even across a wall-clock second
+    # boundary (codex P1).
+    used_ids: set[str] = {t["id"] for t in current if "id" in t}
+    split_child_ids = _allocate_split_child_ids(ordered_items, used_ids)
     oracle_result = _apply_reorder_with_oracle(
         current, ordered_items, snapshot_ids, split_child_ids
     )
@@ -1701,7 +1721,7 @@ def _apply_reorder(
     )
 
     new_tasks = _make_new_tasks_from_opus(
-        ordered_items, snapshot_ids, current=current, intents=intents
+        ordered_items, snapshot_ids, current=current, intents=intents, used=used_ids
     )
     if not new_tasks:
         return oracle_result
