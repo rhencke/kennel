@@ -496,6 +496,14 @@ class Prompts:
             '"type": "spec"}\n'
             "      — create a brand-new task (fresh id assigned by the runtime)\n"
             "\n"
+            "Provenance — every op above accepts an optional "
+            '"contributing_intents": [<intent comment_id>, ...] field listing '
+            "the change-request comment ids from the intents block above that "
+            "drove this op.  Attribute every op to the intent(s) that caused "
+            "it whenever you can — a downstream classifier reads these to "
+            "decide which commenter(s) to notify when the task lands.  Omit "
+            "or use [] when the op is implicit (e.g. an unattributed "
+            "rewrite from your own context analysis).\n\n"
             "Constraints:\n"
             '1. Tasks of type "ci" must come first in the operations array.\n'
             "2. Each pending snapshot id may appear in at most one operation "

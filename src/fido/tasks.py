@@ -483,12 +483,31 @@ def _split_source_ids(ordered_items: list[dict[str, Any]]) -> set[str]:
     }
 
 
+def _union_intents(*lists: list[int]) -> list[int]:
+    """Insertion-ordered union of intent comment id lists (#1722).
+
+    Used everywhere a task's ``contributing_intents`` field needs to
+    accumulate intents across rescope rounds (e.g. merge target =
+    op's intents ∪ each source's pre-existing intents) without
+    losing chronology.
+    """
+    seen: set[int] = set()
+    out: list[int] = []
+    for src in lists:
+        for value in src:
+            if value not in seen:
+                seen.add(value)
+                out.append(value)
+    return out
+
+
 def _split_child_synthetic_task(
     source_task: dict[str, Any],
     child_id: str,
     child_title: str,
     child_description: str,
     created_at: str,
+    op_contributing_intents: list[int],
 ) -> dict[str, Any]:
     """Build the synthetic original task dict for a split child.
 
@@ -506,12 +525,19 @@ def _split_child_synthetic_task(
     wall-clock read here would make the divergence verifier raise on
     any batch that straddles a second boundary (codex P1).
 
+    ``op_contributing_intents`` (#1722) is the SplitTask op's own
+    contributing-intent list — every child inherits the parent op's
+    intents in addition to whatever intents already lived on the
+    source task, so a downstream classifier can decide whether the
+    split materially affected each commenter.
+
     The thread is shallow-copied per child: every ``lineage_comment_ids``
     write in this codebase rebuilds the list and re-assigns the slot
     rather than mutating in place, so the inherited list reference is
     safe to share — but the dict itself does get re-keyed on writes, so
     each child needs its own dict.
     """
+    source_intents = source_task.get("contributing_intents") or []
     child: dict[str, Any] = {
         "id": child_id,
         "title": child_title,
@@ -519,6 +545,7 @@ def _split_child_synthetic_task(
         "description": child_description,
         "status": str(TaskStatus.PENDING),
         "created_at": created_at,
+        "contributing_intents": _union_intents(source_intents, op_contributing_intents),
     }
     source_thread = source_task.get("thread")
     if isinstance(source_thread, dict):
@@ -579,6 +606,17 @@ def _rescope_releases_for_oracle(
             )
             merge_sources = _merge_source_oracle_ids(item, ids_by_task_id)
             split_targets = _split_target_specs(item)
+            # #1722: stamp the synthetic original-task dict with the
+            # union of any pre-existing intents and the op's
+            # contributing_intents so the materializer copies them
+            # through to the persisted task.  For merges, sources'
+            # existing intents fold into the target below.
+            op_intents = item.get("contributing_intents") or []
+            if op_intents:
+                existing_intents = task.get("contributing_intents") or []
+                tasks_by_oracle_id[oracle_id]["contributing_intents"] = _union_intents(
+                    existing_intents, op_intents
+                )
             # Op precedence (most structural first):
             #   1. Explicit completion (#1716): item.status == "completed".
             #      Removes the task — strictly more structural than any
@@ -607,6 +645,25 @@ def _rescope_releases_for_oracle(
                 decision = rescope_oracle.MergeTasks(
                     oracle_id, merge_sources, new_title, new_description
                 )
+                # #1722: fold every source's pre-existing intents into
+                # the merge target's contributing_intents.  Without
+                # this, intents that drove a source task to exist
+                # would be invisible to the classifier on the merged
+                # row, and the corresponding commenters wouldn't get a
+                # reply when the merged target eventually completes.
+                merged_intents = list(
+                    tasks_by_oracle_id[oracle_id].get("contributing_intents") or []
+                )
+                for src_oracle_id in merge_sources:
+                    src_task = tasks_by_oracle_id.get(src_oracle_id)
+                    if src_task is not None:
+                        merged_intents = _union_intents(
+                            merged_intents, src_task.get("contributing_intents") or []
+                        )
+                if merged_intents:
+                    tasks_by_oracle_id[oracle_id]["contributing_intents"] = (
+                        merged_intents
+                    )
             elif split_targets:
                 # Allocator and validator both iterate the same
                 # ``split_targets`` list, so the pre-allocated child
@@ -626,6 +683,7 @@ def _rescope_releases_for_oracle(
                         child_title,
                         child_description,
                         child_created_at,
+                        op_intents,
                     )
                     children_specs.append(
                         rescope_oracle.SplitChild(
@@ -1170,11 +1228,23 @@ def sync_tasks(
 # contract with Opus, not the downstream apply path.
 
 
+# #1722 — every operation may carry a list of contributing
+# RescopeIntent comment ids: the originating intents that drove this
+# rescope decision.  The classifier in #1723 reads these to decide
+# notification behavior (material rescope vs. pure aggregation
+# per intent).  Empty list = the model didn't attribute the op to
+# any specific intent (typical for KeepTask omissions and for
+# implicit-context decisions); the field is optional in the wire
+# schema.
+_RescopeIntentIds = list[int]
+
+
 @dataclass(frozen=True)
 class _RescopeOpKeep:
     """Keep an existing task unchanged."""
 
     id: str
+    contributing_intents: _RescopeIntentIds
 
 
 @dataclass(frozen=True)
@@ -1184,6 +1254,7 @@ class _RescopeOpRewrite:
     id: str
     title: str
     description: str
+    contributing_intents: _RescopeIntentIds
 
 
 @dataclass(frozen=True)
@@ -1192,6 +1263,7 @@ class _RescopeOpRewriteAnchor:
 
     id: str
     anchor_comment_id: int
+    contributing_intents: _RescopeIntentIds
 
 
 @dataclass(frozen=True)
@@ -1199,6 +1271,7 @@ class _RescopeOpRemove:
     """Close an existing task (rocq CompleteTask)."""
 
     id: str
+    contributing_intents: _RescopeIntentIds
 
 
 @dataclass(frozen=True)
@@ -1209,6 +1282,7 @@ class _RescopeOpMerge:
     sources: list[str]
     title: str
     description: str
+    contributing_intents: _RescopeIntentIds
 
 
 @dataclass(frozen=True)
@@ -1223,6 +1297,7 @@ class _RescopeOpSplit:
 
     id: str
     children: list[_RescopeOpSplitChild]
+    contributing_intents: _RescopeIntentIds
 
 
 @dataclass(frozen=True)
@@ -1232,6 +1307,7 @@ class _RescopeOpNew:
     title: str
     description: str
     type: str  # noqa: A003 — schema field name
+    contributing_intents: _RescopeIntentIds
 
 
 _RescopeOp = (
@@ -1351,14 +1427,52 @@ def _require_string_field_allow_empty(
     return value
 
 
+def _parse_contributing_intents(
+    raw_op: dict[str, Any], path: str, errors: list[str]
+) -> _RescopeIntentIds:
+    """Validate the optional ``contributing_intents`` field on every op (#1722).
+
+    Missing or empty list = the model didn't attribute this op to any
+    specific RescopeIntent (typical for KeepTask omissions and for
+    decisions Opus made from implicit context).  Present means a list
+    of positive int comment ids — duplicate entries are de-duplicated
+    in arrival order so the materializer can persist a clean
+    insertion-ordered set.
+    """
+    raw = raw_op.get("contributing_intents")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        errors.append(
+            f"{path}.contributing_intents: must be a list of positive ints "
+            f"(intent comment ids), got {type(raw).__name__}"
+        )
+        return []
+    seen: set[int] = set()
+    out: _RescopeIntentIds = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            errors.append(
+                f"{path}.contributing_intents[{index}]: must be a positive "
+                f"int (intent comment id), got {value!r}"
+            )
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
 def _parse_op_keep(
     raw_op: dict[str, Any], path: str
 ) -> tuple[_RescopeOp | None, list[str]]:
     errors: list[str] = []
     task_id = _require_string_field(raw_op, "id", path, errors)
+    intents = _parse_contributing_intents(raw_op, path, errors)
     if task_id is None:
         return None, errors
-    return _RescopeOpKeep(id=task_id), errors
+    return _RescopeOpKeep(id=task_id, contributing_intents=intents), errors
 
 
 def _parse_op_rewrite(
@@ -1368,10 +1482,16 @@ def _parse_op_rewrite(
     task_id = _require_string_field(raw_op, "id", path, errors)
     title = _require_string_field(raw_op, "title", path, errors)
     description = _require_string_field_allow_empty(raw_op, "description", path, errors)
+    intents = _parse_contributing_intents(raw_op, path, errors)
     if task_id is None or title is None or description is None:
         return None, errors
     return (
-        _RescopeOpRewrite(id=task_id, title=title, description=description),
+        _RescopeOpRewrite(
+            id=task_id,
+            title=title,
+            description=description,
+            contributing_intents=intents,
+        ),
         errors,
     )
 
@@ -1388,9 +1508,17 @@ def _parse_op_rewrite_anchor(
             f"(GitHub comment id), got {anchor!r}"
         )
         anchor = None
+    intents = _parse_contributing_intents(raw_op, path, errors)
     if task_id is None or anchor is None:
         return None, errors
-    return _RescopeOpRewriteAnchor(id=task_id, anchor_comment_id=anchor), errors
+    return (
+        _RescopeOpRewriteAnchor(
+            id=task_id,
+            anchor_comment_id=anchor,
+            contributing_intents=intents,
+        ),
+        errors,
+    )
 
 
 def _parse_op_remove(
@@ -1398,9 +1526,10 @@ def _parse_op_remove(
 ) -> tuple[_RescopeOp | None, list[str]]:
     errors: list[str] = []
     task_id = _require_string_field(raw_op, "id", path, errors)
+    intents = _parse_contributing_intents(raw_op, path, errors)
     if task_id is None:
         return None, errors
-    return _RescopeOpRemove(id=task_id), errors
+    return _RescopeOpRemove(id=task_id, contributing_intents=intents), errors
 
 
 def _parse_op_merge(
@@ -1430,6 +1559,7 @@ def _parse_op_merge(
                 f"{path}.sources: every entry was malformed; merge needs at "
                 "least one valid source id"
             )
+    intents = _parse_contributing_intents(raw_op, path, errors)
     if target is None or title is None or description is None or not sources:
         return None, errors
     return (
@@ -1438,6 +1568,7 @@ def _parse_op_merge(
             sources=sources,
             title=title,
             description=description,
+            contributing_intents=intents,
         ),
         errors,
     )
@@ -1478,9 +1609,13 @@ def _parse_op_split(
                 f"{path}.children: every child was malformed; split needs at "
                 "least one valid child"
             )
+    intents = _parse_contributing_intents(raw_op, path, errors)
     if task_id is None or not children:
         return None, errors
-    return _RescopeOpSplit(id=task_id, children=children), errors
+    return (
+        _RescopeOpSplit(id=task_id, children=children, contributing_intents=intents),
+        errors,
+    )
 
 
 def _parse_op_new(
@@ -1490,10 +1625,16 @@ def _parse_op_new(
     title = _require_string_field(raw_op, "title", path, errors)
     description = _require_string_field_allow_empty(raw_op, "description", path, errors)
     task_type = _require_string_field(raw_op, "type", path, errors)
+    intents = _parse_contributing_intents(raw_op, path, errors)
     if title is None or description is None or task_type is None:
         return None, errors
     return (
-        _RescopeOpNew(title=title, description=description, type=task_type),
+        _RescopeOpNew(
+            title=title,
+            description=description,
+            type=task_type,
+            contributing_intents=intents,
+        ),
         errors,
     )
 
@@ -1570,23 +1711,59 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
     item plus N source-completion items, since the reducer's per-task
     coverage invariant requires every source to carry its own
     ``CompleteTask``).
+
+    Each item carries the op's ``contributing_intents`` (a list of
+    originating ``RescopeIntent.comment_id`` values; #1722) under the
+    same key so the materializer can persist them on the resulting
+    task.  Source-completion items synthesised by a merge expansion
+    inherit the merge op's contributing_intents too — those intents
+    drove the source's closure in addition to the target's mutation.
     """
     items: list[dict[str, Any]] = []
     for op in operations:
         match op:
-            case _RescopeOpKeep(id=tid):
-                items.append({"id": tid})
-            case _RescopeOpRewrite(id=tid, title=title, description=desc):
-                items.append({"id": tid, "title": title, "description": desc})
-            case _RescopeOpRewriteAnchor(id=tid, anchor_comment_id=anchor):
-                items.append({"id": tid, "anchor_comment_id": anchor})
-            case _RescopeOpRemove(id=tid):
-                items.append({"id": tid, "status": str(TaskStatus.COMPLETED)})
+            case _RescopeOpKeep(id=tid, contributing_intents=intents):
+                items.append({"id": tid, "contributing_intents": list(intents)})
+            case _RescopeOpRewrite(
+                id=tid,
+                title=title,
+                description=desc,
+                contributing_intents=intents,
+            ):
+                items.append(
+                    {
+                        "id": tid,
+                        "title": title,
+                        "description": desc,
+                        "contributing_intents": list(intents),
+                    }
+                )
+            case _RescopeOpRewriteAnchor(
+                id=tid,
+                anchor_comment_id=anchor,
+                contributing_intents=intents,
+            ):
+                items.append(
+                    {
+                        "id": tid,
+                        "anchor_comment_id": anchor,
+                        "contributing_intents": list(intents),
+                    }
+                )
+            case _RescopeOpRemove(id=tid, contributing_intents=intents):
+                items.append(
+                    {
+                        "id": tid,
+                        "status": str(TaskStatus.COMPLETED),
+                        "contributing_intents": list(intents),
+                    }
+                )
             case _RescopeOpMerge(
                 target_id=target,
                 sources=sources,
                 title=title,
                 description=desc,
+                contributing_intents=intents,
             ):
                 items.append(
                     {
@@ -1594,11 +1771,20 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
                         "title": title,
                         "description": desc,
                         "merge_sources": list(sources),
+                        "contributing_intents": list(intents),
                     }
                 )
                 for src in sources:
-                    items.append({"id": src, "status": str(TaskStatus.COMPLETED)})
-            case _RescopeOpSplit(id=tid, children=children):
+                    items.append(
+                        {
+                            "id": src,
+                            "status": str(TaskStatus.COMPLETED),
+                            "contributing_intents": list(intents),
+                        }
+                    )
+            case _RescopeOpSplit(
+                id=tid, children=children, contributing_intents=intents
+            ):
                 items.append(
                     {
                         "id": tid,
@@ -1606,15 +1792,22 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
                             {"title": c.title, "description": c.description}
                             for c in children
                         ],
+                        "contributing_intents": list(intents),
                     }
                 )
-            case _RescopeOpNew(title=title, description=desc, type=task_type):
+            case _RescopeOpNew(
+                title=title,
+                description=desc,
+                type=task_type,
+                contributing_intents=intents,
+            ):
                 items.append(
                     {
                         "id": None,
                         "title": title,
                         "description": desc,
                         "type": task_type,
+                        "contributing_intents": list(intents),
                     }
                 )
     return items
@@ -1685,6 +1878,12 @@ def _make_new_tasks_from_opus(
             "status": str(TaskStatus.PENDING),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        # #1722: a brand-new task carries the originating intents the
+        # `new` op declared so a downstream classifier can route the
+        # eventual completion notification to the right commenter(s).
+        op_intents = item.get("contributing_intents") or []
+        if op_intents:
+            task["contributing_intents"] = list(op_intents)
         new_tasks.append(task)
     return new_tasks
 
@@ -2219,8 +2418,20 @@ def _compute_thread_changes(
             continue
         tid = t["id"]
         r = result_by_id.get(tid)
+        # #1722: surface the post-rescope task's contributing_intents
+        # on every change record so the future material-vs-aggregation
+        # classifier (#1723) and per-intent notifier (#1724) can route
+        # replies to the right commenters.  Empty list = no intents
+        # attributed.
+        contributing = list((r or {}).get("contributing_intents") or [])
         if r is None or r.get("status") == TaskStatus.COMPLETED:
-            changes.append({"task": t, "kind": "completed"})
+            changes.append(
+                {
+                    "task": t,
+                    "kind": "completed",
+                    "contributing_intents": contributing,
+                }
+            )
         elif r.get("title") != t.get("title"):
             changes.append(
                 {
@@ -2228,6 +2439,7 @@ def _compute_thread_changes(
                     "kind": "modified",
                     "new_title": r.get("title", ""),
                     "new_description": r.get("description", ""),
+                    "contributing_intents": contributing,
                 }
             )
     return changes

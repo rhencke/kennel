@@ -780,7 +780,7 @@ class TestParseRescopeOperations:
         raw = '{"operations": [{"op": "keep", "id": "abc"}]}'
         ops, errors = _parse_rescope_operations(raw)
         assert errors == []
-        assert _operations_to_items(ops) == [{"id": "abc"}]
+        assert _operations_to_items(ops) == [{"id": "abc", "contributing_intents": []}]
 
     def test_parses_rewrite(self) -> None:
         raw = (
@@ -790,7 +790,12 @@ class TestParseRescopeOperations:
         ops, errors = _parse_rescope_operations(raw)
         assert errors == []
         assert _operations_to_items(ops) == [
-            {"id": "abc", "title": "New", "description": "scope"}
+            {
+                "id": "abc",
+                "title": "New",
+                "description": "scope",
+                "contributing_intents": [],
+            }
         ]
 
     def test_parses_rewrite_anchor(self) -> None:
@@ -800,13 +805,21 @@ class TestParseRescopeOperations:
         )
         ops, errors = _parse_rescope_operations(raw)
         assert errors == []
-        assert _operations_to_items(ops) == [{"id": "abc", "anchor_comment_id": 12345}]
+        assert _operations_to_items(ops) == [
+            {
+                "id": "abc",
+                "anchor_comment_id": 12345,
+                "contributing_intents": [],
+            }
+        ]
 
     def test_parses_remove(self) -> None:
         raw = '{"operations": [{"op": "remove", "id": "abc"}]}'
         ops, errors = _parse_rescope_operations(raw)
         assert errors == []
-        assert _operations_to_items(ops) == [{"id": "abc", "status": "completed"}]
+        assert _operations_to_items(ops) == [
+            {"id": "abc", "status": "completed", "contributing_intents": []}
+        ]
 
     def test_parses_merge_with_source_completion_expansion(self) -> None:
         # A single merge op lowers to one target item (with merge_sources)
@@ -825,9 +838,10 @@ class TestParseRescopeOperations:
                 "title": "Merged",
                 "description": "scope",
                 "merge_sources": ["b", "c"],
+                "contributing_intents": [],
             },
-            {"id": "b", "status": "completed"},
-            {"id": "c", "status": "completed"},
+            {"id": "b", "status": "completed", "contributing_intents": []},
+            {"id": "c", "status": "completed", "contributing_intents": []},
         ]
 
     def test_parses_split(self) -> None:
@@ -845,6 +859,7 @@ class TestParseRescopeOperations:
                     {"title": "A", "description": "first"},
                     {"title": "B", "description": "second"},
                 ],
+                "contributing_intents": [],
             }
         ]
 
@@ -856,7 +871,13 @@ class TestParseRescopeOperations:
         ops, errors = _parse_rescope_operations(raw)
         assert errors == []
         assert _operations_to_items(ops) == [
-            {"id": None, "title": "T", "description": "d", "type": "spec"}
+            {
+                "id": None,
+                "title": "T",
+                "description": "d",
+                "type": "spec",
+                "contributing_intents": [],
+            }
         ]
 
     def test_parses_json_with_preamble(self) -> None:
@@ -933,7 +954,7 @@ class TestParseRescopeOperations:
         raw = '{ this is { junk } before {"operations": [{"op": "keep", "id": "1"}]}'
         ops, errors = _parse_rescope_operations(raw)
         assert errors == []
-        assert _operations_to_items(ops) == [{"id": "1"}]
+        assert _operations_to_items(ops) == [{"id": "1", "contributing_intents": []}]
 
     def test_remove_missing_id(self) -> None:
         ops, errors = _parse_rescope_operations('{"operations": [{"op": "remove"}]}')
@@ -988,6 +1009,88 @@ class TestParseRescopeOperations:
             "operations[0].children[0]" in e and "must be a dict" in e for e in errors
         )
 
+    def test_keep_carries_contributing_intents(self) -> None:
+        # #1722: every op may attribute itself to one or more
+        # originating RescopeIntent comment ids.  The translator
+        # stamps the resulting item dict so the materializer can
+        # persist them on the task.
+        raw = (
+            '{"operations": [{"op": "keep", "id": "abc", '
+            '"contributing_intents": [101, 202]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        items = _operations_to_items(ops)
+        assert items == [{"id": "abc", "contributing_intents": [101, 202]}]
+
+    def test_contributing_intents_default_empty(self) -> None:
+        # Missing field = no attribution; translator emits an empty
+        # list so callers don't need to special-case ``None``.
+        raw = '{"operations": [{"op": "keep", "id": "abc"}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        items = _operations_to_items(ops)
+        assert items == [{"id": "abc", "contributing_intents": []}]
+
+    def test_contributing_intents_dedup_in_arrival_order(self) -> None:
+        # Duplicate entries in a single op's intents list are
+        # collapsed in arrival order so the persisted set is clean.
+        raw = (
+            '{"operations": [{"op": "keep", "id": "x", '
+            '"contributing_intents": [5, 5, 7, 5, 7]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        items = _operations_to_items(ops)
+        assert items[0]["contributing_intents"] == [5, 7]
+
+    def test_contributing_intents_must_be_list(self) -> None:
+        raw = (
+            '{"operations": [{"op": "keep", "id": "x", '
+            '"contributing_intents": "not a list"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        assert any(
+            "operations[0].contributing_intents" in e and "must be a list" in e
+            for e in errors
+        )
+
+    def test_contributing_intents_entries_must_be_positive_int(self) -> None:
+        # Every malformed entry is reported in one pass — booleans,
+        # zero, negatives, and non-ints all fail.  Rob's directive:
+        # useful retries that detail every problem at once.
+        raw = (
+            '{"operations": [{"op": "keep", "id": "x", '
+            '"contributing_intents": [0, -1, "str", true, 42]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        for index in (0, 1, 2, 3):
+            assert any(
+                f"operations[0].contributing_intents[{index}]" in e for e in errors
+            )
+
+    def test_merge_op_carries_contributing_intents_on_target_and_sources(
+        self,
+    ) -> None:
+        # #1722: merge target item carries the op's intents AND each
+        # synthesised source-completion item carries them too — those
+        # intents drove the source's closure as well as the target's
+        # mutation.
+        raw = (
+            '{"operations": [{"op": "merge", "target_id": "a", '
+            '"sources": ["b"], "title": "Merged", '
+            '"description": "scope", "contributing_intents": [99]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        items = _operations_to_items(ops)
+        target = next(i for i in items if i["id"] == "a")
+        source_completion = next(i for i in items if i["id"] == "b")
+        assert target["contributing_intents"] == [99]
+        assert source_completion["contributing_intents"] == [99]
+
     def test_decode_skips_non_dict_first_value(self) -> None:
         # First decodable JSON value at the first ``{`` could be a
         # nested non-dict shape; the decoder advances past it and
@@ -1003,7 +1106,10 @@ class TestFindCrossOpErrors:
     def test_unknown_id_rejected(self) -> None:
         from fido.tasks import _RescopeOpKeep
 
-        errors = _find_cross_op_errors([_RescopeOpKeep(id="ghost")], frozenset({"a"}))
+        errors = _find_cross_op_errors(
+            [_RescopeOpKeep(id="ghost", contributing_intents=[])],
+            frozenset({"a"}),
+        )
         assert any(
             "'ghost'" in e and "not in the pending snapshot" in e for e in errors
         )
@@ -1011,7 +1117,10 @@ class TestFindCrossOpErrors:
     def test_duplicate_id_across_ops_rejected(self) -> None:
         from fido.tasks import _RescopeOpKeep, _RescopeOpRemove
 
-        ops = [_RescopeOpKeep(id="a"), _RescopeOpRemove(id="a")]
+        ops: list = [
+            _RescopeOpKeep(id="a", contributing_intents=[]),
+            _RescopeOpRemove(id="a", contributing_intents=[]),
+        ]
         errors = _find_cross_op_errors(ops, frozenset({"a"}))
         assert any("claimed by 2 operations" in e for e in errors)
 
@@ -1022,9 +1131,21 @@ class TestFindCrossOpErrors:
         # validator does (#1738 codex Medium).
         from fido.tasks import _RescopeOpMerge
 
-        ops = [
-            _RescopeOpMerge(target_id="a", sources=["b"], title="A", description=""),
-            _RescopeOpMerge(target_id="c", sources=["b"], title="C", description=""),
+        ops: list = [
+            _RescopeOpMerge(
+                target_id="a",
+                sources=["b"],
+                title="A",
+                description="",
+                contributing_intents=[],
+            ),
+            _RescopeOpMerge(
+                target_id="c",
+                sources=["b"],
+                title="C",
+                description="",
+                contributing_intents=[],
+            ),
         ]
         errors = _find_cross_op_errors(ops, frozenset({"a", "b", "c"}))
         assert any("'b'" in e and "claimed by 2 operations" in e for e in errors)
@@ -1032,8 +1153,14 @@ class TestFindCrossOpErrors:
     def test_merge_source_id_validated(self) -> None:
         from fido.tasks import _RescopeOpMerge
 
-        ops = [
-            _RescopeOpMerge(target_id="a", sources=["ghost"], title="A", description="")
+        ops: list = [
+            _RescopeOpMerge(
+                target_id="a",
+                sources=["ghost"],
+                title="A",
+                description="",
+                contributing_intents=[],
+            )
         ]
         errors = _find_cross_op_errors(ops, frozenset({"a"}))
         assert any(
@@ -1045,15 +1172,21 @@ class TestFindCrossOpErrors:
         # the snapshot, so the cross-op claim count must skip them.
         from fido.tasks import _RescopeOpNew
 
-        ops = [_RescopeOpNew(title="A", description="", type="spec")]
+        ops: list = [
+            _RescopeOpNew(
+                title="A", description="", type="spec", contributing_intents=[]
+            )
+        ]
         assert _find_cross_op_errors(ops, frozenset()) == []
 
     def test_split_op_claims_source_id(self) -> None:
         from fido.tasks import _RescopeOpSplit, _RescopeOpSplitChild
 
-        ops = [
+        ops: list = [
             _RescopeOpSplit(
-                id="src", children=[_RescopeOpSplitChild(title="C", description="")]
+                id="src",
+                children=[_RescopeOpSplitChild(title="C", description="")],
+                contributing_intents=[],
             )
         ]
         # Unknown source id.
@@ -1893,6 +2026,106 @@ class TestApplyReorder:
             "otherwise the divergence verifier would raise on a batch "
             "straddling a wall-clock second"
         )
+
+    def test_rewrite_carries_contributing_intents_to_persisted_task(self) -> None:
+        # #1722: contributing_intents on the op flows through the
+        # apply path and lands on the resulting task dict so a future
+        # classifier can read which intents drove the rewrite.
+        current = [self._t("1", "Old")]
+        items = [
+            {
+                "id": "1",
+                "title": "New",
+                "description": "scoped",
+                "contributing_intents": [42, 99],
+            }
+        ]
+        result = _apply_reorder(current, items)
+        assert result[0]["contributing_intents"] == [42, 99]
+
+    def test_multiple_intents_can_contribute_to_one_task(self) -> None:
+        # Acceptance criteria from #1722: tests cover multiple intents
+        # contributing to one task.  Two intents both attributed to a
+        # single rewrite op land on the resulting task as a list.
+        current = [self._t("1", "Original")]
+        items = [
+            {
+                "id": "1",
+                "title": "Combined ask",
+                "description": "...",
+                "contributing_intents": [101, 202, 303],
+            }
+        ]
+        result = _apply_reorder(current, items)
+        assert result[0]["contributing_intents"] == [101, 202, 303]
+
+    def test_split_propagates_contributing_intents_to_every_child(self) -> None:
+        # Acceptance criteria from #1722: split records associate the
+        # source intent ids with every split child unless explicitly
+        # narrowed (this leaf does not implement narrowing — children
+        # always inherit).  The split source's pre-existing intents
+        # also flow to every child.
+        src = self._t("src", "Original", task_type="thread")
+        src["thread"] = {"repo": "r/r", "pr": 1, "comment_id": 100}
+        src["contributing_intents"] = [50]  # pre-existing intent on source
+        items = [
+            {
+                "id": "src",
+                "split_targets": [
+                    {"title": "Child A", "description": "first"},
+                    {"title": "Child B", "description": "second"},
+                ],
+                "contributing_intents": [777],  # split-trigger intent
+            }
+        ]
+        result = _apply_reorder([src], items)
+        children = [t for t in result if t["id"] != "src"]
+        assert len(children) == 2
+        for child in children:
+            # Source's [50] + op's [777] union = [50, 777] in insertion
+            # order.
+            assert child["contributing_intents"] == [50, 777]
+
+    def test_merge_unions_source_intents_into_target(self) -> None:
+        # Sources' pre-existing contributing_intents fold into the
+        # merged target alongside the merge op's own intents.
+        a = self._t("a", "Task A")
+        a["contributing_intents"] = [10]
+        b = self._t("b", "Task B")
+        b["contributing_intents"] = [20, 30]
+        items = [
+            {
+                "id": "a",
+                "title": "Merged",
+                "description": "",
+                "merge_sources": ["b"],
+                "contributing_intents": [40],
+            },
+            {"id": "b", "status": "completed"},
+        ]
+        result = _apply_reorder([a, b], items)
+        target = next(t for t in result if t["id"] == "a")
+        # Target's prior [10] + op's [40] + source b's [20, 30] union.
+        assert target["contributing_intents"] == [10, 40, 20, 30]
+
+    def test_new_op_carries_contributing_intents_to_new_task(self) -> None:
+        # Brand-new tasks created via `new` ops keep the originating
+        # intent ids so a downstream classifier can route the eventual
+        # completion notification to the right commenter(s).
+        current: list = []
+        items = [
+            {
+                "id": None,
+                "title": "Brand new",
+                "description": "scope",
+                "type": "spec",
+                "contributing_intents": [555],
+            }
+        ]
+        result = _apply_reorder(current, items)
+        assert len(result) == 1
+        assert result[0]["title"] == "Brand new"
+        assert result[0]["contributing_intents"] == [555]
 
     def test_explicit_completion_marks_task_completed(self) -> None:
         # #1716: an item with status="completed" emits CompleteTask, which
@@ -3846,6 +4079,28 @@ class TestComputeThreadChanges:
         t = self._t("1", "Task", thread=self._thread())
         changes = _compute_thread_changes([t], [t], frozenset({"1"}))
         assert changes == []
+
+    def test_change_record_carries_post_rescope_contributing_intents(self) -> None:
+        # #1722: change records expose contributing_intents from the
+        # post-rescope task so the future classifier (#1723) and
+        # per-intent notifier (#1724) can route replies.  Both
+        # "completed" and "modified" records carry the field.
+        thread = self._thread()
+        original = [self._t("1", "Old", thread=thread)]
+        result_modified = [self._t("1", "New", thread=thread)]
+        result_modified[0]["contributing_intents"] = [42, 99]
+        modified = _compute_thread_changes(original, result_modified, frozenset({"1"}))
+        assert modified[0]["kind"] == "modified"
+        assert modified[0]["contributing_intents"] == [42, 99]
+        # Same for completion records.
+        result_completed: list = []
+        completed = _compute_thread_changes(
+            original, result_completed, frozenset({"1"})
+        )
+        assert completed[0]["kind"] == "completed"
+        # The original task had no contributing_intents and the result
+        # is missing entirely — empty list, not None.
+        assert completed[0]["contributing_intents"] == []
 
     def test_spec_task_not_reported_even_if_dropped(self) -> None:
         t = self._t("1", "Spec task")  # no thread
