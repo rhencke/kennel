@@ -791,6 +791,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
             titles: list[str] = []
             queued_tasks = 0
 
+            # Unblock any BLOCKED tasks BEFORE the handler triggers a
+            # background rescope (codex on #1738).  create_task() spawns
+            # _reorder_tasks_background, which snapshots the task list
+            # for validation; if the unblock ran AFTER create_task, a
+            # fast rescope could validate against the stale blocked
+            # state and reject a valid merge into what should now be a
+            # pending target.  Doing the unblock here, before any
+            # handler runs, makes the post-unblock state the snapshot
+            # the rescope sees.
+            if action.reply_to or action.comment_body or action.thread:
+                Tasks(repo_cfg.work_dir).unblock_tasks()
+
             # Post eyes reaction immediately to signal work-in-progress.
             # Fires before any triage / rescope / reply work so the comment
             # author sees acknowledgement within ~1s of their comment (#1243).
@@ -929,11 +941,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 category,
                 queued_tasks,
             )
-            # When a human comments on a PR, transition any BLOCKED tasks back
-            # to PENDING so the worker can re-evaluate and resume.
-            if action.reply_to or action.comment_body or action.thread:
-                Tasks(repo_cfg.work_dir).unblock_tasks()
-            # Non-comment events just trigger fido worker — no task needed
+            # Non-comment events just trigger fido worker — no task needed.
+            # The unblock for comment events ran above, before handlers,
+            # to close a race with the background rescope (codex on #1738).
             type(self)._fn_launch_worker(repo_cfg, self.registry)
         except provider.SessionLeakError:
             # Let the outer _process_action handler halt fido — we must not

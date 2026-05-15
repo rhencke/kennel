@@ -251,7 +251,12 @@ no longer a dedup join key); the "rewrote titles" half is now an
 intentional capability under **#1713** (title flows through the
 reducer as mutable metadata for an existing id). The thread anchor
 joins the mutable-metadata camp under **#1714** (RewriteAnchor in the
-reducer; lineage preservation in the Python adapter).
+reducer; lineage preservation in the Python adapter). Explicit
+removal lands under **#1716** (status="completed" → CompleteTask) and
+explicit merge under **#1717** (MergeTasks folds source lineages into
+the target row; lineage_comments is now a TaskRow field; the Rocq
+predicate `merge_preserves_source_lineage` proves no source comment id
+is lost).
 
 **Status.** Modeled in **D11 (#749) — model rescope confluence**.
 The original "title is immutable" framing has been reshaped by epic

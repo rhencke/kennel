@@ -123,11 +123,20 @@ class RewriteAnchor(RescopeOp):
 
 @final
 @dataclass(frozen=True)
+class MergeTasks(RescopeOp):
+    task: int
+    sources: list[int]
+    new_title: str
+    new_description: str
+
+
+@final
+@dataclass(frozen=True)
 class CompleteTask(RescopeOp):
     task: int
 
 
-RescopeOpT = KeepTask | RewriteTask | RewriteAnchor | CompleteTask
+RescopeOpT = KeepTask | RewriteTask | RewriteAnchor | MergeTasks | CompleteTask
 
 
 class RescopeReleaseKind:
@@ -511,6 +520,8 @@ def rescope_task_id(op: RescopeOp) -> int:
             return task
         case RewriteAnchor(task, new_anchor):
             return task
+        case MergeTasks(task, sources, new_title, new_description):
+            return task
         case CompleteTask(task):
             return task
         case __impossible:
@@ -567,6 +578,64 @@ def normalize_rescope_batch(
     return [op] + rest_
 
 
+def append_unique(
+    cid: int,
+    acc: list[int],
+) -> list[int]:
+    if cid in acc:
+        return acc
+    return acc + [cid]
+
+
+def append_unique_list(
+    cids: list[int],
+    acc: list[int],
+) -> list[int]:
+    for cid in cids:
+        acc = append_unique(cid, acc)
+        continue
+    return acc
+
+
+def append_unique_option(
+    cid: int | None,
+    acc: list[int],
+) -> list[int]:
+    __option = cid
+    if __option is None:
+        return acc
+    c = __option
+    return append_unique(c, acc)
+
+
+def fold_source_lineage_into(
+    rows: dict[int, TaskRow],
+    src: int,
+    acc: list[int],
+) -> list[int]:
+    __option = rows.get(_rocq_positive_key(src))
+    if __option is None:
+        return acc
+    row = __option
+    with_lineage = append_unique_list(row.lineage_comments, acc)
+    return append_unique_option(row.source_comment, with_lineage)
+
+
+def collect_source_lineages(
+    sources: list[int],
+    rows: dict[int, TaskRow],
+    acc: list[int],
+) -> list[int]:
+    for src in sources:
+        acc = fold_source_lineage_into(
+            rows,
+            src,
+            acc,
+        )
+        continue
+    return acc
+
+
 def apply_rescope_op(
     op: RescopeOp,
     task: int,
@@ -603,9 +672,34 @@ def apply_rescope_op(
                     completed_ids,
                 )
             case RewriteAnchor(task0, new_anchor):
+                extended = append_unique_option(new_anchor, row.lineage_comments)
                 row_ = replace(
                     row,
                     source_comment=new_anchor,
+                    lineage_comments=extended,
+                )
+                return (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(task),
+                            row_,
+                            rows,
+                        ),
+                        pending_ids + [task],
+                    ),
+                    completed_ids,
+                )
+            case MergeTasks(task0, sources, new_title, new_description):
+                merged = collect_source_lineages(
+                    sources,
+                    rows,
+                    row.lineage_comments,
+                )
+                row_ = replace(
+                    row,
+                    title=new_title,
+                    description=new_description,
+                    lineage_comments=merged,
                 )
                 return (
                     (
@@ -848,6 +942,55 @@ def apply_batched_rescope(
     )
 
 
+def list_subset(
+    xs: list[int],
+    ys: list[int],
+) -> bool:
+    __list = xs
+    if __list == []:
+        return True
+    x = __list[0]
+    rest = __list[1:]
+    return x in ys and list_subset(rest, ys)
+
+
+def source_anchor_in_lineage(
+    anchor: int | None,
+    lineage: list[int],
+) -> bool:
+    __option = anchor
+    if __option is None:
+        return True
+    c = __option
+    return c in lineage
+
+
+def merge_target_lineage_includes_source(
+    target_row: TaskRow,
+    src_row: TaskRow,
+) -> bool:
+    target_lineage = target_row.lineage_comments
+    src_lineage_ok = list_subset(src_row.lineage_comments, target_lineage)
+    src_anchor_ok = source_anchor_in_lineage(src_row.source_comment, target_lineage)
+    return src_lineage_ok and src_anchor_ok
+
+
+def merge_preserves_source_lineage(
+    sources: list[int],
+    rows_before: dict[int, TaskRow],
+    target_row_after: TaskRow,
+) -> bool:
+    for src in sources:
+        __option = rows_before.get(_rocq_positive_key(src))
+        if __option is None:
+            continue
+        src_row = __option
+        if merge_target_lineage_includes_source(target_row_after, src_row):
+            continue
+        return False
+    return True
+
+
 def rescope_affects_active_task(
     lease: ExecutionLease | None,
     rows_before: dict[int, TaskRow],
@@ -1070,7 +1213,7 @@ def task_changes_materially_significant(changes: list[TaskChange]) -> bool:
     __list = changes
     if __list == []:
         return False
-    t = __list[0]
+    t0 = __list[0]
     l = __list[1:]
     return True
 
@@ -1099,12 +1242,12 @@ def remove_from_order(
     __list = order
     if __list == []:
         return []
-    t = __list[0]
+    t0 = __list[0]
     rest = __list[1:]
     rest_ = remove_from_order(task, rest)
-    if t == task:
+    if t0 == task:
         return rest_
-    return [t] + rest_
+    return [t0] + rest_
 
 
 def cleanup_aborted_task(

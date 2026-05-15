@@ -82,11 +82,23 @@ Record ExecutionLease : Type := {
     [RewriteAnchor] applies a new source-comment anchor; the Python adapter
     is responsible for preserving the previous anchor in the task's
     [lineage_comment_ids] origin metadata so reply/resolve paths can still
-    reach earlier commenters. *)
+    reach earlier commenters.
+
+    [MergeTasks target sources new_title new_description] (#1717) folds
+    every [sources] task's [lineage_comments] (and primary [source_comment]
+    anchor) into [target]'s [lineage_comments], then rewrites [target]'s
+    title and description.  The sources are NOT closed by this op — the
+    adapter emits a separate [CompleteTask] per source so the per-task
+    coverage invariant ([rescope_ops_cover_snapshot]) still holds.
+    [merge_preserves_source_lineage] proves: after this op, every
+    source's [lineage_comments] and [source_comment] are present in
+    [target]'s [lineage_comments] — no origin is lost. *)
 Inductive RescopeOp : Type :=
 | KeepTask (task : positive) : RescopeOp
 | RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
 | RewriteAnchor (task : positive) (new_anchor : option positive) : RescopeOp
+| MergeTasks (task : positive) (sources : list positive)
+    (new_title : string) (new_description : string) : RescopeOp
 | CompleteTask (task : positive) : RescopeOp.
 
 (** [RescopeReleaseKind] distinguishes the accumulated worker releases that
@@ -365,6 +377,7 @@ Definition rescope_task_id (op : RescopeOp) : positive :=
   | KeepTask task => task
   | RewriteTask task _ _ => task
   | RewriteAnchor task _ => task
+  | MergeTasks task _ _ _ => task
   | CompleteTask task => task
   end.
 
@@ -418,6 +431,48 @@ Fixpoint normalize_rescope_batch
       end
   end.
 
+(** Insertion-order set helpers used by [MergeTasks] to fold every source
+    task's [lineage_comments] (and primary [source_comment]) into the
+    target task's [lineage_comments] without duplicates. *)
+Definition append_unique (cid : positive) (acc : list positive) : list positive :=
+  if positive_mem cid acc then acc else List.app acc [cid].
+
+Fixpoint append_unique_list (cids acc : list positive) : list positive :=
+  match cids with
+  | [] => acc
+  | cid :: rest => append_unique_list rest (append_unique cid acc)
+  end.
+
+Definition append_unique_option
+    (cid : option positive) (acc : list positive) : list positive :=
+  match cid with
+  | Some c => append_unique c acc
+  | None => acc
+  end.
+
+(** Fold one source row's lineage + primary anchor into [acc]. *)
+Definition fold_source_lineage_into
+    (rows : PositiveMap.t TaskRow)
+    (src : positive)
+    (acc : list positive) : list positive :=
+  match PositiveMap.find src rows with
+  | Some row =>
+      let with_lineage := append_unique_list (lineage_comments row) acc in
+      append_unique_option (source_comment row) with_lineage
+  | None => acc
+  end.
+
+Fixpoint collect_source_lineages
+    (sources : list positive)
+    (rows : PositiveMap.t TaskRow)
+    (acc : list positive) : list positive :=
+  match sources with
+  | [] => acc
+  | src :: rest =>
+      collect_source_lineages rest rows
+        (fold_source_lineage_into rows src acc)
+  end.
+
 Definition apply_rescope_op
     (op : RescopeOp)
     (task : positive)
@@ -442,13 +497,33 @@ Definition apply_rescope_op
           List.app pending_ids [task],
           completed_ids)
     | RewriteAnchor _ new_anchor =>
+        (* Re-anchoring extends lineage_comments with the new anchor so
+           the previous primary commenter (already in lineage) and the
+           newly-targeted commenter both stay reachable from this row.
+           Mirrors the materializer's previous _reanchored_thread logic
+           but moves the rule into the model so lineage flows through
+           apply_rescope_op exclusively (#1717). *)
+        let extended := append_unique_option new_anchor (lineage_comments row) in
         let row' := {|
           title := title row;
           description := description row;
           kind := kind row;
           status := status row;
           source_comment := new_anchor;
-          lineage_comments := lineage_comments row
+          lineage_comments := extended
+        |} in
+        (PositiveMap.add task row' rows,
+          List.app pending_ids [task],
+          completed_ids)
+    | MergeTasks _ sources new_title new_description =>
+        let merged := collect_source_lineages sources rows (lineage_comments row) in
+        let row' := {|
+          title := new_title;
+          description := new_description;
+          kind := kind row;
+          status := status row;
+          source_comment := source_comment row;
+          lineage_comments := merged
         |} in
         (PositiveMap.add task row' rows,
           List.app pending_ids [task],
@@ -600,6 +675,45 @@ Definition apply_batched_rescope
     : list positive * PositiveMap.t TaskRow :=
   let ops := normalize_rescope_batch snapshot_order releases in
   apply_rescope snapshot_order current_order rows ops.
+
+(** [merge_target_lineage_includes_source] says whether [target_row]'s
+    [lineage_comments] (after a [MergeTasks]) contains every entry from a
+    given source row's [lineage_comments] plus its [source_comment]. *)
+Fixpoint list_subset (xs ys : list positive) : bool :=
+  match xs with
+  | [] => true
+  | x :: rest => andb (positive_mem x ys) (list_subset rest ys)
+  end.
+
+Definition source_anchor_in_lineage
+    (anchor : option positive) (lineage : list positive) : bool :=
+  match anchor with
+  | Some c => positive_mem c lineage
+  | None => true
+  end.
+
+Definition merge_target_lineage_includes_source
+    (target_row src_row : TaskRow) : bool :=
+  let target_lineage := lineage_comments target_row in
+  let src_lineage_ok := list_subset (lineage_comments src_row) target_lineage in
+  let src_anchor_ok := source_anchor_in_lineage (source_comment src_row) target_lineage in
+  andb src_lineage_ok src_anchor_ok.
+
+Fixpoint merge_preserves_source_lineage
+    (sources : list positive)
+    (rows_before : PositiveMap.t TaskRow)
+    (target_row_after : TaskRow) : bool :=
+  match sources with
+  | [] => true
+  | src :: rest =>
+      match PositiveMap.find src rows_before with
+      | None => merge_preserves_source_lineage rest rows_before target_row_after
+      | Some src_row =>
+          if merge_target_lineage_includes_source target_row_after src_row
+          then merge_preserves_source_lineage rest rows_before target_row_after
+          else false
+      end
+  end.
 
 (** [rescope_affects_active_task] says whether the active lease must abort after
     rescope because its task was completed or rewritten. *)
@@ -812,4 +926,4 @@ Definition task_still_pending
   end.
 
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending merge_preserves_source_lineage merge_target_lineage_includes_source".

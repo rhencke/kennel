@@ -11,6 +11,7 @@ from fido.rocq import thread_auto_resolve as thread_oracle
 from fido.tasks import (
     Tasks,
     _apply_reorder,
+    _assert_merge_lineage_preserved,
     _assert_rescope_matches_oracle,
     _build_task_list_snapshot,
     _compute_thread_changes,
@@ -31,6 +32,7 @@ from fido.tasks import (
     _validate_rescope_batch,
     reorder_tasks,
     review_thread_for_auto_resolve_oracle,
+    thread_tasks_for_auto_resolve_oracle,
 )
 from fido.types import RescopeIntent, TaskStatus, TaskType
 
@@ -1193,6 +1195,237 @@ class TestApplyReorder:
         # Thread metadata stays put — no anchor change happened.
         assert result[0]["thread"] == thread
 
+    def test_merge_folds_source_lineage_into_target(self) -> None:
+        # #1717: MergeTasks(target, sources, new_title, new_description)
+        # folds every source's lineage_comments + source_comment into
+        # target's lineage_comments — no origin lost.  Sources are closed
+        # by their own CompleteTask items in the same batch.
+        thread_a = {"repo": "r/r", "pr": 1, "comment_id": 100}
+        thread_b = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 200,
+            "lineage_comment_ids": [50, 200],
+        }
+        thread_c = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 300,
+            "lineage_comment_ids": [300, 250],
+        }
+        a = self._t("a", "Task A", task_type="thread")
+        a["thread"] = thread_a
+        b = self._t("b", "Task B", task_type="thread")
+        b["thread"] = thread_b
+        c = self._t("c", "Task C", task_type="thread")
+        c["thread"] = thread_c
+        items = [
+            {
+                "id": "a",
+                "title": "Merged title",
+                "description": "merged scope",
+                "merge_sources": ["b", "c"],
+            },
+            {"id": "b", "title": "Task B", "status": "completed"},
+            {"id": "c", "title": "Task C", "status": "completed"},
+        ]
+        result = _apply_reorder([a, b, c], items)
+        target = next(t for t in result if t["id"] == "a")
+        # Target keeps its own anchor and pending status; gets merged
+        # title/desc from the explicit payload; absorbs sources' lineage.
+        assert target["status"] == str(TaskStatus.PENDING)
+        assert target["thread"]["comment_id"] == 100
+        assert target["title"] == "Merged title"
+        assert target["description"] == "merged scope"
+        # Ordered union: a's [100] (default), then b's [50, 200], then
+        # c's [300, 250] (b/c lineage_comment_ids fields explicitly).
+        assert target["thread"]["lineage_comment_ids"] == [100, 50, 200, 300, 250]
+        # Sources are closed by their own CompleteTask items.
+        for src_id in ("b", "c"):
+            src = next(t for t in result if t["id"] == src_id)
+            assert src["status"] == str(TaskStatus.COMPLETED)
+
+    def test_merge_lineage_assertion_raises_on_dropped_source(self) -> None:
+        # The runtime assertion catches a (hypothetical) oracle/adapter
+        # divergence that drops source lineage from the target row.
+        # Build a synthetic before/after pair where the target row's
+        # lineage_comments doesn't contain the source's anchor.
+        from fido.rocq import task_queue_rescope as oracle
+
+        src_row = oracle.TaskRow(
+            title="src",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=200,
+            lineage_comments=[200],
+        )
+        target_after = oracle.TaskRow(
+            title="tgt",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=100,
+            lineage_comments=[100],  # missing 200 — source lineage dropped
+        )
+        rows_before = {1: target_after, 2: src_row}
+        rows_after = {1: target_after, 2: src_row}
+        merge_release = oracle.RescopeRelease(
+            oracle.ReleaseACT(), oracle.MergeTasks(1, [2], "tgt", "")
+        )
+        with pytest.raises(AssertionError, match="dropped source lineage"):
+            _assert_merge_lineage_preserved([merge_release], rows_before, rows_after)
+
+    def test_merge_lineage_assertion_raises_on_missing_target(self) -> None:
+        # If the target row is somehow missing from the oracle output,
+        # fail fast rather than silently produce a half-applied merge.
+        from fido.rocq import task_queue_rescope as oracle
+
+        src_row = oracle.TaskRow(
+            title="src",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=200,
+            lineage_comments=[200],
+        )
+        rows_before = {2: src_row}
+        rows_after: dict[int, oracle.TaskRow] = {2: src_row}  # no target
+        merge_release = oracle.RescopeRelease(
+            oracle.ReleaseACT(), oracle.MergeTasks(1, [2], "tgt", "")
+        )
+        with pytest.raises(AssertionError, match="missing from rescope output"):
+            _assert_merge_lineage_preserved([merge_release], rows_before, rows_after)
+
+    def test_auto_resolve_projection_skips_non_thread_tasks(self) -> None:
+        # A task with no thread contributes zero ThreadTask entries —
+        # the auto-resolve oracle only cares about review-thread
+        # comments, not spec/CI work.
+        spec = self._t("spec", "Spec")  # no thread dict
+        assert thread_tasks_for_auto_resolve_oracle([spec]) == []
+
+    def test_merged_target_lineage_blocks_source_thread_auto_resolve(self) -> None:
+        # codex on #1738 (high): the auto-resolve oracle's projection
+        # must cover every comment in a pending merged target's
+        # lineage, not just the primary anchor.  Otherwise after a
+        # merge the source thread auto-resolves before the merged
+        # target is actually done, because no pending task carries the
+        # source's comment_id as primary anymore (the source is
+        # COMPLETED, the target's primary is its own anchor).
+        thread_a = {"repo": "r/r", "pr": 1, "comment_id": 100}
+        thread_b = {"repo": "r/r", "pr": 1, "comment_id": 200}
+        a = self._t("a", "Task A", task_type="thread")
+        a["thread"] = thread_a
+        b = self._t("b", "Task B", task_type="thread")
+        b["thread"] = thread_b
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "Task B", "status": "completed"},
+        ]
+        result = _apply_reorder([a, b], items)
+        oracle_tasks = thread_tasks_for_auto_resolve_oracle(result)
+        # Comment 200 (the source's anchor) appears as a PENDING
+        # ThreadTask via the merged target's lineage — the auto-resolve
+        # oracle will see it and refuse to resolve thread 200 until the
+        # merged target completes.
+        from fido.rocq import thread_auto_resolve as resolve_oracle
+
+        pending_for_200 = [
+            t
+            for t in oracle_tasks
+            if t.thread_task_comment == 200
+            and isinstance(t.thread_task_status, resolve_oracle.StatusPending)
+        ]
+        assert pending_for_200, (
+            "merged target's lineage must surface as a pending ThreadTask "
+            "for each absorbed source's anchor — otherwise auto-resolve "
+            "fires prematurely on the source thread"
+        )
+
+    def test_merge_apply_runs_lineage_preservation_assertion(self) -> None:
+        # codex on #1738 (medium): the Rocq predicate
+        # merge_preserves_source_lineage is asserted at runtime for
+        # every MergeTasks op the adapter emits — so any divergence
+        # between the executable model predicate and the materialized
+        # output fails closed instead of silently dropping a source
+        # comment.  This test exercises the happy path; the predicate
+        # itself is exercised by test_merge_uses_oracle_predicate_to_*.
+        thread_a = {"repo": "r/r", "pr": 1, "comment_id": 100}
+        thread_b = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 200,
+            "lineage_comment_ids": [50, 200],
+        }
+        a = self._t("a", "Task A", task_type="thread")
+        a["thread"] = thread_a
+        b = self._t("b", "Task B", task_type="thread")
+        b["thread"] = thread_b
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "Task B", "status": "completed"},
+        ]
+        # Should not raise; if assertion fired we'd get AssertionError.
+        result = _apply_reorder([a, b], items)
+        target = next(t for t in result if t["id"] == "a")
+        assert 50 in target["thread"]["lineage_comment_ids"]
+        assert 200 in target["thread"]["lineage_comment_ids"]
+
+    def test_merge_with_unhashable_source_does_not_crash(self) -> None:
+        # codex on #1738: _apply_reorder must not raise TypeError when
+        # called with a malformed merge_sources list (e.g. nested list /
+        # dict).  In production the validator rejects this atomically;
+        # tests bypass the validator, so the adapter has its own
+        # isinstance(str) guard before the dict membership check.
+        current = [self._t("a", "Task A"), self._t("b", "Task B")]
+        items = [
+            {
+                "id": "a",
+                "title": "Merged",
+                "merge_sources": [["nested"], {"d": 1}, "b"],
+            },
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        # Should fall through to the merge with only the valid source.
+        result = _apply_reorder(current, items)
+        target = next(t for t in result if t["id"] == "a")
+        b_completed = next(t for t in result if t["id"] == "b")
+        assert target["title"] == "Merged"
+        assert b_completed["status"] == str(TaskStatus.COMPLETED)
+
+    def test_merge_uses_oracle_predicate_to_prove_no_lineage_lost(self) -> None:
+        # The Rocq model's merge_preserves_source_lineage predicate is
+        # extracted to Python; check it returns True after a real merge.
+        from fido.rocq import task_queue_rescope as oracle
+
+        a_row = oracle.TaskRow(
+            title="A",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=100,
+            lineage_comments=[100],
+        )
+        b_row = oracle.TaskRow(
+            title="B",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=200,
+            lineage_comments=[50, 200],
+        )
+        rows_before = {1: a_row, 2: b_row}
+        merge_op = oracle.MergeTasks(1, [2], "Merged", "")
+        # Extracted return shape is the Coq triple ((rows, pending), completed).
+        ((rows_after, _), _) = oracle.apply_rescope_op(
+            merge_op, 1, a_row, rows_before, [], []
+        )
+        target_after = rows_after[1]
+        # Predicate confirms sources' lineage + anchor are present in target.
+        assert oracle.merge_preserves_source_lineage([2], rows_before, target_after)
+        # Sanity: the merged lineage matches what we expect.
+        assert target_after.lineage_comments == [100, 50, 200]
+
     def test_explicit_completion_marks_task_completed(self) -> None:
         # #1716: an item with status="completed" emits CompleteTask, which
         # the reducer applies as a status flip to COMPLETED.  This is the
@@ -1639,6 +1872,229 @@ class TestValidateRescopeBatch:
         assert len(errors) == 2
         assert any("999" in e and "unknown" in e for e in errors)
         assert any("duplicate" in e for e in errors)
+
+    def test_valid_merge_batch_is_accepted(self) -> None:
+        # #1717: a target with merge_sources is valid when every source
+        # is a known id AND appears in the same batch with status=completed.
+        current = [self._t("a"), self._t("b"), self._t("c")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b", "c"]},
+            {"id": "b", "title": "B", "status": "completed"},
+            {"id": "c", "title": "C", "status": "completed"},
+        ]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_merge_with_unknown_source_is_rejected(self) -> None:
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b", "ghost"]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("ghost" in e and "unknown" in e for e in errors)
+
+    def test_merge_into_self_is_rejected(self) -> None:
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["a", "b"]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("merge a task into itself" in e for e in errors)
+
+    def test_merge_source_without_completion_is_rejected(self) -> None:
+        # If the source isn't marked completed in the batch, the per-task
+        # coverage invariant breaks: the source has no op of its own.
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "B"},  # missing status="completed"
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            'must also appear in the batch with status="completed"' in e for e in errors
+        )
+
+    def test_merge_sources_must_be_list(self) -> None:
+        current = [self._t("a")]
+        items = [{"id": "a", "title": "x", "merge_sources": "b"}]
+        errors = _validate_rescope_batch(current, items)
+        assert any("must be a list" in e for e in errors)
+
+    def test_merge_source_must_be_non_empty_string(self) -> None:
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b", 42, ""]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("must be non-empty string" in e and "42" in e for e in errors)
+        assert any("must be non-empty string" in e and "''" in e for e in errors)
+
+    def test_merge_sources_on_completed_target_is_rejected(self) -> None:
+        # codex on #1738: explicit-completion precedence (#1716) wins
+        # over merge in _rescope_releases_for_oracle, so a batch with
+        # both status="completed" and merge_sources on the same target
+        # would silently drop the merge AND suppress the source's
+        # completion notification — the source vanishes without lineage
+        # being preserved anywhere.  Reject the contradictory shape.
+        current = [self._t("target"), self._t("source")]
+        items = [
+            {
+                "id": "target",
+                "title": "T",
+                "status": "completed",
+                "merge_sources": ["source"],
+            },
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "merging into a completed task is contradictory" in e
+            and "via this batch" in e
+            for e in errors
+        )
+
+    def test_merge_sources_on_null_id_target_is_rejected(self) -> None:
+        # codex on #1738: a null-id item carrying merge_sources slips
+        # past every merge check today.  _make_new_tasks_from_opus
+        # creates the new task without folding the source's lineage,
+        # and _merge_source_ids still suppresses the source's
+        # completion notification — the source vanishes without
+        # lineage preservation, violating the no-origin-loss invariant.
+        current = [self._t("source")]
+        items = [
+            {
+                "id": None,
+                "title": "New merged task",
+                "merge_sources": ["source"],
+            },
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("null/missing id" in e for e in errors)
+
+    def test_null_id_without_merge_sources_is_still_valid(self) -> None:
+        # Negative regression: ordinary new-task items (null id, no
+        # merge_sources) stay valid.
+        current = [self._t("a")]
+        items = [{"id": None, "title": "Brand new"}]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_null_id_with_falsy_non_list_merge_sources_is_rejected(self) -> None:
+        # codex follow-up on #1738: presence-and-value check catches
+        # malformed-but-falsy values (``""``, ``0``, ``False``) that
+        # truthiness would let slip through.  Empty list stays accepted
+        # as the documented "no merge" sentinel.
+        current = [self._t("a")]
+        for bad in ("", 0, False, "string-not-list", 42):
+            items = [{"id": None, "title": "new", "merge_sources": bad}]
+            errors = _validate_rescope_batch(current, items)
+            assert any("null/missing id" in e for e in errors), (
+                f"merge_sources={bad!r} on null id should be rejected"
+            )
+
+    def test_null_id_with_empty_list_merge_sources_is_accepted(self) -> None:
+        # The empty-list sentinel is the documented "no merge" no-op
+        # and stays accepted on a null-id new task.
+        current = [self._t("a")]
+        items = [{"id": None, "title": "Brand new", "merge_sources": []}]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_same_source_into_multiple_targets_is_rejected(self) -> None:
+        # codex Medium on #1738: a source feeding multiple targets
+        # duplicates its lineage into each, which is split/rebuild
+        # semantics — not a merge.  Split lands under #1718.  This leaf
+        # rejects the contradictory shape: each source may merge into
+        # at most one target.
+        current = [self._t("a"), self._t("b"), self._t("c")]
+        items = [
+            {"id": "a", "title": "A", "merge_sources": ["c"]},
+            {"id": "b", "title": "B", "merge_sources": ["c"]},
+            {"id": "c", "title": "C", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("may merge into at most one target" in e for e in errors)
+
+    def test_merge_into_blocked_target_is_rejected(self) -> None:
+        # codex on #1738: a blocked target accepts merge_sources today,
+        # but the worker picker skips blocked tasks — the source flips
+        # to completed and its notification is suppressed while the
+        # merged work parks indefinitely on a row Fido won't pick up.
+        # Same shape of silent drop as the completed-target case.
+        target = self._t("target")
+        target["status"] = "blocked"
+        items = [
+            {"id": "target", "title": "T", "merge_sources": ["source"]},
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        current = [target, self._t("source")]
+        errors = _validate_rescope_batch(current, items)
+        assert any("target") and any("blocked" in e for e in errors)
+
+    def test_merge_into_already_completed_target_on_disk_is_rejected(
+        self,
+    ) -> None:
+        # codex on #1738: even when the item doesn't restate
+        # status="completed", merging into a target whose CURRENT
+        # status is already COMPLETED gets silently dropped by
+        # _rescope_releases_for_oracle (it skips completed snapshot
+        # tasks) — but _merge_source_ids still suppresses the source's
+        # completion notification.  Reject the shape at the validator.
+        target = self._t("target")
+        target["status"] = "completed"
+        items = [
+            {"id": "target", "title": "T", "merge_sources": ["source"]},
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        current = [target, self._t("source")]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "merging into a completed task is contradictory" in e and "already on" in e
+            for e in errors
+        )
+
+    def test_empty_merge_sources_on_completed_target_is_harmless(self) -> None:
+        # codex on #1738 (low): an empty merge_sources is the
+        # documented "no merge" sentinel and shouldn't be rejected on a
+        # completed target — there's no contradiction to fail closed on.
+        current = [self._t("target")]
+        items = [
+            {
+                "id": "target",
+                "title": "T",
+                "status": "completed",
+                "merge_sources": [],
+            },
+        ]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_thread_source_into_non_thread_target_is_rejected(self) -> None:
+        # codex P1 on #1738: a thread source contributes comment lineage
+        # via thread.lineage_comment_ids on disk; a non-thread target has
+        # nowhere to store that lineage, so the materializer would
+        # silently drop it.  Reject the merge atomically.
+        spec_target = self._t("spec", "Spec target")
+        thread_source = self._t("thread", "Thread source")
+        thread_source["type"] = "thread"
+        thread_source["thread"] = {"repo": "r/r", "pr": 1, "comment_id": 99}
+        items = [
+            {"id": "spec", "title": "Merged", "merge_sources": ["thread"]},
+            {"id": "thread", "title": "Thread source", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch([spec_target, thread_source], items)
+        assert any("thread source" in e and "non-thread target" in e for e in errors)
+
+    def test_spec_to_spec_merge_is_accepted(self) -> None:
+        # Negative regression: same-kind merges (no thread anywhere) stay
+        # valid — the lineage-loss rule only fires when a thread source
+        # would feed a non-thread target.
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        assert _validate_rescope_batch(current, items) == []
 
 
 # ── reorder_tasks ─────────────────────────────────────────────────────────────
@@ -2105,6 +2561,96 @@ class TestReorderTasks:
         result = Tasks(tmp_path).list()
         assert result[0]["status"] == str(TaskStatus.PENDING)
         assert result[0]["thread"]["comment_id"] == 99
+
+    def test_on_inprogress_affected_called_when_merge_grows_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1738: a MergeTasks that folds source lineage into
+        # the in-progress target only grows thread.lineage_comment_ids;
+        # title/desc/anchor/status stay the same.  The worker prompt
+        # captured the old lineage, so the callback must still fire and
+        # reset the task to pending.
+        t_target = Tasks(tmp_path).add(
+            title="Target",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 100},
+        )
+        t_source = Tasks(tmp_path).add(
+            title="Source",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 200},
+        )
+        Tasks(tmp_path).update(t_target["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [
+                {
+                    "id": t_target["id"],
+                    "title": "Target",
+                    "description": "",
+                    "merge_sources": [t_source["id"]],
+                },
+                {"id": t_source["id"], "title": "Source", "status": "completed"},
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == [t_target["id"]]
+        result = Tasks(tmp_path).list()
+        target = next(t for t in result if t["id"] == t_target["id"])
+        assert target["status"] == str(TaskStatus.PENDING)
+        # Lineage grew with the source's anchor.
+        assert 200 in target["thread"]["lineage_comment_ids"]
+
+    def test_on_changes_skips_merge_source_completion_notifications(
+        self, tmp_path: Path
+    ) -> None:
+        # codex on #1738: a merge source's status flip to COMPLETED is
+        # bookkeeping for the rescope reducer's per-task coverage —
+        # the work was MOVED to the target, not finished by commits.
+        # _compute_thread_changes must NOT fire a "covered by recent
+        # commits" change record for it; the merged target will fire
+        # its own record when it eventually completes.
+        t_target = Tasks(tmp_path).add(
+            title="Target",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 100, "url": "x"},
+        )
+        t_source = Tasks(tmp_path).add(
+            title="Source",
+            task_type=TaskType.THREAD,
+            thread={"repo": "r/r", "pr": 1, "comment_id": 200, "url": "y"},
+        )
+        raw = self._response(
+            [
+                {
+                    "id": t_target["id"],
+                    "title": "Target",
+                    "description": "",
+                    "merge_sources": [t_source["id"]],
+                },
+                {"id": t_source["id"], "title": "Source", "status": "completed"},
+            ]
+        )
+        received: list[dict] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_changes=lambda changes: received.extend(changes),
+        )
+        # Source's COMPLETED transition is suppressed (it was merged,
+        # not completed).  Only the target — still pending — would
+        # generate a future change record when it completes.
+        for change in received:
+            assert change["task"]["id"] != t_source["id"], (
+                "merge-source completion must not fire on_changes — "
+                "the work moved to the target, not 'covered by commits'"
+            )
 
     def test_on_inprogress_affected_called_when_explicitly_completed(
         self, tmp_path: Path
