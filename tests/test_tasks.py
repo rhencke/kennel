@@ -1604,6 +1604,27 @@ class TestApplyReorder:
         assert len(child_ids) == 1
         assert child_ids[0] not in {"src", "other-1234567890-0001"}
 
+    def test_allocate_split_child_ids_shares_created_at_across_children(self) -> None:
+        # codex P1: created_at is captured once per call so the apply
+        # and verify passes (which both hit this allocator output)
+        # produce identical materializations even if real-time crosses
+        # a second boundary between them.
+        from fido.tasks import _allocate_split_child_ids
+
+        items = [
+            {
+                "id": "src",
+                "split_targets": [{"title": "A"}, {"title": "B"}, {"title": "C"}],
+            }
+        ]
+        allocated = _allocate_split_child_ids(items)
+        timestamps = {created_at for _id, created_at in allocated["src"]}
+        assert len(timestamps) == 1, (
+            "every child of one batch must share the same created_at — "
+            "otherwise the divergence verifier would raise on a batch "
+            "straddling a wall-clock second"
+        )
+
     def test_explicit_completion_marks_task_completed(self) -> None:
         # #1716: an item with status="completed" emits CompleteTask, which
         # the reducer applies as a status flip to COMPLETED.  This is the
@@ -2414,6 +2435,28 @@ class TestValidateRescopeBatch:
         assert any("unknown source id" in e for e in errors)
         # No split-specific error piles on top of the unknown-id error.
         assert not any("split_targets on 'ghost'" in e for e in errors)
+
+    def test_split_on_ask_source_is_rejected(self) -> None:
+        # codex P1: kind classification is title-prefix driven, so a
+        # split whose children carry plain titles silently reclassifies
+        # an ASK source's children to executable spec tasks.  Reject.
+        ask = self._t("ask", "ASK: how do I X?")
+        items = [{"id": "ask", "split_targets": [{"title": "Do X"}]}]
+        errors = _validate_rescope_batch([ask], items)
+        assert any("ASK/DEFER/CI" in e for e in errors)
+
+    def test_split_on_defer_source_is_rejected(self) -> None:
+        defer = self._t("d", "DEFER: do later")
+        items = [{"id": "d", "split_targets": [{"title": "Now"}]}]
+        errors = _validate_rescope_batch([defer], items)
+        assert any("ASK/DEFER/CI" in e for e in errors)
+
+    def test_split_on_ci_failure_source_is_rejected(self) -> None:
+        ci = self._t("c", "CI FAILURE: lint broke")
+        ci["type"] = "ci"
+        items = [{"id": "c", "split_targets": [{"title": "fix half"}]}]
+        errors = _validate_rescope_batch([ci], items)
+        assert any("ASK/DEFER/CI" in e for e in errors)
 
 
 # ── reorder_tasks ─────────────────────────────────────────────────────────────

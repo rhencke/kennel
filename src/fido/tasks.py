@@ -429,19 +429,29 @@ def _split_target_specs(item: dict[str, Any]) -> list[dict[str, Any]] | None:
 
 def _allocate_split_child_ids(
     ordered_items: list[dict[str, Any]],
-) -> dict[str, list[str]]:
-    """Pre-allocate a fresh string task id per declared split child.
+    existing_ids: frozenset[str] = frozenset(),
+) -> dict[str, list[tuple[str, str]]]:
+    """Pre-allocate a fresh ``(id, created_at)`` per declared split child.
 
     ``_apply_reorder`` runs the rescope plan twice — once via
     ``_apply_reorder_with_oracle`` to compute the result, once via
     ``_assert_rescope_matches_oracle`` to verify oracle/runtime
     agreement.  Both calls re-derive ops from the same ``ordered_items``,
-    so without a single source of truth for new child ids the second
-    pass would mint different random ids and the divergence assertion
-    would spuriously fire.  Allocate once at the top and pass the same
-    map into both downstream paths.
+    so the divergence assertion can only hold if the **id and the
+    timestamp** are identical across the two passes.  Wall-clock reads
+    in the materializer would make the verifier raise on any batch
+    that crosses a second boundary; allocating both fields once at the
+    top removes the race surface entirely (codex P1).
+
+    ``existing_ids`` lets the allocator avoid colliding with any id
+    already on disk (or with a sibling child allocated earlier in the
+    same call).  Without that, two timestamp+random outputs that
+    happen to match would silently let one task shadow another, and
+    later rescope/completion ops would target the wrong row (codex P2).
     """
-    out: dict[str, list[str]] = {}
+    used: set[str] = set(existing_ids)
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    out: dict[str, list[tuple[str, str]]] = {}
     for item in ordered_items:
         item_id = item.get("id")
         if not isinstance(item_id, str) or not item_id:
@@ -449,9 +459,15 @@ def _allocate_split_child_ids(
         targets = _split_target_specs(item)
         if targets is None:
             continue
-        out[item_id] = [
-            f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}" for _ in targets
-        ]
+        ids: list[tuple[str, str]] = []
+        for _ in targets:
+            while True:
+                fresh = f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}"
+                if fresh not in used:
+                    used.add(fresh)
+                    break
+            ids.append((fresh, created_at))
+        out[item_id] = ids
     return out
 
 
@@ -481,6 +497,7 @@ def _split_child_synthetic_task(
     child_id: str,
     child_title: str,
     child_description: str,
+    created_at: str,
 ) -> dict[str, Any]:
     """Build the synthetic original task dict for a split child.
 
@@ -490,8 +507,13 @@ def _split_child_synthetic_task(
     inherit ``thread`` and ``type`` from the source so reply paths still
     reach the original commenter (the SplitTask reducer also folds the
     source's ``lineage_comments`` into each child via
-    ``insert_split_children``, and the materializer syncs that back into
+    ``add_split_kids``, and the materializer syncs that back into
     ``thread.lineage_comment_ids`` whenever the lineage differs).
+
+    ``created_at`` is supplied by the caller (computed once per
+    ``_apply_reorder`` and shared across the apply/verify passes); a
+    wall-clock read here would make the divergence verifier raise on
+    any batch that straddles a second boundary (codex P1).
 
     The thread is shallow-copied per child: every ``lineage_comment_ids``
     write in this codebase rebuilds the list and re-assigns the slot
@@ -505,7 +527,7 @@ def _split_child_synthetic_task(
         "type": source_task.get("type") or "spec",
         "description": child_description,
         "status": str(TaskStatus.PENDING),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "created_at": created_at,
     }
     source_thread = source_task.get("thread")
     if isinstance(source_thread, dict):
@@ -519,17 +541,18 @@ def _rescope_releases_for_oracle(
     snapshot_ids: frozenset[str],
     ids_by_task_id: dict[str, int],
     *,
-    split_child_ids: dict[str, list[str]],
+    split_child_ids: dict[str, list[tuple[str, str]]],
     tasks_by_oracle_id: dict[int, dict[str, Any]],
 ) -> list[rescope_oracle.RescopeRelease]:
     """Translate Opus's rescope items into typed Rocq ops.
 
     ``split_child_ids`` is a pre-allocated mapping of ``source_id ->
-    [child_string_id, ...]`` (one fresh string id per declared child),
-    computed once by ``_allocate_split_child_ids`` so the apply and
-    assert paths share the same ids and don't trip the divergence check.
-    For every emitted ``SplitTask`` op this function also registers a
-    synthetic original task dict per child in ``tasks_by_oracle_id`` so
+    [(child_string_id, created_at), ...]`` (one fresh tuple per
+    declared child), computed once by ``_allocate_split_child_ids`` so
+    the apply and assert paths share the same ids AND timestamps and
+    don't trip the divergence check.  For every emitted ``SplitTask``
+    op this function also registers a synthetic original task dict
+    per child in ``tasks_by_oracle_id`` so
     ``_materialize_rescope_oracle_result`` can read the inherited
     ``thread`` / ``type`` fields when assembling the persisted child.
     """
@@ -598,10 +621,10 @@ def _rescope_releases_for_oracle(
                 # ``split_targets`` list, so the pre-allocated child
                 # string ids and the targets agree on length by
                 # construction; index access fails fast on any drift.
-                child_string_ids = split_child_ids[task_id]
+                child_allocations = split_child_ids[task_id]
                 children_specs: list[rescope_oracle.SplitChild] = []
                 for child_index, target in enumerate(split_targets):
-                    child_string_id = child_string_ids[child_index]
+                    child_string_id, child_created_at = child_allocations[child_index]
                     child_oracle_id = next_oracle_id
                     next_oracle_id += 1
                     child_title = _normalize_title(str(target.get("title") or ""))
@@ -611,6 +634,7 @@ def _rescope_releases_for_oracle(
                         child_string_id,
                         child_title,
                         child_description,
+                        child_created_at,
                     )
                     children_specs.append(
                         rescope_oracle.SplitChild(
@@ -749,7 +773,7 @@ def _assert_rescope_matches_oracle(
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
     result: list[dict[str, Any]],
-    split_child_ids: dict[str, list[str]] | None = None,
+    split_child_ids: dict[str, list[tuple[str, str]]] | None = None,
 ) -> None:
     ids_by_task_id, tasks_by_oracle_id, current_order, rows = _rescope_state_for_oracle(
         current
@@ -764,7 +788,9 @@ def _assert_rescope_matches_oracle(
         ids_by_task_id,
         split_child_ids=split_child_ids
         if split_child_ids is not None
-        else _allocate_split_child_ids(ordered_items),
+        else _allocate_split_child_ids(
+            ordered_items, frozenset(t["id"] for t in current if "id" in t)
+        ),
         tasks_by_oracle_id=tasks_by_oracle_id,
     )
     oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
@@ -781,7 +807,7 @@ def _apply_reorder_with_oracle(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
-    split_child_ids: dict[str, list[str]] | None = None,
+    split_child_ids: dict[str, list[tuple[str, str]]] | None = None,
 ) -> list[dict[str, Any]]:
     ids_by_task_id, tasks_by_oracle_id, current_order, rows = _rescope_state_for_oracle(
         current
@@ -796,7 +822,9 @@ def _apply_reorder_with_oracle(
         ids_by_task_id,
         split_child_ids=split_child_ids
         if split_child_ids is not None
-        else _allocate_split_child_ids(ordered_items),
+        else _allocate_split_child_ids(
+            ordered_items, frozenset(t["id"] for t in current if "id" in t)
+        ),
         tasks_by_oracle_id=tasks_by_oracle_id,
     )
     oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
@@ -1306,6 +1334,22 @@ def _validate_rescope_batch(
         for t in current
         if "id" in t and t.get("status") == str(TaskStatus.BLOCKED)
     }
+    # Kind classification is title-prefix driven (ASK:/DEFER:/CI FAILURE:),
+    # so a split that copies child titles literally would silently
+    # reclassify an ASK/DEFER source's children to executable spec
+    # tasks (codex P1).  CI failure rows are atomic events that don't
+    # decompose meaningfully.  Reject splits on any of these source
+    # kinds; Opus has CompleteTask + new-task creation if it really
+    # wants to convert one of these into actionable work.
+    non_splittable_source_ids = {
+        t["id"]
+        for t in current
+        if "id" in t
+        and isinstance(
+            _rescope_task_kind_for_oracle(t),
+            rescope_oracle.TaskAsk | rescope_oracle.TaskDefer | rescope_oracle.TaskCI,
+        )
+    }
     seen_ids: set[str] = set()
     explicitly_completed_ids: set[str] = set()
     merge_targets: list[tuple[int, str, list[str]]] = []
@@ -1539,6 +1583,19 @@ def _validate_rescope_batch(
                 "target semantics for split aren't defined yet (#1247 "
                 "territory)"
             )
+        if item_id in non_splittable_source_ids:
+            # Kind classification is title-prefix driven, so a split
+            # whose children carry plain titles silently reclassifies
+            # an ASK/DEFER source's children to executable spec tasks
+            # (codex P1).  CI-failure rows are atomic and don't
+            # decompose either.
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: source "
+                "is an ASK/DEFER/CI task; splitting these would "
+                "silently reclassify children (kind is title-prefix "
+                'driven).  Use status="completed" + new tasks if you '
+                "really want to convert it into actionable work."
+            )
         if "merge_sources" in item and item["merge_sources"] != []:
             errors.append(
                 f"item[{index}].split_targets on {item_id!r}: combined "
@@ -1627,11 +1684,15 @@ def _apply_reorder(
     snapshot_ids = original_ids or frozenset(
         t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
     )
-    # Pre-allocate split-child string ids once per call so the apply
-    # and verify passes (which both re-derive ops from the same items)
-    # mint identical ids — otherwise the divergence assertion would
-    # spuriously fire on every batch carrying split_targets.
-    split_child_ids = _allocate_split_child_ids(ordered_items)
+    # Pre-allocate split-child (id, created_at) tuples once per call so
+    # the apply and verify passes (which both re-derive ops from the
+    # same items) mint identical ids AND timestamps — otherwise the
+    # divergence assertion would spuriously fire on a batch that
+    # straddled a second boundary (codex P1).  Pass every existing
+    # task id so the allocator's retry loop can avoid colliding with
+    # an id already on disk (codex P2).
+    existing_task_ids = frozenset(t["id"] for t in current if "id" in t)
+    split_child_ids = _allocate_split_child_ids(ordered_items, existing_task_ids)
     oracle_result = _apply_reorder_with_oracle(
         current, ordered_items, snapshot_ids, split_child_ids
     )
