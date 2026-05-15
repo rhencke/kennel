@@ -3169,17 +3169,19 @@ class TestReorderTasks:
                 ]
             }
         )
-        captured: list[dict] = []
+        captured: list[tuple[dict, list[dict]]] = []
         reorder_tasks(
             Tasks(tmp_path),
             "",
             agent=_client(raw),
             intents=intents,
-            _on_intent_dispositions=lambda d: captured.append(d),
+            _on_intent_dispositions=lambda d, r: captured.append((d, r)),
         )
         assert len(captured) == 1
-        assert 101 in captured[0]
-        assert captured[0][101].kind == "material"
+        dispositions, result_tasks = captured[0]
+        assert 101 in dispositions
+        assert dispositions[101].kind == "material"
+        assert any(t["id"] == t1["id"] for t in result_tasks)
 
     def test_intent_dispositions_callback_skipped_without_intents(
         self, tmp_path: Path
@@ -3194,7 +3196,7 @@ class TestReorderTasks:
             Tasks(tmp_path),
             "",
             agent=_client(raw),
-            _on_intent_dispositions=lambda _d: called.append(1),
+            _on_intent_dispositions=lambda _d, _r: called.append(1),
         )
         assert called == []
 

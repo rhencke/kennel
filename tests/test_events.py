@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Never
+from typing import Never, cast
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -16,6 +16,7 @@ from fido.events import (
     _apply_reply_result,
     _BackgroundRescopeTrigger,
     _build_issue_comment_action,
+    _build_on_intent_dispositions,
     _configured_agent,
     _existing_reply_artifact,
     _get_commit_summary,
@@ -24,6 +25,7 @@ from fido.events import (
     _is_allowed,
     _load_active_context_for_rescope,
     _make_reorder_kwargs,
+    _notify_intent_outcome,
     _notify_thread_change,
     _posted_comment_id,
     _record_reply_artifact,
@@ -42,6 +44,7 @@ from fido.events import (
     reply_to_review,
     thread_lineage_comment_ids,
 )
+from fido.prompts import Prompts
 from fido.provider import ProviderID, ThreadKind
 from fido.rocq import replied_comment_claims as oracle
 from fido.state import State
@@ -49,6 +52,7 @@ from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
+from fido.tasks import IntentDisposition
 from fido.types import ActiveIssue, ActivePR, RescopeIntent
 from fido.worker import ActivityReporter
 from tests.fakes import _FakeDispatcher
@@ -5390,6 +5394,328 @@ class TestNotifyThreadChange:
             "owner/repo", 42, "Auto reply", 999
         )
         mock_gh.comment_issue.assert_not_called()
+
+
+class TestNotifyIntentOutcome:
+    """Per-intent reply-back notifier (#1724)."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _intent(self, comment_id: int = 999) -> RescopeIntent:
+        return RescopeIntent(
+            change_request="please rename the parser",
+            comment_id=comment_id,
+            timestamp="2024-01-15T10:00:00+00:00",
+        )
+
+    def _disposition(
+        self,
+        kind: str = "material",
+        reason: str = "task title rewritten ('t1')",
+        affected: list[str] | None = None,
+    ) -> IntentDisposition:
+        from fido.tasks import IntentDispositionKind  # type: ignore[reportPrivateUsage]
+
+        return IntentDisposition(
+            kind=cast("IntentDispositionKind", kind),
+            reason=reason,
+            affected_task_ids=affected if affected is not None else ["t1"],
+        )
+
+    def test_aggregation_disposition_silently_skips(self, tmp_path: Path) -> None:
+        # Per-intent notifier filters: only material → reply.
+        # Aggregation and unhandled produce nothing.
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        _notify_intent_outcome(
+            self._intent(),
+            self._disposition(kind="aggregation"),
+            repo="owner/repo",
+            pr=42,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("should not fire"),
+        )
+        mock_gh.reply_to_review_comment.assert_not_called()
+        mock_gh.comment_issue.assert_not_called()
+
+    def test_unhandled_disposition_silently_skips(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        _notify_intent_outcome(
+            self._intent(),
+            self._disposition(kind="unhandled"),
+            repo="owner/repo",
+            pr=42,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("should not fire"),
+        )
+        mock_gh.reply_to_review_comment.assert_not_called()
+
+    def test_material_posts_review_thread_reply(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        _notify_intent_outcome(
+            self._intent(comment_id=999),
+            self._disposition(),
+            repo="owner/repo",
+            pr=42,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("Replanned, not done."),
+        )
+        mock_gh.reply_to_review_comment.assert_called_once_with(
+            "owner/repo", 42, "Replanned, not done.", 999
+        )
+
+    def test_opus_instruction_says_replanned_not_completed(
+        self, tmp_path: Path
+    ) -> None:
+        # The reply text must NOT imply work is done — the rescope
+        # only replanned (acceptance criteria #1724).  Capture the
+        # Opus prompt to assert the wording reaches the model.
+        cfg = self._cfg(tmp_path)
+        captured: list[str] = []
+
+        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
+            captured.append(prompt)
+            return "ok"
+
+        _notify_intent_outcome(
+            self._intent(),
+            self._disposition(),
+            repo="owner/repo",
+            pr=42,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        assert any("REPLANNED, not completed" in p for p in captured)
+        assert any("Do NOT say the work is done" in p for p in captured)
+
+    def test_opus_instruction_includes_intent_and_reason(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        captured: list[str] = []
+
+        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
+            captured.append(prompt)
+            return "ok"
+
+        _notify_intent_outcome(
+            self._intent(comment_id=777),
+            self._disposition(reason="task closed ('abc')", affected=["abc"]),
+            repo="owner/repo",
+            pr=42,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        # Both the intent's change request and the disposition reason
+        # land in the Opus prompt so it can write a specific reply.
+        assert any("please rename the parser" in p for p in captured)
+        assert any("task closed" in p for p in captured)
+
+    def test_post_failure_does_not_raise(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.side_effect = RuntimeError("network")
+        # Should swallow and log — must not break the rescope loop.
+        _notify_intent_outcome(
+            self._intent(),
+            self._disposition(),
+            repo="owner/repo",
+            pr=42,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("ok"),
+        )
+
+    def test_default_agent_constructed_when_none(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        with patch("fido.events.DefaultProviderFactory") as factory_cls:
+            factory_cls.return_value.create_agent.return_value = _client("Auto reply")
+            _notify_intent_outcome(
+                self._intent(),
+                self._disposition(),
+                repo="owner/repo",
+                pr=42,
+                config=cfg,
+                repo_cfg=cfg.repos["owner/repo"],
+                gh=mock_gh,
+            )
+        factory_cls.return_value.create_agent.assert_called_once()
+        mock_gh.reply_to_review_comment.assert_called_once()
+
+
+class TestBuildOnIntentDispositions:
+    """Per-iteration intent-dispositions callback factory (#1724)."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _intent(self, comment_id: int, ts: str) -> RescopeIntent:
+        return RescopeIntent(
+            change_request=f"req {comment_id}",
+            comment_id=comment_id,
+            timestamp=ts,
+        )
+
+    def _disposition(
+        self,
+        kind: str = "material",
+        affected: list[str] | None = None,
+    ) -> IntentDisposition:
+        from fido.tasks import IntentDispositionKind  # type: ignore[reportPrivateUsage]
+
+        return IntentDisposition(
+            kind=cast("IntentDispositionKind", kind),
+            reason="title rewritten",
+            affected_task_ids=affected if affected is not None else ["t1"],
+        )
+
+    def test_no_pr_ctx_skips_silently(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        cb = _build_on_intent_dispositions(
+            intents=[self._intent(101, "2024-01-15T10:00:00+00:00")],
+            repo="owner/repo",
+            pr_ctx=None,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        cb({101: self._disposition()}, [])
+        mock_gh.reply_to_review_comment.assert_not_called()
+
+    def test_aggregation_and_unhandled_filtered(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        pr = ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+        cb = _build_on_intent_dispositions(
+            intents=[
+                self._intent(101, "2024-01-15T10:00:00+00:00"),
+                self._intent(202, "2024-01-15T10:01:00+00:00"),
+                self._intent(303, "2024-01-15T10:02:00+00:00"),
+            ],
+            repo="owner/repo",
+            pr_ctx=pr,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("Material reply"),
+            prompts=Prompts("p"),
+        )
+        cb(
+            {
+                101: self._disposition(kind="aggregation"),
+                202: self._disposition(kind="material"),
+                303: self._disposition(kind="unhandled"),
+            },
+            [],
+        )
+        # Only the material disposition (intent 202) fires a reply.
+        assert mock_gh.reply_to_review_comment.call_count == 1
+        args = mock_gh.reply_to_review_comment.call_args.args
+        assert args[3] == 202
+
+    def test_notifications_fire_in_dispositions_iteration_order(
+        self, tmp_path: Path
+    ) -> None:
+        # Acceptance criteria #1724: notifications emitted in
+        # RescopeIntent.timestamp order.  The classifier returns
+        # dispositions sorted by timestamp; this test feeds an
+        # ordered map and asserts that order survives through the
+        # callback to the gh.* call sequence.
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        pr = ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+        cb = _build_on_intent_dispositions(
+            intents=[
+                self._intent(101, "2024-01-15T10:00:00+00:00"),
+                self._intent(202, "2024-01-15T10:01:00+00:00"),
+                self._intent(303, "2024-01-15T10:02:00+00:00"),
+            ],
+            repo="owner/repo",
+            pr_ctx=pr,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("ok"),
+            prompts=Prompts("p"),
+        )
+        # Pass dispositions in oldest-first order (as the classifier does).
+        cb(
+            {
+                101: self._disposition(),
+                202: self._disposition(),
+                303: self._disposition(),
+            },
+            [],
+        )
+        comment_ids = [
+            c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
+        ]
+        assert comment_ids == [101, 202, 303]
+
+    def test_intent_not_in_intents_list_is_skipped(self, tmp_path: Path) -> None:
+        # If a disposition's comment_id isn't in this iteration's
+        # intents (shouldn't happen, but defensive), the callback
+        # silently skips rather than crashing.
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        pr = ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+        cb = _build_on_intent_dispositions(
+            intents=[],  # no intents this iteration
+            repo="owner/repo",
+            pr_ctx=pr,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        cb({101: self._disposition()}, [])
+        mock_gh.reply_to_review_comment.assert_not_called()
 
 
 class TestBackfillMissedPrComments:

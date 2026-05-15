@@ -2376,11 +2376,11 @@ def _merge_source_ids(ordered_items: list[dict[str, Any]]) -> set[str]:
 # #1722's apply path and the original/result task lists; #1724 will
 # turn its output into per-intent notifications.
 
-_IntentDispositionKind = Literal["material", "aggregation", "unhandled"]
+IntentDispositionKind = Literal["material", "aggregation", "unhandled"]
 
 
 @dataclass(frozen=True)
-class _IntentDisposition:
+class IntentDisposition:
     """How a single RescopeIntent was treated by one rescope batch.
 
     * ``material`` — at least one task this intent contributed to had
@@ -2399,7 +2399,7 @@ class _IntentDisposition:
     describing what the classifier saw.
     """
 
-    kind: _IntentDispositionKind
+    kind: IntentDispositionKind
     reason: str
     affected_task_ids: list[str]
 
@@ -2443,7 +2443,7 @@ def _classify_rescope_intents(
     original: list[dict[str, Any]],
     result: list[dict[str, Any]],
     intents: list[RescopeIntent],
-) -> dict[int, _IntentDisposition]:
+) -> dict[int, IntentDisposition]:
     """Per-intent classification for the reply-back filter (#1723).
 
     Returns a dict keyed on ``intent.comment_id`` so the caller can
@@ -2452,6 +2452,11 @@ def _classify_rescope_intents(
     that contributed to multiple tasks aggregates "material" if any
     affected task had a material change; an intent that contributed
     to zero tasks is ``unhandled``.
+
+    Iteration order of the returned dict is intent-timestamp ascending
+    (oldest first) — #1724's notifier reads dispositions in dict
+    insertion order to fire per-intent replies in chronological
+    sequence.
 
     The downstream notifier (#1724) decides notification policy from
     these dispositions; this layer just classifies and explains.
@@ -2462,12 +2467,13 @@ def _classify_rescope_intents(
         for intent_id in task.get("contributing_intents") or []:
             intent_to_tasks.setdefault(intent_id, []).append(task)
 
-    out: dict[int, _IntentDisposition] = {}
-    for intent in intents:
+    out: dict[int, IntentDisposition] = {}
+    # Sort by timestamp so dict iteration order matches chronology.
+    for intent in sorted(intents, key=lambda i: i.timestamp):
         cid = intent.comment_id
         attributed = intent_to_tasks.get(cid, [])
         if not attributed:
-            out[cid] = _IntentDisposition(
+            out[cid] = IntentDisposition(
                 kind="unhandled",
                 reason="not attributed to any operation",
                 affected_task_ids=[],
@@ -2480,13 +2486,13 @@ def _classify_rescope_intents(
                 _intent_material_reasons(original_by_id.get(task["id"]), task)
             )
         if material_reasons:
-            out[cid] = _IntentDisposition(
+            out[cid] = IntentDisposition(
                 kind="material",
                 reason="; ".join(material_reasons),
                 affected_task_ids=affected_ids,
             )
         else:
-            out[cid] = _IntentDisposition(
+            out[cid] = IntentDisposition(
                 kind="aggregation",
                 reason="absorbed into existing task(s) without material change",
                 affected_task_ids=affected_ids,
@@ -2584,7 +2590,9 @@ def reorder_tasks(
     prior_attempts: list[ClosedPR] | None = None,
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[str], None] | None = None,
-    _on_intent_dispositions: Callable[[dict[int, _IntentDisposition]], None]
+    _on_intent_dispositions: Callable[
+        [dict[int, IntentDisposition], list[dict[str, Any]]], None
+    ]
     | None = None,
     _on_done: Callable[[], None] | None = None,
 ) -> None:
@@ -2881,7 +2889,9 @@ def reorder_tasks(
         # when an intents list is provided so the callback fires with
         # the full disposition map even for batches that produced no
         # thread-change records.
-        _on_intent_dispositions(_classify_rescope_intents(pre_rescope, result, intents))
+        _on_intent_dispositions(
+            _classify_rescope_intents(pre_rescope, result, intents), result
+        )
 
     if inprogress_affected and _on_inprogress_affected is not None:
         assert inprogress is not None  # inprogress_affected is True

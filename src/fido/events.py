@@ -41,7 +41,11 @@ from fido.synthesis_call import (
     call_synthesis,
 )
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
-from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
+from fido.tasks import (
+    IntentDisposition,
+    Tasks,
+    thread_comment_author_for_auto_resolve_oracle,
+)
 from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
 from fido.worker import ActivityReporter
 
@@ -2030,6 +2034,69 @@ def _get_commit_summary(work_dir: Path) -> str:
     return result.stdout.strip()
 
 
+def _notify_intent_outcome(
+    intent: RescopeIntent,
+    disposition: IntentDisposition,
+    repo: str,
+    pr: int,
+    config: Config,
+    repo_cfg: RepoConfig,
+    gh: GitHub,
+    *,
+    agent: ProviderAgent | None = None,
+    prompts: Prompts | None = None,
+) -> None:
+    """Post a per-intent reply when rescope materially changed the ask (#1724).
+
+    The reply-back filter epic (#1256) consumes the per-intent
+    classifier output (#1723) and emits an Opus-voice note to the
+    originating commenter ONLY when the rescope materially affected
+    their request.  Aggregation (intent absorbed without change) and
+    unhandled (intent not acted on) silently produce no reply.
+
+    The reply text is generated per-call by Opus (per the
+    voice-text-not-templated convention) and instructed to describe
+    the OUTCOME of the rescope on this specific intent — without
+    implying the work is done when the rescope only replanned it.
+    """
+    # Defense-in-depth: callers (build_on_intent_dispositions) are
+    # supposed to filter to material before invoking us, but the
+    # branch is cheap and lets us be the single source of truth.
+    if disposition.kind != "material":
+        return
+
+    if agent is None:
+        agent = _configured_agent(config, repo_cfg)
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
+
+    instruction = (
+        "A change request from a PR comment was rescoped — the work has "
+        "been REPLANNED, not completed.  Tell the commenter what happened "
+        "to their ask without implying the work is done.\n\n"
+        f"Their original change request: {intent.change_request}\n"
+        f"Affected task id(s): {', '.join(disposition.affected_task_ids)}\n"
+        f"What changed: {disposition.reason}\n\n"
+        "Write a very brief reply.  Be specific about which tasks were "
+        "rewritten / merged / split / closed.  Do NOT say the work is "
+        "done — the rescope only restructured the plan."
+    )
+
+    body = safe_voice_turn(
+        agent,
+        prompts.persona_wrap(instruction),
+        model=agent.voice_model,
+        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        system_prompt=prompts.reply_system_prompt(),
+        log_prefix="_notify_intent_outcome",
+    )
+    try:
+        gh.reply_to_review_comment(repo, pr, body, intent.comment_id)
+        log.info("notified intent comment %s (material rescope)", intent.comment_id)
+    except Exception:
+        log.exception("failed to notify intent comment %s", intent.comment_id)
+
+
 def _notify_thread_change(
     change: dict[str, Any],
     config: Config,
@@ -2303,7 +2370,76 @@ def _make_reorder_kwargs(
         kwargs["issue"] = issue_ctx
     if pr_ctx is not None:
         kwargs["pr"] = pr_ctx
+
+    # #1724 — per-intent reply-back when rescope materially changed the
+    # ask.  Closure captures pr_ctx so the notifier can post replies
+    # to the right PR; intents come from the per-iteration list, so
+    # the actual closure binding is built fresh in
+    # ``_reorder_tasks_background``'s run_loop (see usage there) and
+    # injected over this kwargs entry.  We wire the no-op default
+    # here so kwargs is shape-stable for callers that don't override.
+    kwargs["_on_intent_dispositions"] = _build_on_intent_dispositions(
+        intents=[],
+        repo=repo_cfg.name,
+        pr_ctx=pr_ctx,
+        config=config,
+        repo_cfg=repo_cfg,
+        gh=gh,
+        agent=agent,
+        prompts=prompts,
+    )
     return kwargs
+
+
+def _build_on_intent_dispositions(
+    intents: list[RescopeIntent],
+    repo: str,
+    pr_ctx: ActivePR | None,
+    config: Config,
+    repo_cfg: RepoConfig,
+    gh: GitHub,
+    agent: ProviderAgent | None,
+    prompts: Prompts | None,
+) -> Callable[[dict[int, IntentDisposition], list[dict[str, Any]]], None]:
+    """Build the per-iteration intent-dispositions callback (#1724).
+
+    Each rescope iteration may carry a different ``current_intents``
+    list (the coalescing loop in ``_reorder_tasks_background`` swaps
+    the pending entry each iteration); this factory closes over the
+    intents for THIS iteration so the notifier posts to the right
+    commenters in the right order.
+
+    Returns a no-op when ``pr_ctx`` is None — intent-driven rescope
+    only happens against an active PR.
+    """
+    intents_by_cid = {i.comment_id: i for i in intents}
+
+    def on_intent_dispositions(
+        dispositions: dict[int, IntentDisposition],
+        _result: list[dict[str, Any]],
+    ) -> None:
+        if pr_ctx is None:
+            return
+        # Dispositions dict iteration order is intent-timestamp
+        # ascending (the classifier sorts).  Iterate in order and
+        # fire material notifications only.
+        for cid, disposition in dispositions.items():
+            intent = intents_by_cid.get(cid)
+            if intent is None or disposition.kind != "material":
+                continue
+            _notify_intent_outcome(
+                intent,
+                disposition,
+                repo=repo,
+                pr=pr_ctx.number,
+                config=config,
+                repo_cfg=repo_cfg,
+                gh=gh,
+                agent=agent,
+                prompts=prompts,
+            )
+
+    return on_intent_dispositions
 
 
 def _reorder_tasks_background(
@@ -2417,6 +2553,21 @@ def _reorder_tasks_background(
             while True:
                 iteration += 1
                 log.info("rescope BG: iteration %d starting", iteration)
+                # #1724: rebuild the on_intent_dispositions callback
+                # each iteration so it closes over THIS iteration's
+                # current_intents (coalesced batches accumulate).
+                # pr_ctx and other context are immutable across
+                # iterations so re-extracting from kw is safe.
+                kw["_on_intent_dispositions"] = _build_on_intent_dispositions(
+                    intents=current_intents,
+                    repo=repo_cfg.name,
+                    pr_ctx=kw.get("pr"),
+                    config=config,
+                    repo_cfg=repo_cfg,
+                    gh=gh,
+                    agent=kw.get("agent"),
+                    prompts=kw.get("prompts"),
+                )
                 reorder(
                     registry.tasks_for(repo_cfg.name),
                     cs,
