@@ -9,19 +9,18 @@ corrupt state.  Events are processed in their own ``timestamp`` order
 (not webhook receive order); each cache node tracks ``last_applied_at``
 so a stale event arriving after a newer one is dropped.
 
-Thread-safe under Python 3.14t (free-threaded, no GIL): a single
-``threading.Lock`` guards every mutation and read.  Per-repo caches are
-independent — pass each repo its own :class:`IssueTreeCache`.
+Inherits :class:`~fido.webhook_cache.WebhookCache` for the shared
+scaffolding (lock + dict, pre-inventory queue, ``apply_event``
+staleness shell, ``reconcile_with_inventory``, on_change callback,
+metrics base) and implements the issue-tree-specific hooks.
 """
 
-import logging
-import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-log = logging.getLogger(__name__)
+from fido.webhook_cache import WebhookCache
 
 
 def _parse_iso(value: str | None) -> datetime:
@@ -34,10 +33,6 @@ def _parse_iso(value: str | None) -> datetime:
     if not value:
         return datetime.min.replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc)
 
 
 @dataclass
@@ -79,7 +74,7 @@ class CacheMetrics:
     last_reconcile_drift: int
 
 
-class IssueTreeCache:
+class IssueTreeCache(WebhookCache[int, IssueNode, CacheMetrics]):
     """Per-repo issue tree cache populated by inventory + webhook events.
 
     Lifecycle:
@@ -120,221 +115,117 @@ class IssueTreeCache:
         publishes an :class:`~fido.appstate.IssueCacheSnapshot` into
         the per-repo SCADA leaf (#1696 parity).
         """
-        self._repo = repo_name
-        self._lock = threading.Lock()
-        self._nodes: dict[int, IssueNode] = {}
-        self._inventory_loaded_at: datetime | None = None
-        self._events_applied = 0
-        self._events_dropped_stale = 0
-        self._last_event_at: datetime | None = None
-        self._last_reconcile_at: datetime | None = None
-        self._last_reconcile_drift = 0
-        self._pre_inventory_queue: list[tuple[datetime, str, dict[str, Any]]] = []
-        self._on_change = on_change
+        super().__init__(repo_name, on_change=on_change)
 
-    def _notify_change(self) -> None:
-        """Fire :attr:`_on_change` with fresh :class:`CacheMetrics`.
-
-        Called from every mutation path *after* the cache lock is
-        released so the callback is free to acquire other locks.
-        """
-        if self._on_change is None:
-            return
-        self._on_change(self.metrics())
-
-    # ── inventory ────────────────────────────────────────────────────────
+    # ── public API aliases that preserve the ``issues=`` kwarg surface ──
 
     def load_inventory(
         self,
-        issues: Iterable[dict[str, Any]],
+        issues: "Iterable[dict[str, Any]]",
         snapshot_started_at: datetime,
     ) -> None:
-        """Replace the cache with the contents of *issues* and apply any
-        queued pre-inventory events.
-
-        *snapshot_started_at* must be the time the inventory query was
-        issued (not when it returned).  Events with a timestamp earlier
-        than this are discarded as subsumed.
-        """
-        new_nodes = {
-            n.number: n
-            for n in (self._node_from_inventory(i, snapshot_started_at) for i in issues)
-        }
-        with self._lock:
-            self._nodes = new_nodes
-            self._inventory_loaded_at = _now()
-            queued = self._pre_inventory_queue
-            self._pre_inventory_queue = []
-        log.info(
-            "issue-cache[%s]: inventory loaded (%d open issues, %d events queued during boot)",
-            self._repo,
-            len(new_nodes),
-            len(queued),
-        )
-        self._notify_change()
-        for _ts, event_type, payload in sorted(queued, key=lambda x: x[0]):
-            self.apply_event(event_type, payload)
+        super().load_inventory(issues, snapshot_started_at)
 
     def reconcile_with_inventory(
         self,
-        issues: Iterable[dict[str, Any]],
+        issues: "Iterable[dict[str, Any]]",
         snapshot_started_at: datetime,
     ) -> int:
-        """Diff the cache against a fresh inventory snapshot and apply
-        every divergence.  Returns the count of corrections applied.
+        return super().reconcile_with_inventory(issues, snapshot_started_at)
 
-        Used by the hourly watchdog to heal drift caused by lost webhook
-        events.  Cache nodes absent from the snapshot are removed; nodes
-        in the snapshot that diverge from cache are replaced.  Resets the
-        per-node ``last_applied_at`` to *snapshot_started_at* so any
-        in-flight events older than the snapshot are subsumed.
-        """
-        snapshot = {
-            n.number: n
-            for n in (self._node_from_inventory(i, snapshot_started_at) for i in issues)
-        }
-        with self._lock:
-            drift = 0
-            for number in list(self._nodes.keys()):
-                if number not in snapshot:
-                    del self._nodes[number]
-                    drift += 1
-                    continue
-                cached = self._nodes[number]
-                fresh = snapshot[number]
-                if not _nodes_equal(cached, fresh):
-                    self._nodes[number] = fresh
-                    drift += 1
-            for number, fresh in snapshot.items():
-                if number not in self._nodes:
-                    self._nodes[number] = fresh
-                    drift += 1
-            self._last_reconcile_at = _now()
-            self._last_reconcile_drift = drift
-        log.info("issue-cache[%s]: reconcile applied %d corrections", self._repo, drift)
-        self._notify_change()
-        return drift
+    # ── WebhookCache hooks ───────────────────────────────────────────────
 
-    @staticmethod
+    def _node_key(self, node: IssueNode) -> int:
+        return node.number
+
+    def _node_key_from_payload(self, payload: dict[str, Any]) -> int:
+        return payload["issue_number"]
+
     def _node_from_inventory(
-        issue: dict[str, Any], snapshot_started_at: datetime
+        self, raw: dict[str, Any], snapshot_started_at: datetime
     ) -> IssueNode:
         return IssueNode(
-            number=issue["number"],
-            title=issue.get("title", ""),
+            number=raw["number"],
+            title=raw.get("title", ""),
             assignees={
                 a["login"]
-                for a in (issue.get("assignees") or {}).get("nodes") or []
+                for a in (raw.get("assignees") or {}).get("nodes") or []
                 if a.get("login")
             },
-            parent=(issue.get("parent") or {}).get("number")
-            if issue.get("parent")
+            parent=(raw.get("parent") or {}).get("number")
+            if raw.get("parent")
             else None,
             sub_issues=[
                 c["number"]
-                for c in (issue.get("subIssues") or {}).get("nodes") or []
+                for c in (raw.get("subIssues") or {}).get("nodes") or []
                 if c.get("number") is not None
             ],
-            milestone=(issue.get("milestone") or {}).get("title")
-            if issue.get("milestone")
+            milestone=(raw.get("milestone") or {}).get("title")
+            if raw.get("milestone")
             else None,
-            created_at=_parse_iso(issue.get("createdAt")),
+            created_at=_parse_iso(raw.get("createdAt")),
             last_applied_at=snapshot_started_at,
         )
 
-    # ── event entry point ────────────────────────────────────────────────
+    def _node_last_applied_at(self, node: IssueNode) -> datetime:
+        return node.last_applied_at
 
-    def apply_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        """Apply a webhook-derived event to the cache.
+    def _node_with_last_applied_at(self, node: IssueNode, ts: datetime) -> IssueNode:
+        # IssueNode is mutable; advance in place and return the same ref.
+        node.last_applied_at = ts
+        return node
 
-        *payload* must contain at least ``issue_number`` (int) and
-        ``timestamp`` (tz-aware datetime).  Other keys are event-typed.
+    def _nodes_equal(self, a: IssueNode, b: IssueNode) -> bool:
+        """Ignore ``last_applied_at`` — that's cache-internal bookkeeping."""
+        return (
+            a.number == b.number
+            and a.title == b.title
+            and a.assignees == b.assignees
+            and a.parent == b.parent
+            and a.sub_issues == b.sub_issues
+            and a.milestone == b.milestone
+            and a.created_at == b.created_at
+        )
 
-        Behavior:
-
-        - Pre-inventory: queued with timestamp; drained later.
-        - Stale (``timestamp < node.last_applied_at`` for an existing
-          node): dropped, ``events_dropped_stale`` incremented.
-        - Otherwise: dispatched to the matching handler; node's
-          ``last_applied_at`` advanced.
-        """
-        if self._apply_event_locked(event_type, payload):
-            self._notify_change()
-
-    def _apply_event_locked(self, event_type: str, payload: dict[str, Any]) -> bool:
-        """Locked half of :meth:`apply_event`.  Returns ``True`` if the
-        cache mutated (event applied or dropped as stale) so the caller
-        can fire :meth:`_notify_change` outside the lock."""
-        timestamp = payload["timestamp"]
-        with self._lock:
-            if self._inventory_loaded_at is None:
-                self._pre_inventory_queue.append((timestamp, event_type, payload))
-                log.info(
-                    "issue-cache[%s]: queued %s for #%s pre-inventory (queue depth=%d)",
-                    self._repo,
-                    event_type,
-                    payload.get("issue_number"),
-                    len(self._pre_inventory_queue),
-                )
+    def _dispatch_event(self, event_type: str, payload: dict[str, Any]) -> bool:
+        match event_type:
+            case "opened":
+                self._handle_opened(payload)
+            case "closed":
+                self._handle_closed(payload)
+            case "reopened":
+                self._handle_reopened(payload)
+            case "assigned":
+                self._handle_assigned(payload)
+            case "unassigned":
+                self._handle_unassigned(payload)
+            case "milestoned":
+                self._handle_milestoned(payload)
+            case "edited_title":
+                self._handle_edited_title(payload)
+            case "sub_issue_added":
+                self._handle_sub_issue_added(payload)
+            case "sub_issue_removed":
+                self._handle_sub_issue_removed(payload)
+            case _:
                 return False
-            number = payload["issue_number"]
-            existing = self._nodes.get(number)
-            if existing is not None and timestamp < existing.last_applied_at:
-                self._events_dropped_stale += 1
-                log.info(
-                    "issue-cache[%s]: dropping stale %s for #%s "
-                    "(event=%s, last_applied=%s)",
-                    self._repo,
-                    event_type,
-                    number,
-                    timestamp.isoformat(),
-                    existing.last_applied_at.isoformat(),
-                )
-                return True
-            match event_type:
-                case "opened":
-                    self._handle_opened(payload)
-                case "closed":
-                    self._handle_closed(payload)
-                case "reopened":
-                    self._handle_reopened(payload)
-                case "assigned":
-                    self._handle_assigned(payload)
-                case "unassigned":
-                    self._handle_unassigned(payload)
-                case "milestoned":
-                    self._handle_milestoned(payload)
-                case "edited_title":
-                    self._handle_edited_title(payload)
-                case "sub_issue_added":
-                    self._handle_sub_issue_added(payload)
-                case "sub_issue_removed":
-                    self._handle_sub_issue_removed(payload)
-                case _:
-                    log.debug(
-                        "issue-cache[%s]: ignoring unknown event %r",
-                        self._repo,
-                        event_type,
-                    )
-                    return False
-            after = self._nodes.get(number)
-            if after is not None:
-                after.last_applied_at = max(after.last_applied_at, timestamp)
-            self._events_applied += 1
-            self._last_event_at = timestamp
-            log.info(
-                "issue-cache[%s]: applied %s for #%s (open=%d, applied=%d, "
-                "stale_dropped=%d)",
-                self._repo,
-                event_type,
-                number,
-                len(self._nodes),
-                self._events_applied,
-                self._events_dropped_stale,
-            )
-            return True
+        return True
 
-    # ── handlers (called under self._lock by apply_event) ────────────────
+    def metrics(self) -> CacheMetrics:
+        with self._lock:
+            base = self._base_metric_fields()
+        return CacheMetrics(
+            repo_name=base["repo_name"],
+            inventory_loaded_at=base["inventory_loaded_at"],
+            open_issue_count=base["node_count"],
+            events_applied=base["events_applied"],
+            events_dropped_stale=base["events_dropped_stale"],
+            last_event_at=base["last_event_at"],
+            last_reconcile_at=base["last_reconcile_at"],
+            last_reconcile_drift=base["last_reconcile_drift"],
+        )
+
+    # ── per-event handlers (called under self._lock by _dispatch_event) ──
 
     def _handle_opened(self, payload: dict[str, Any]) -> None:
         number = payload["issue_number"]
@@ -434,24 +325,6 @@ class IssueTreeCache:
         matching.sort(key=lambda n: (n.created_at, n.number))
         return matching
 
-    def metrics(self) -> CacheMetrics:
-        with self._lock:
-            return CacheMetrics(
-                repo_name=self._repo,
-                inventory_loaded_at=self._inventory_loaded_at,
-                open_issue_count=len(self._nodes),
-                events_applied=self._events_applied,
-                events_dropped_stale=self._events_dropped_stale,
-                last_event_at=self._last_event_at,
-                last_reconcile_at=self._last_reconcile_at,
-                last_reconcile_drift=self._last_reconcile_drift,
-            )
-
-    @property
-    def is_loaded(self) -> bool:
-        with self._lock:
-            return self._inventory_loaded_at is not None
-
 
 def _copy_node(node: IssueNode) -> IssueNode:
     """Return a defensive copy so callers can't mutate the cache through
@@ -465,23 +338,6 @@ def _copy_node(node: IssueNode) -> IssueNode:
         milestone=node.milestone,
         created_at=node.created_at,
         last_applied_at=node.last_applied_at,
-    )
-
-
-def _nodes_equal(a: IssueNode, b: IssueNode) -> bool:
-    """Field-equality check for reconcile drift detection.
-
-    Ignores ``last_applied_at`` — that's a cache-internal bookkeeping
-    field that only changes on event application, not in inventory data.
-    """
-    return (
-        a.number == b.number
-        and a.title == b.title
-        and a.assignees == b.assignees
-        and a.parent == b.parent
-        and a.sub_issues == b.sub_issues
-        and a.milestone == b.milestone
-        and a.created_at == b.created_at
     )
 
 
