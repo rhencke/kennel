@@ -2989,6 +2989,160 @@ class TestBootstrapIssueCaches:
         mock_registry.wake.assert_called_once_with("b/r2")
 
 
+class TestBootstrapCommentCaches:
+    """Tests for bootstrap_comment_caches() (#1757)."""
+
+    def _registry_with_state(self, repo_states: dict[str, dict[str, Any]]) -> MagicMock:
+        """Build a mock registry whose ``state_for(name).load()``
+        returns the canned state.json contents for that repo.  This
+        mirrors the real registry: ``state_for`` returns a ``State``
+        scoped to the canonical git dir, so the bootstrap path
+        works for linked worktrees / submodules where
+        ``work_dir/.git`` is a file pointer (codex P2 on #1757)."""
+        registry = MagicMock()
+
+        def state_for(name: str) -> MagicMock:
+            state = MagicMock()
+            state.load.return_value = repo_states.get(name, {})
+            return state
+
+        registry.state_for.side_effect = state_for
+        return registry
+
+    def test_creates_cache_when_state_has_pr_number(self, tmp_path: Path) -> None:
+        from fido.server import bootstrap_comment_caches
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_registry = self._registry_with_state(
+            {"owner/repo": {"issue": 100, "pr_number": 42}}
+        )
+        bootstrap_comment_caches(repos, mock_gh, mock_registry)
+        mock_registry.get_comment_cache.assert_called_once_with(
+            "owner/repo", 42, mock_gh
+        )
+
+    def test_skips_when_state_lacks_pr_number(self, tmp_path: Path) -> None:
+        from fido.server import bootstrap_comment_caches
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_registry = self._registry_with_state({"owner/repo": {"issue": 100}})
+        bootstrap_comment_caches(repos, mock_gh, mock_registry)
+        mock_registry.get_comment_cache.assert_not_called()
+
+    def test_skips_when_pr_number_is_zero(self, tmp_path: Path) -> None:
+        from fido.server import bootstrap_comment_caches
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_registry = self._registry_with_state(
+            {"owner/repo": {"issue": 100, "pr_number": 0}}
+        )
+        bootstrap_comment_caches(repos, mock_gh, mock_registry)
+        mock_registry.get_comment_cache.assert_not_called()
+
+    def test_skips_when_state_is_empty(self, tmp_path: Path) -> None:
+        from fido.server import bootstrap_comment_caches
+
+        # State.load() returns {} when state.json is absent.
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_registry = self._registry_with_state({})
+        bootstrap_comment_caches(repos, mock_gh, mock_registry)
+        mock_registry.get_comment_cache.assert_not_called()
+
+    def test_uses_registry_state_for_for_worktree_safety(self, tmp_path: Path) -> None:
+        """Bootstrap reads state via ``registry.state_for(name)`` —
+        not by hardcoding ``work_dir/.git/fido`` — so linked
+        worktrees and submodules (where ``work_dir/.git`` is a file
+        pointer) resolve to the real fido dir (codex P2 on #1757)."""
+        from fido.server import bootstrap_comment_caches
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_registry = self._registry_with_state({"owner/repo": {"pr_number": 42}})
+        bootstrap_comment_caches(repos, mock_gh, mock_registry)
+        mock_registry.state_for.assert_called_with("owner/repo")
+
+    def test_per_repo_failure_is_swallowed(self, tmp_path: Path) -> None:
+        """A transient GH error on one repo must not stop other repos
+        from being bootstrapped — same shape as bootstrap_issue_caches."""
+        import requests
+
+        from fido.server import bootstrap_comment_caches
+
+        repos = {
+            "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
+            "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
+        }
+        mock_gh = MagicMock()
+        call_log: list[tuple[str, int]] = []
+        mock_registry = self._registry_with_state(
+            {
+                "a/r1": {"pr_number": 42},
+                "b/r2": {"pr_number": 99},
+            }
+        )
+
+        def get_or_fail(repo: str, item: int, _gh: object) -> MagicMock:
+            call_log.append((repo, item))
+            if repo == "a/r1":
+                raise requests.RequestException("API down")
+            return MagicMock()
+
+        mock_registry.get_comment_cache.side_effect = get_or_fail
+        bootstrap_comment_caches(repos, mock_gh, mock_registry)
+        # Second repo still bootstrapped.
+        assert ("b/r2", 99) in call_log
+
+
+class TestDestroyCommentCacheOnPRClose:
+    """Webhook PR-close events destroy the per-(repo, pr) cache (#1757)."""
+
+    def test_pr_closed_destroys_cache(self, server: tuple) -> None:
+        url, cfg = server
+        WebhookHandler.registry.reset_mock()
+        payload = {
+            **_payload(),
+            "action": "closed",
+            "pull_request": {"number": 7, "merged": False},
+        }
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        WebhookHandler.registry.destroy_comment_cache.assert_called_with(
+            "owner/repo", 7
+        )
+
+    def test_pr_merged_destroys_cache_too(self, server: tuple) -> None:
+        # Merged closes self-restart, but we still tidy the cache
+        # before the restart fires.
+        url, cfg = server
+        WebhookHandler.registry.reset_mock()
+        payload = {
+            **_payload(),
+            "action": "closed",
+            "pull_request": {"number": 7, "merged": True},
+        }
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        WebhookHandler.registry.destroy_comment_cache.assert_called_with(
+            "owner/repo", 7
+        )
+
+    def test_pr_opened_does_not_destroy(self, server: tuple) -> None:
+        url, cfg = server
+        WebhookHandler.registry.reset_mock()
+        payload = {
+            **_payload(),
+            "action": "opened",
+            "pull_request": {"number": 7},
+        }
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        WebhookHandler.registry.destroy_comment_cache.assert_not_called()
+
+
 class TestRun:
     """Tests for the run() entry point."""
 

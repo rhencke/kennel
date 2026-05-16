@@ -363,6 +363,16 @@ class GitHub:
                 return None
             raise
 
+    def get_pull_reviews(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
+        """Return every review submission on a PR as raw API objects.
+
+        Distinct from :meth:`get_reviews` which projects into a narrow
+        ``{state, author, submittedAt, ...}`` summary — callers that
+        need the full review object (body, html_url, ...) for the
+        CommentCache hydration path (#1756) want the raw shape.
+        """
+        return list(self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews"))
+
     def fetch_sibling_threads(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all review-comment threads for a PR as a structured list.
 

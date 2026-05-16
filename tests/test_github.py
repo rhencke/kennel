@@ -436,6 +436,21 @@ class TestGitHubClass:
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/pulls/7/comments" in url
 
+    def test_get_pull_reviews(self) -> None:
+        gh, mock_s = self._gh()
+        reviews = [
+            {"id": 1000, "state": "APPROVED", "body": ""},
+            {"id": 1001, "state": "COMMENTED", "body": "nit"},
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = reviews
+        mock_resp.headers = {}
+        mock_s.get.return_value = mock_resp
+        result = gh.get_pull_reviews("o/r", 7)
+        assert result == reviews
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/pulls/7/reviews" in url
+
     def test_get_pull_comment(self) -> None:
         gh, mock_s = self._gh()
         comment = {"id": 10, "body": "hi"}

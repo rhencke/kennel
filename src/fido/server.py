@@ -553,6 +553,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 repo_name,
             )
 
+        # Destroy the comment cache when the PR closes (merged or not).
+        # Bounds growth per the codex P2 about unbounded ``_comment_caches``
+        # (#1757).  Merged closes also trigger self-restart below which
+        # would drop the cache anyway, but tidying it here keeps the
+        # invariant (cache exists iff Fido has work on the item) holding
+        # in the pre-restart window too.  ``pull_request.number`` is
+        # validated by the dispatcher above, so a missing/non-int here
+        # would have already 500'd.
+        if event == "pull_request" and payload.get("action") == "closed":
+            self.registry.destroy_comment_cache(
+                repo_cfg.name, payload["pull_request"]["number"]
+            )
+
         # Acknowledge only after dispatch succeeds.
         self._respond(200, "ok")
 
@@ -1212,6 +1225,61 @@ def populate_memberships(config: Config, gh: GitHub) -> None:
         )
 
 
+def bootstrap_comment_caches(
+    repos: dict[str, RepoConfig],
+    gh: GitHub,
+    registry: WorkerRegistry,
+) -> None:
+    """Bootstrap per-(repo, PR) :class:`~fido.comment_cache.CommentCache`
+    instances for repos whose worker is mid-PR at startup (#1757).
+
+    Called once in :func:`run` after the registry is created (so
+    :meth:`WorkerRegistry.state_for` is wired with the canonical git
+    dir — matters for linked worktrees and submodules where
+    ``work_dir/.git`` is a file pointer rather than the real
+    directory).  For each managed repo, reads ``state.json`` for the
+    active PR number (if any) and creates + hydrates a CommentCache
+    for that ``(repo, pr)`` pair.  Restart-safety mirror of
+    :func:`bootstrap_issue_caches`: avoids paying the three-list-
+    fetch cost on the first webhook arrival after restart.
+
+    Per-repo failures are swallowed (logged, not raised): a single
+    GitHub API hiccup must not block fido from starting.  The
+    registry rolls back the half-built cache on hydrate failure
+    (codex P1 on #1756), and the next webhook arrival for the PR
+    will lazy-create the cache as a safety net.
+    """
+    for name in repos:
+        # Reuse the registry's State — it was constructed against the
+        # canonical git dir (``git rev-parse --absolute-git-dir``), so
+        # worktrees and submodules where ``work_dir/.git`` is a file
+        # pointer resolve to the real fido dir.  Codex P2 on #1757:
+        # hardcoding ``work_dir/.git/fido`` silently misses pr_number
+        # in those configurations.
+        pr_number = registry.state_for(name).load().get("pr_number")
+        if not isinstance(pr_number, int) or pr_number <= 0:
+            continue
+        try:
+            log.info(
+                "startup: bootstrapping comment cache for %s PR #%d",
+                name,
+                pr_number,
+            )
+            registry.get_comment_cache(name, pr_number, gh)
+        except (
+            requests.RequestException,
+            GraphQLError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ):
+            log.exception(
+                "startup: failed to bootstrap comment cache for %s PR #%d — "
+                "next webhook arrival will lazy-create",
+                name,
+                pr_number,
+            )
+
+
 def bootstrap_issue_caches(
     repos: dict[str, RepoConfig],
     gh: GitHub,
@@ -1280,6 +1348,7 @@ def run(
     _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
     _GitHub: type[GitHub] = GitHub,
     _bootstrap_issue_caches: Callable[..., None] = bootstrap_issue_caches,
+    _bootstrap_comment_caches: Callable[..., None] = bootstrap_comment_caches,
 ) -> None:
     config = _from_args()
 
@@ -1366,6 +1435,10 @@ def run(
     # even for repos whose worker resumes on an existing issue and never calls
     # find_next_issue during this run (closes #837).
     _bootstrap_issue_caches(config.repos, gh, registry)
+    # Bootstrap comment caches for repos that have an active PR in
+    # state.json (#1757) — restart safety so the first webhook
+    # arrival doesn't pay the three-list-fetch cost on the hot path.
+    _bootstrap_comment_caches(config.repos, gh, registry)
     # Route webhook-handler prompt calls through the per-repo persistent
     # ClaudeSession (closes #479 — "one claude per repo" invariant).
     provider.set_session_resolver(registry.get_session)

@@ -21,10 +21,42 @@ from fido.comment_cache import (
 class _FakeGH:
     """Hand-rolled GitHub fake — no MagicMock per testing convention.
 
-    INV-1 doesn't exercise any GH methods (the cache only fills via
-    apply_event), so this is a placeholder that records nothing.
-    Hydration tests (#1756) will give it teeth.
+    Records ``get_*`` calls and serves canned responses for the three
+    hydration endpoints.  ``raise_pull_404`` flips the
+    ``get_pull_*`` methods into raising a 404 to simulate the
+    plain-issue case where ``/pulls/{n}/...`` doesn't exist.
     """
+
+    def __init__(self) -> None:
+        self.issue_comments: list[dict[str, Any]] = []
+        self.pull_comments: list[dict[str, Any]] = []
+        self.pull_reviews: list[dict[str, Any]] = []
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.raise_pull_404: bool = False
+
+    def get_issue_comments(self, repo: str, number: int) -> list[dict[str, Any]]:
+        self.calls.append(("get_issue_comments", (repo, number)))
+        return list(self.issue_comments)
+
+    def get_pull_comments(self, repo: str, pr: int) -> list[dict[str, Any]]:
+        self.calls.append(("get_pull_comments", (repo, pr)))
+        if self.raise_pull_404:
+            self._raise_404()
+        return list(self.pull_comments)
+
+    def get_pull_reviews(self, repo: str, pr: int) -> list[dict[str, Any]]:
+        self.calls.append(("get_pull_reviews", (repo, pr)))
+        if self.raise_pull_404:
+            self._raise_404()
+        return list(self.pull_reviews)
+
+    @staticmethod
+    def _raise_404() -> None:
+        import requests
+
+        response = requests.Response()
+        response.status_code = 404
+        raise requests.HTTPError(response=response)
 
 
 def _comment_payload(
@@ -86,6 +118,9 @@ class TestConstruction:
     def test_two_items_in_same_repo_are_independent(self) -> None:
         c7 = CommentCache("owner/repo", _FakeGH(), 7)
         c8 = CommentCache("owner/repo", _FakeGH(), 8)
+        snapshot_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        c7.load_inventory([], snapshot_ts)
+        c8.load_inventory([], snapshot_ts)
         c7.apply_event(
             "issue_comment",
             {
@@ -410,3 +445,281 @@ class TestIgnoredEvents:
             },
         )
         assert cache.metrics().events_applied == 0
+
+
+class TestHydrate:
+    """Hydration — fetch the three lists from GitHub and load them (#1756)."""
+
+    def test_fetches_all_three_endpoints_and_tags_kinds(self) -> None:
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10, body="top")]
+        gh.pull_comments = [
+            _comment_payload(item=7, comment_id=100, path="src/foo.py", body="inline")
+        ]
+        gh.pull_reviews = [_review_payload(review_id=1000, body="approval")]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        top = cache.get(KIND_ISSUES, 10)
+        inline = cache.get(KIND_PULLS, 100)
+        review = cache.get(KIND_REVIEWS, 1000)
+        assert top is not None and top["body"] == "top"
+        assert inline is not None and inline["body"] == "inline"
+        assert review is not None and review["body"] == "approval"
+        called = {name for name, _ in gh.calls}
+        assert called == {
+            "get_issue_comments",
+            "get_pull_comments",
+            "get_pull_reviews",
+        }
+
+    def test_plain_issue_404_on_pulls_endpoints_treated_as_empty(self) -> None:
+        # /pulls/{n} 404s for plain issues — hydrate tolerates this
+        # and treats review/review-comment lists as empty.
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
+        gh.raise_pull_404 = True
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        assert cache.metrics().entries_cached == 1
+        assert cache.get(KIND_ISSUES, 10) is not None
+
+    def test_404_on_reviews_only_keeps_pull_comments(self) -> None:
+        # Codex P2 on #1756: a 404 on one /pulls endpoint must not
+        # discard successful data from the other.
+        import requests
+
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
+        gh.pull_comments = [
+            _comment_payload(item=7, comment_id=100, path="a.py", body="inline"),
+        ]
+
+        def reviews_404(repo: str, pr: int) -> list[dict[str, Any]]:
+            response = requests.Response()
+            response.status_code = 404
+            raise requests.HTTPError(response=response)
+
+        gh.get_pull_reviews = reviews_404  # type: ignore[method-assign]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Top-level + pull comments survived; only reviews are empty.
+        assert cache.get(KIND_ISSUES, 10) is not None
+        assert cache.get(KIND_PULLS, 100) is not None
+        assert cache.list_reviews() == []
+
+    def test_non_404_pull_error_propagates(self) -> None:
+        import requests
+
+        class _SocketErrGH(_FakeGH):
+            def get_pull_comments(self, repo: str, pr: int) -> list[dict[str, Any]]:
+                response = requests.Response()
+                response.status_code = 503
+                raise requests.HTTPError(response=response)
+
+        gh = _SocketErrGH()
+        cache = CommentCache("owner/repo", gh, 7)
+        try:
+            cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        except requests.HTTPError:
+            pass
+        else:
+            raise AssertionError("expected HTTPError to propagate")
+
+    def test_events_arriving_during_hydration_are_drained_in_order(self) -> None:
+        # WebhookCache's pre-inventory queue catches events that
+        # arrive before hydrate completes.  An event applies before
+        # hydrate runs; load_inventory drains it.
+        gh = _FakeGH()
+        gh.issue_comments = [
+            _comment_payload(
+                item=7,
+                comment_id=10,
+                body="from-list",
+                updated_at="2024-06-01T00:00:00Z",
+            )
+        ]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": _comment_payload(
+                    item=7,
+                    comment_id=20,
+                    body="from-webhook",
+                    updated_at="2024-06-15T00:00:00Z",
+                ),
+            },
+        )
+        # Queued, not yet applied.
+        assert cache.get(KIND_ISSUES, 20) is None
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Both present after drain.
+        assert cache.get(KIND_ISSUES, 10) is not None
+        assert cache.get(KIND_ISSUES, 20) is not None
+
+
+class TestRefresh:
+    """Periodic refresh — re-fetch and reconcile (#1759 wires this)."""
+
+    def test_refresh_evicts_ids_missing_from_fresh_snapshot(self) -> None:
+        gh = _FakeGH()
+        gh.issue_comments = [
+            _comment_payload(item=7, comment_id=10),
+            _comment_payload(item=7, comment_id=11),
+        ]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        assert cache.metrics().entries_cached == 2
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
+        cache.refresh(datetime(2024, 7, 1, tzinfo=timezone.utc))
+        assert cache.metrics().entries_cached == 1
+        assert cache.get(KIND_ISSUES, 11) is None
+        assert cache.get(KIND_ISSUES, 10) is not None
+
+    def test_refresh_tolerates_pulls_404(self) -> None:
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        gh.raise_pull_404 = True
+        cache.refresh(datetime(2024, 7, 1, tzinfo=timezone.utc))
+        assert cache.get(KIND_ISSUES, 10) is not None
+
+    def test_refresh_non_404_pull_error_propagates(self) -> None:
+        import requests
+
+        gh = _FakeGH()
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+
+        def boom(repo: str, pr: int) -> list[dict[str, Any]]:
+            response = requests.Response()
+            response.status_code = 502
+            raise requests.HTTPError(response=response)
+
+        gh.get_pull_comments = boom  # type: ignore[method-assign]
+        try:
+            cache.refresh(datetime(2024, 7, 1, tzinfo=timezone.utc))
+        except requests.HTTPError:
+            pass
+        else:
+            raise AssertionError("expected HTTPError to propagate")
+
+
+class TestListGetters:
+    """``list_top_level`` / ``list_review_comments`` / ``list_reviews`` /
+    ``thread`` snapshot getters (#1756)."""
+
+    def test_list_top_level_returns_issues_kind_only(self) -> None:
+        gh = _FakeGH()
+        gh.issue_comments = [
+            _comment_payload(item=7, comment_id=10),
+            _comment_payload(item=7, comment_id=11),
+        ]
+        gh.pull_comments = [_comment_payload(item=7, comment_id=100)]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        top = cache.list_top_level()
+        assert {int(c["id"]) for c in top} == {10, 11}
+
+    def test_list_review_comments_returns_pulls_kind_only(self) -> None:
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
+        gh.pull_comments = [
+            _comment_payload(item=7, comment_id=100, path="a.py"),
+            _comment_payload(item=7, comment_id=101, path="b.py"),
+        ]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        review = cache.list_review_comments()
+        assert {int(c["id"]) for c in review} == {100, 101}
+
+    def test_list_reviews_returns_reviews_kind_only(self) -> None:
+        gh = _FakeGH()
+        gh.pull_reviews = [
+            _review_payload(review_id=1000),
+            _review_payload(review_id=1001, state="APPROVED"),
+        ]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        reviews = cache.list_reviews()
+        assert {int(r["id"]) for r in reviews} == {1000, 1001}
+
+    def test_thread_returns_root_plus_replies(self) -> None:
+        gh = _FakeGH()
+        gh.pull_comments = [
+            _comment_payload(item=7, comment_id=100, body="root", path="a.py"),
+            _comment_payload(
+                item=7,
+                comment_id=200,
+                body="reply",
+                path="a.py",
+                in_reply_to_id=100,
+            ),
+            _comment_payload(item=7, comment_id=300, body="elsewhere", path="b.py"),
+        ]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Look up via the reply id — walks to the root.
+        thread = cache.thread(200)
+        assert [int(c["id"]) for c in thread] == [100, 200]
+
+    def test_thread_called_on_root_returns_same_thread(self) -> None:
+        gh = _FakeGH()
+        gh.pull_comments = [
+            _comment_payload(item=7, comment_id=100, body="root", path="a.py"),
+            _comment_payload(
+                item=7,
+                comment_id=200,
+                body="reply",
+                path="a.py",
+                in_reply_to_id=100,
+            ),
+        ]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        assert [int(c["id"]) for c in cache.thread(100)] == [100, 200]
+
+    def test_thread_empty_when_id_not_in_cache(self) -> None:
+        cache = CommentCache("owner/repo", _FakeGH(), 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        assert cache.thread(999) == []
+
+    def test_list_getters_return_in_id_order_after_mixed_updates(self) -> None:
+        # Codex P2 on #1756: documented contract is "in id order".
+        # Insertion-history order can diverge after mixed webhook /
+        # hydrate / refresh sequences — make sure the snapshot
+        # getters actually sort.
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=30)]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Apply newer webhook for a SMALLER id — would land later in
+        # insertion order but should sort first.
+        cache.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": _comment_payload(
+                    item=7,
+                    comment_id=10,
+                    updated_at="2024-07-01T00:00:00Z",
+                ),
+            },
+        )
+        cache.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": _comment_payload(
+                    item=7,
+                    comment_id=20,
+                    updated_at="2024-07-01T00:00:00Z",
+                ),
+            },
+        )
+        assert [int(c["id"]) for c in cache.list_top_level()] == [10, 20, 30]

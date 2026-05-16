@@ -2284,3 +2284,43 @@ class TestCommentCacheRegistry:
         reg.get_comment_cache("baz/qux", 1, gh)
         all_caches = reg.all_comment_caches()
         assert len(all_caches) == 3
+
+    def test_get_comment_cache_rolls_back_on_hydrate_failure(self) -> None:
+        # Codex P1 on #1756: if the initial hydrate raises, the
+        # half-built cache must NOT linger — otherwise it accumulates
+        # queued webhook events that never drain.  Next call retries.
+        import requests
+
+        reg = self._reg()
+        gh = MagicMock()
+        gh.get_issue_comments.side_effect = requests.RequestException("boom")
+        with pytest.raises(requests.RequestException):
+            reg.get_comment_cache("foo/bar", 7, gh)
+        # Cache was rolled back — no entry in registry.
+        assert reg.all_comment_caches() == []
+        # Next call retries from scratch.
+        gh.get_issue_comments.side_effect = None
+        gh.get_issue_comments.return_value = []
+        gh.get_pull_comments.return_value = []
+        gh.get_pull_reviews.return_value = []
+        cache = reg.get_comment_cache("foo/bar", 7, gh)
+        assert cache is not None
+        assert cache.is_loaded is True
+
+    def test_destroy_comment_cache_removes_existing(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        reg.get_comment_cache("foo/bar", 7, gh)
+        assert reg.destroy_comment_cache("foo/bar", 7) is True
+        assert len(reg.all_comment_caches()) == 0
+
+    def test_destroy_comment_cache_returns_false_when_missing(self) -> None:
+        reg = self._reg()
+        assert reg.destroy_comment_cache("foo/bar", 7) is False
+
+    def test_destroy_comment_cache_idempotent(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        reg.get_comment_cache("foo/bar", 7, gh)
+        assert reg.destroy_comment_cache("foo/bar", 7) is True
+        assert reg.destroy_comment_cache("foo/bar", 7) is False  # idempotent

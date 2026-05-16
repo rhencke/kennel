@@ -37,8 +37,10 @@ getters land in #1756 (INV-2).
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+
+import requests
 
 from fido.frozen import freeze_object
 from fido.github import GitHub
@@ -131,31 +133,167 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
         on_change: "Callable[[CacheMetrics], None] | None" = None,
     ) -> None:
         super().__init__(f"{repo}#{item}", on_change=on_change)
-        # _gh and _item are stashed for later use by INV-3 hydration;
-        # INV-1 only consumes _item via metrics.
+        # ``_gh_repo`` is the plain ``owner/repo`` string the gh getters
+        # expect; the base's ``_repo`` keeps the ``owner/repo#item``
+        # identifier used for logging and metrics display.
+        self._gh_repo = repo
         self._gh = gh
         self._item = item
-        # INV-1 scope: no inventory hydration yet (#1756 will add it).
-        # Mark the cache loaded with an empty snapshot so events apply
-        # directly instead of being held in the pre-inventory queue
-        # forever.  INV-3 will override construction to defer this
-        # until the real GitHub list-fetches complete (listen-first-
-        # fill-second).
-        super().load_inventory([], datetime.now(tz=timezone.utc))
+        # The cache starts NOT loaded — WebhookCache's pre-inventory
+        # queue catches events that arrive before :meth:`hydrate` runs.
+        # The registry calls hydrate() immediately on creation; the gap
+        # only matters when concurrent webhooks arrive on a different
+        # thread while the creating thread is mid-fetch (the queue
+        # drains in timestamp order once hydrate completes).
+
+    # ── hydration ────────────────────────────────────────────────────────
+
+    def hydrate(self, snapshot_started_at: datetime) -> None:
+        """Fetch the three resource lists from GitHub and load them.
+
+        Performs three list calls (top-level comments, review-thread
+        comments, review submissions), tags each raw item with its
+        ``_kind``, and hands the composed inventory to
+        :meth:`WebhookCache.load_inventory`.  The base then drains the
+        pre-inventory queue in timestamp order — so any webhook events
+        that arrived between cache construction and hydration land
+        afterwards without loss.
+
+        *snapshot_started_at* must be the time the first list fetch
+        was issued (not when it returned).  Events older than the
+        snapshot are subsumed by it during the queue drain.
+
+        For-issues (not PRs) only ``"issues"`` kind applies — the
+        ``/pulls/...`` endpoints 404 there.  INV-1 already filters
+        non-PR ``issue_comment`` events at the router, so in practice
+        hydrate only runs against PR items, but the empty-list
+        fallback below keeps it correct either way.
+        """
+        self.load_inventory(self._fetch_full_inventory(), snapshot_started_at)
+
+    def refresh(self, snapshot_started_at: datetime) -> None:
+        """Re-fetch the three lists and reconcile against the cache.
+
+        Used by the periodic-reconcile watchdog (#1759) to heal drift
+        from missed webhook deliveries.  Calls
+        :meth:`WebhookCache.reconcile_with_inventory` so ids absent
+        from the fresh snapshot are evicted (closing the codex P2
+        about evict-missing on list fetches).
+        """
+        self.reconcile_with_inventory(self._fetch_full_inventory(), snapshot_started_at)
+
+    def _fetch_full_inventory(self) -> list[dict[str, Any]]:
+        """Fetch all three resource lists, tagging each item with its kind.
+
+        Each endpoint is 404-tolerant independently (codex P2 on
+        #1756): the ``/pulls/...`` endpoints 404 for plain issues,
+        but a 404 on one of them must not throw away successful
+        data from the other two.  Non-404 errors propagate.
+        """
+        raw_top_level = self._gh.get_issue_comments(self._gh_repo, self._item)
+        raw_review_comments = self._fetch_or_empty_on_404(
+            lambda: self._gh.get_pull_comments(self._gh_repo, self._item)
+        )
+        raw_reviews = self._fetch_or_empty_on_404(
+            lambda: self._gh.get_pull_reviews(self._gh_repo, self._item)
+        )
+        inventory: list[dict[str, Any]] = [
+            {"_kind": KIND_ISSUES, **r} for r in raw_top_level
+        ]
+        inventory += [{"_kind": KIND_PULLS, **r} for r in raw_review_comments]
+        inventory += [{"_kind": KIND_REVIEWS, **r} for r in raw_reviews]
+        return inventory
+
+    @staticmethod
+    def _fetch_or_empty_on_404(
+        fetch: Callable[[], list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        try:
+            return fetch()
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return []
+            raise
 
     # ── public lookup API ────────────────────────────────────────────────
 
     def get(self, kind: str, entry_id: int) -> Mapping[str, Any] | None:
         """Return the cached raw entry, or ``None`` if not present.
 
-        O(1) dict lookup — no GitHub round-trip.  INV-3 will add
-        the hydration path that populates the cache from list
-        fetches; until then, the cache fills only via webhook
-        events through :meth:`apply_event`.
+        O(1) dict lookup — no GitHub round-trip.
         """
         with self._lock:
             node = self._nodes.get((kind, entry_id))
             return node.data if node is not None else None
+
+    def list_top_level(self) -> list[Mapping[str, Any]]:
+        """Snapshot of every top-level comment cached for this item.
+
+        Returns a list of the raw frozen objects, in id order.
+        Caller-side mutation is impossible (data is frozen).  Order
+        is deterministic but not guaranteed to match GitHub's
+        post-time order — callers that care should sort by
+        ``created_at``.
+        """
+        return self._snapshot_kind(KIND_ISSUES)
+
+    def list_review_comments(self) -> list[Mapping[str, Any]]:
+        """Snapshot of every inline review-thread comment cached.
+
+        Includes single-file AND multi-line range comments — they
+        share the ``/pulls/{n}/comments`` endpoint and are
+        distinguished by ``line`` / ``start_line`` on the raw object.
+        """
+        return self._snapshot_kind(KIND_PULLS)
+
+    def list_reviews(self) -> list[Mapping[str, Any]]:
+        """Snapshot of every review submission cached.
+
+        Each entry carries ``state`` (APPROVED / COMMENTED /
+        CHANGES_REQUESTED) and an optional ``body``.
+        """
+        return self._snapshot_kind(KIND_REVIEWS)
+
+    def thread(self, comment_id: int) -> list[Mapping[str, Any]]:
+        """Return the review thread containing *comment_id*.
+
+        A thread is the root review comment plus every reply to it.
+        Walks the cached review-thread comments, picks the root by
+        following ``in_reply_to_id``, then returns the comments
+        anchored to that root in id order.  Returns ``[]`` when
+        ``comment_id`` is not in any thread on the cache.
+        """
+        with self._lock:
+            pulls = {
+                int(node.data["id"]): node.data
+                for (kind, _), node in self._nodes.items()
+                if kind == KIND_PULLS
+            }
+        anchor = pulls.get(comment_id)
+        if anchor is None:
+            return []
+        root_id = anchor.get("in_reply_to_id") or comment_id
+        return sorted(
+            (
+                data
+                for data in pulls.values()
+                if (data.get("in_reply_to_id") or int(data["id"])) == root_id
+            ),
+            key=lambda d: int(d["id"]),
+        )
+
+    def _snapshot_kind(self, kind: str) -> list[Mapping[str, Any]]:
+        # Documented contract: callers see entries in id order.  Dict
+        # iteration order tracks insertion history, which can diverge
+        # from id ordering after reconciles or mixed webhook/inventory
+        # updates — so sort explicitly (codex P2 on #1756).
+        with self._lock:
+            entries = [
+                node.data
+                for (entry_kind, _), node in self._nodes.items()
+                if entry_kind == kind
+            ]
+        return sorted(entries, key=lambda d: int(d["id"]))
 
     # ── WebhookCache hooks ───────────────────────────────────────────────
 

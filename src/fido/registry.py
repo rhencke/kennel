@@ -932,19 +932,58 @@ class WorkerRegistry:
         pair.  Distinct items in the same repo get distinct caches —
         per-item isolation by construction.  Webhook router uses this
         to route events to the right cache.
+
+        New caches are hydrated synchronously (#1756) — three list
+        fetches from GitHub before this method returns.  That's
+        intentional for INV-2: the first webhook for an unseen item
+        pays the hydration cost so subsequent reads are warm.  INV-3
+        (#1757) moves hydration to startup / PR-open so the hot path
+        is never blocked.  Concurrent webhooks on other threads see
+        the cache registered in ``_comment_caches`` before hydrate
+        completes and queue their events in the pre-inventory buffer,
+        which drains in timestamp order at the tail of ``hydrate``.
         """
         key = (repo_name, item)
+        snapshot_started_at: datetime | None = None
         with self._comment_cache_lock:
             cache = self._comment_caches.get(key)
             if cache is None:
                 cache = CommentCache(repo_name, gh, item)
                 self._comment_caches[key] = cache
-            return cache
+                snapshot_started_at = datetime.now(tz=timezone.utc)
+        if snapshot_started_at is not None:
+            try:
+                cache.hydrate(snapshot_started_at)
+            except Exception:
+                # Hydration failed — roll back the registration so the
+                # next call retries from scratch (codex P1 on #1756:
+                # otherwise the half-built cache lingers, never gets
+                # ``inventory_loaded_at`` set, and queues webhook
+                # events into a buffer that never drains).
+                with self._comment_cache_lock:
+                    # Only remove the instance we put in, in case a
+                    # concurrent caller already installed a different
+                    # one (unlikely but cheap to guard).
+                    if self._comment_caches.get(key) is cache:
+                        del self._comment_caches[key]
+                raise
+        return cache
 
     def all_comment_caches(self) -> list[CommentCache]:
         """Snapshot list of every comment cache that has been created."""
         with self._comment_cache_lock:
             return list(self._comment_caches.values())
+
+    def destroy_comment_cache(self, repo_name: str, item: int) -> bool:
+        """Remove the cache for ``(repo_name, item)``; return whether it existed.
+
+        Called when the PR closes/merges (#1757) — the cache is no
+        longer useful and would otherwise leak per the codex P2 about
+        unbounded growth.  Idempotent: calling twice is a no-op.
+        """
+        key = (repo_name, item)
+        with self._comment_cache_lock:
+            return self._comment_caches.pop(key, None) is not None
 
 
 def _make_thread(
