@@ -288,17 +288,18 @@ _ZERO_ISSUE_CACHE = IssueCacheSnapshot(
 
 @dataclass(frozen=True, slots=True)
 class CommentCacheSnapshot:
-    """Immutable snapshot of one repo's :class:`~fido.comment_cache.CommentCache`
-    health for the SCADA display path (#1758).
+    """Immutable snapshot of one per-(repo, item) ``CommentCache``
+    instance for the SCADA display path (#1758).
 
     Mirrors the public fields of
     :class:`~fido.comment_cache.CacheMetrics` as JSON-friendly
     primitives.  Published by the cache's ``on_change`` callback
     (wired in :class:`~fido.registry.WorkerRegistry`) after every
-    mutation.  ``None`` on :attr:`RepoState.comment_cache` means
-    no cache exists for the repo (Fido has no open PR there per
-    INV-3); when present, ``item`` is the PR number the cache is
-    bound to.
+    mutation.  Stored on :attr:`RepoState.comment_caches` keyed by
+    item number — multiple PRs can have live caches simultaneously
+    (created by webhook routing for each PR comment Fido sees), so
+    a singleton per repo would clobber sibling snapshots (codex P2
+    on #1758).
 
     Sentinel: ``loaded=False`` means inventory has not been
     hydrated yet; timestamp fields default to :data:`_EPOCH`.
@@ -408,7 +409,7 @@ class RepoState:
     issue: IssueSnapshot
     task_list: TaskListSnapshot
     issue_cache: IssueCacheSnapshot
-    comment_cache: CommentCacheSnapshot | None
+    comment_caches: "frozendict[int, CommentCacheSnapshot]"
     talker: TalkerSnapshot
     provider_pressure: ProviderPressureSnapshot
     rescoping: bool
@@ -432,7 +433,7 @@ def zero_repo_state(repo_name: str, started_at: datetime = _EPOCH) -> RepoState:
         issue=_ZERO_ISSUE,
         task_list=_ZERO_TASK_LIST,
         issue_cache=_ZERO_ISSUE_CACHE,
-        comment_cache=None,
+        comment_caches=frozendict(),
         talker=_ZERO_TALKER,
         provider_pressure=_ZERO_PROVIDER_PRESSURE,
         rescoping=False,

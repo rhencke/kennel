@@ -9,6 +9,8 @@ from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from frozendict import frozendict
+
 from fido import provider as provider_module
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
@@ -51,6 +53,27 @@ log = logging.getLogger(__name__)
 def _utcnow() -> datetime:
     """Return the current UTC time as a timezone-aware datetime."""
     return datetime.now(tz=timezone.utc)
+
+
+def _comment_cache_snapshot(cache: CommentCache) -> CommentCacheSnapshot:
+    """Build a :class:`CommentCacheSnapshot` from a live cache's metrics.
+
+    Module-level helper (not a method) because it's a pure
+    projection — no collaborators, no behavior beyond the
+    field-by-field copy.
+    """
+    metrics = cache.metrics()
+    return CommentCacheSnapshot(
+        item=metrics.item,
+        loaded=metrics.inventory_loaded_at is not None,
+        entries_cached=metrics.entries_cached,
+        events_applied=metrics.events_applied,
+        events_dropped_stale=metrics.events_dropped_stale,
+        events_dropped_queue_overflow=metrics.events_dropped_queue_overflow,
+        last_event_at=metrics.last_event_at or _EPOCH,
+        last_reconcile_at=metrics.last_reconcile_at or _EPOCH,
+        last_reconcile_drift=metrics.last_reconcile_drift,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -999,49 +1022,61 @@ class WorkerRegistry:
         longer useful and would otherwise leak per the codex P2 about
         unbounded growth.  Idempotent: calling twice is a no-op.
 
-        Also clears the per-repo SCADA snapshot (#1758) so
-        ``/status.json`` stops showing the dead PR's cache.  The
-        clear runs only when we actually removed something — a
-        no-op destroy doesn't touch FidoState.
+        On successful removal, republishes the per-repo SCADA dict
+        from the surviving caches (#1758).  Sibling caches in the
+        same repo retain their snapshots; the destroyed item is
+        dropped from the dict.
         """
         key = (repo_name, item)
         with self._comment_cache_lock:
             removed = self._comment_caches.pop(key, None) is not None
         if removed:
-            self._state_updater.update(
-                lambda root: root.repos[repo_name].comment_cache, None
-            )
+            self._publish_comment_caches(repo_name)
         return removed
 
     def _make_comment_cache_publisher(
         self, repo_name: str
     ) -> "Callable[[CommentCacheMetrics], None]":
-        """Return a per-repo on_change callback that publishes a fresh
-        :class:`CommentCacheSnapshot` into FidoState every time the
-        cache mutates (#1758).
+        """Return a per-repo on_change callback that republishes the
+        repo's full ``comment_caches`` dict on every cache mutation.
 
-        Mirrors :meth:`_make_issue_cache_publisher`.  Closure binds
-        *repo_name* (not the loop variable) so each repo's caches
-        publish to their own SCADA leaf.
+        Closure binds *repo_name* so each repo's caches all route
+        through the same per-repo recompute path.  Per-item dict
+        means sibling caches survive any one cache's mutation
+        (codex P2 on #1758: the singleton field would have
+        clobbered them).  And the recompute reads from current
+        registry membership, so a destroyed cache's late firing
+        callback can't republish a snapshot for an unregistered
+        item (codex P2 on #1758: stale-handle republish race).
         """
 
-        def publish(metrics: "CommentCacheMetrics") -> None:
-            snap = CommentCacheSnapshot(
-                item=metrics.item,
-                loaded=metrics.inventory_loaded_at is not None,
-                entries_cached=metrics.entries_cached,
-                events_applied=metrics.events_applied,
-                events_dropped_stale=metrics.events_dropped_stale,
-                events_dropped_queue_overflow=metrics.events_dropped_queue_overflow,
-                last_event_at=metrics.last_event_at or _EPOCH,
-                last_reconcile_at=metrics.last_reconcile_at or _EPOCH,
-                last_reconcile_drift=metrics.last_reconcile_drift,
-            )
-            self._state_updater.update(
-                lambda root: root.repos[repo_name].comment_cache, snap
-            )
+        def publish(_metrics: "CommentCacheMetrics") -> None:
+            self._publish_comment_caches(repo_name)
 
         return publish
+
+    def _publish_comment_caches(self, repo_name: str) -> None:
+        """Compute the per-item snapshot dict from currently-registered
+        caches for *repo_name* and publish it to FidoState.
+
+        Mirror of :meth:`_publish_webhook_activities`: the
+        authoritative state is the registry's ``_comment_caches``
+        map; this method serialises a snapshot under
+        ``_comment_cache_lock``, then releases the lock before the
+        state-updater CAS.
+        """
+        with self._comment_cache_lock:
+            caches_for_repo = {
+                item: cache
+                for (name, item), cache in self._comment_caches.items()
+                if name == repo_name
+            }
+        snaps = frozendict(
+            {item: _comment_cache_snapshot(c) for item, c in caches_for_repo.items()}
+        )
+        self._state_updater.update(
+            lambda root: root.repos[repo_name].comment_caches, snaps
+        )
 
 
 def _make_thread(

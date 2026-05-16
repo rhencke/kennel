@@ -2376,9 +2376,9 @@ class TestCommentCacheRegistry:
         assert reg.destroy_comment_cache("foo/bar", 7) is True
         assert reg.destroy_comment_cache("foo/bar", 7) is False  # idempotent
 
-    def test_publisher_publishes_snapshot_on_cache_mutation(self) -> None:
-        """Comment cache mutations publish a CommentCacheSnapshot to
-        the per-repo SCADA leaf (#1758)."""
+    def test_publisher_publishes_per_item_snapshot(self) -> None:
+        """Cache mutations publish a snapshot keyed by item under the
+        per-repo ``comment_caches`` dict (#1758)."""
         from fido.appstate import CommentCacheSnapshot
 
         reg, reader = self._reg("foo/bar")
@@ -2387,41 +2387,78 @@ class TestCommentCacheRegistry:
         gh.get_pull_comments.return_value = []
         gh.get_pull_reviews.return_value = []
         reg.get_comment_cache("foo/bar", 7, gh)
-        snap = reader.get().repos["foo/bar"].comment_cache
+        caches = reader.get().repos["foo/bar"].comment_caches
+        assert 7 in caches
+        snap = caches[7]
         assert isinstance(snap, CommentCacheSnapshot)
         assert snap.item == 7
         assert snap.loaded is True
         assert snap.entries_cached == 0
 
-    def test_destroy_clears_snapshot(self) -> None:
-        """``destroy_comment_cache`` clears the per-repo SCADA leaf
-        back to ``None`` so ``/status.json`` stops showing the dead
-        PR's cache (#1758)."""
+    def test_destroy_removes_only_destroyed_item(self) -> None:
+        """``destroy_comment_cache`` drops the destroyed item from the
+        per-repo ``comment_caches`` dict; sibling caches keep their
+        snapshots (codex P2 on #1758: singleton field clobbered
+        siblings)."""
         reg, reader = self._reg("foo/bar")
         gh = MagicMock()
         gh.get_issue_comments.return_value = []
         gh.get_pull_comments.return_value = []
         gh.get_pull_reviews.return_value = []
         reg.get_comment_cache("foo/bar", 7, gh)
-        assert reader.get().repos["foo/bar"].comment_cache is not None
+        reg.get_comment_cache("foo/bar", 8, gh)
+        before = reader.get().repos["foo/bar"].comment_caches
+        assert set(before) == {7, 8}
         reg.destroy_comment_cache("foo/bar", 7)
-        assert reader.get().repos["foo/bar"].comment_cache is None
+        after = reader.get().repos["foo/bar"].comment_caches
+        assert set(after) == {8}
+        assert after[8].item == 8
 
     def test_destroy_no_op_does_not_touch_snapshot(self) -> None:
         """A destroy for a never-created cache must not touch
-        FidoState — otherwise it would falsely clear a sibling
-        cache's snapshot that the active cache had populated."""
+        FidoState — sibling snapshots stay exactly as they were."""
         reg, reader = self._reg("foo/bar")
         gh = MagicMock()
         gh.get_issue_comments.return_value = []
         gh.get_pull_comments.return_value = []
         gh.get_pull_reviews.return_value = []
-        # Populate the snapshot via a real cache.
         reg.get_comment_cache("foo/bar", 99, gh)
-        before = reader.get().repos["foo/bar"].comment_cache
-        assert before is not None
-        # Destroy a DIFFERENT (never-created) item.  No-op.
+        before = reader.get().repos["foo/bar"].comment_caches
         assert reg.destroy_comment_cache("foo/bar", 12345) is False
-        # Snapshot for the surviving cache is unchanged.
-        after = reader.get().repos["foo/bar"].comment_cache
-        assert after is before
+        after = reader.get().repos["foo/bar"].comment_caches
+        assert after is before  # no FidoState mutation
+
+    def test_late_publisher_from_destroyed_cache_does_not_resurrect(self) -> None:
+        """A destroyed cache instance held by a concurrent webhook
+        handler can still mutate (its on_change fires), but the
+        republish recomputes from registry membership — so the
+        destroyed item stays out of the snapshot dict (codex P2 on
+        #1758: stale-handle republish race)."""
+        reg, reader = self._reg("foo/bar")
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = []
+        gh.get_pull_comments.return_value = []
+        gh.get_pull_reviews.return_value = []
+        c7 = reg.get_comment_cache("foo/bar", 7, gh)
+        reg.get_comment_cache("foo/bar", 8, gh)
+        # Destroy item 7; a concurrent handler still holds c7.
+        reg.destroy_comment_cache("foo/bar", 7)
+        # Late mutation fires c7's on_change — but the republish
+        # recomputes from the REGISTRY, where c7 is gone.
+        c7.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": {
+                    "id": 42,
+                    "body": "late",
+                    "user": {"login": "alice"},
+                    "created_at": "2024-06-01T00:00:00Z",
+                    "updated_at": "2024-06-01T00:00:00Z",
+                },
+            },
+        )
+        after = reader.get().repos["foo/bar"].comment_caches
+        assert 7 not in after
+        assert 8 in after
