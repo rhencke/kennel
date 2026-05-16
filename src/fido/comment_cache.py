@@ -35,12 +35,11 @@ INV-1 scope (this PR): shape + per-(repo, item) keying + webhook
 getters land in #1756 (INV-2).
 """
 
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
-
-import requests
 
 from fido.frozen import freeze_object
 from fido.github import GitHub
@@ -53,6 +52,18 @@ from fido.webhook_cache import WebhookCache
 KIND_ISSUES = "issues"  # top-level comments on issues/PRs
 KIND_PULLS = "pulls"  # inline review-thread comments
 KIND_REVIEWS = "reviews"  # review submissions (Approve/Comment/Request)
+
+# Cap on the pre-inventory queue depth so a cache stuck un-loaded
+# (e.g. persistent auth/permission failure on the ``/pulls``
+# endpoints) can't grow unboundedly while webhooks keep arriving
+# (codex P1 follow-up on #1766).  When the cap is reached the
+# WebhookCache base drops the OLDEST queued event and bumps
+# ``events_dropped_queue_overflow``; the worst-case memory cost is
+# bounded at ~``_PRE_INVENTORY_QUEUE_LIMIT`` deferred event
+# payloads per stalled cache.  A healthy cache drains its queue
+# the moment the first ``hydrate`` succeeds, so this cap only
+# bites under extended outage.
+_PRE_INVENTORY_QUEUE_LIMIT = 1000
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,7 @@ class CacheMetrics:
     entries_cached: int
     events_applied: int
     events_dropped_stale: int
+    events_dropped_queue_overflow: int
     last_event_at: datetime | None
     last_reconcile_at: datetime | None
     last_reconcile_drift: int
@@ -132,13 +144,23 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
         *,
         on_change: "Callable[[CacheMetrics], None] | None" = None,
     ) -> None:
-        super().__init__(f"{repo}#{item}", on_change=on_change)
+        super().__init__(
+            f"{repo}#{item}",
+            on_change=on_change,
+            pre_inventory_queue_limit=_PRE_INVENTORY_QUEUE_LIMIT,
+        )
         # ``_gh_repo`` is the plain ``owner/repo`` string the gh getters
         # expect; the base's ``_repo`` keeps the ``owner/repo#item``
         # identifier used for logging and metrics display.
         self._gh_repo = repo
         self._gh = gh
         self._item = item
+        # Serializes concurrent ``hydrate`` calls (codex P1 follow-up
+        # on #1766: without this, two threads racing on an un-loaded
+        # cache would each call ``load_inventory`` and the second
+        # would clobber the first — including events the first
+        # hydration had already dispatched).
+        self._hydration_lock = threading.Lock()
         # The cache starts NOT loaded — WebhookCache's pre-inventory
         # queue catches events that arrive before :meth:`hydrate` runs.
         # The registry calls hydrate() immediately on creation; the gap
@@ -168,8 +190,20 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
         non-PR ``issue_comment`` events at the router, so in practice
         hydrate only runs against PR items, but the empty-list
         fallback below keeps it correct either way.
+
+        Concurrent calls are serialized via ``_hydration_lock`` so
+        two threads racing on an un-loaded cache don't both fetch +
+        load (the second ``load_inventory`` would clobber the
+        first's results, including events dispatched during the
+        first hydration — codex P1 follow-up on #1766).  Once a
+        thread has the lock, it re-checks ``is_loaded`` so an
+        in-flight retry doesn't redundantly refetch after a peer
+        thread just succeeded.
         """
-        self.load_inventory(self._fetch_full_inventory(), snapshot_started_at)
+        with self._hydration_lock:
+            if self.is_loaded:
+                return
+            self.load_inventory(self._fetch_full_inventory(), snapshot_started_at)
 
     def refresh(self, snapshot_started_at: datetime) -> None:
         """Re-fetch the three lists and reconcile against the cache.
@@ -185,35 +219,24 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
     def _fetch_full_inventory(self) -> list[dict[str, Any]]:
         """Fetch all three resource lists, tagging each item with its kind.
 
-        Each endpoint is 404-tolerant independently (codex P2 on
-        #1756): the ``/pulls/...`` endpoints 404 for plain issues,
-        but a 404 on one of them must not throw away successful
-        data from the other two.  Non-404 errors propagate.
+        Only runs against items we know to be PRs — the webhook
+        router filters non-PR ``issue_comment`` events and
+        ``bootstrap_comment_caches`` only runs for state.json items
+        with a real ``pr_number``.  So 404s from ``/pulls`` are
+        unexpected (auth/permission/network failure) and propagate
+        rather than masquerading as "plain issue, treat as empty"
+        (codex P2 follow-up on #1756 — that fallback would silently
+        produce a partial snapshot on permission errors).
         """
         raw_top_level = self._gh.get_issue_comments(self._gh_repo, self._item)
-        raw_review_comments = self._fetch_or_empty_on_404(
-            lambda: self._gh.get_pull_comments(self._gh_repo, self._item)
-        )
-        raw_reviews = self._fetch_or_empty_on_404(
-            lambda: self._gh.get_pull_reviews(self._gh_repo, self._item)
-        )
+        raw_review_comments = self._gh.get_pull_comments(self._gh_repo, self._item)
+        raw_reviews = self._gh.get_pull_reviews(self._gh_repo, self._item)
         inventory: list[dict[str, Any]] = [
             {"_kind": KIND_ISSUES, **r} for r in raw_top_level
         ]
         inventory += [{"_kind": KIND_PULLS, **r} for r in raw_review_comments]
         inventory += [{"_kind": KIND_REVIEWS, **r} for r in raw_reviews]
         return inventory
-
-    @staticmethod
-    def _fetch_or_empty_on_404(
-        fetch: Callable[[], list[dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
-        try:
-            return fetch()
-        except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                return []
-            raise
 
     # ── public lookup API ────────────────────────────────────────────────
 
@@ -400,6 +423,7 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
             entries_cached=base["node_count"],
             events_applied=base["events_applied"],
             events_dropped_stale=base["events_dropped_stale"],
+            events_dropped_queue_overflow=base["events_dropped_queue_overflow"],
             last_event_at=base["last_event_at"],
             last_reconcile_at=base["last_reconcile_at"],
             last_reconcile_drift=base["last_reconcile_drift"],

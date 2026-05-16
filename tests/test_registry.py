@@ -2285,27 +2285,70 @@ class TestCommentCacheRegistry:
         all_caches = reg.all_comment_caches()
         assert len(all_caches) == 3
 
-    def test_get_comment_cache_rolls_back_on_hydrate_failure(self) -> None:
-        # Codex P1 on #1756: if the initial hydrate raises, the
-        # half-built cache must NOT linger — otherwise it accumulates
-        # queued webhook events that never drain.  Next call retries.
+    def test_get_comment_cache_swallows_hydrate_failure_and_returns_cache(
+        self,
+    ) -> None:
+        # Codex P1 follow-ups on #1756: hydrate failure must NOT
+        # drop the cache from the registry — concurrent handlers may
+        # have already queued events into its pre-inventory buffer
+        # and returned 200 to GitHub, so dropping the cache discards
+        # those events silently.  And the *triggering* webhook
+        # caller must still get a usable cache so its ``apply_event``
+        # queues the event that caused cache creation; otherwise it
+        # too gets acked-and-lost.  So this method logs the
+        # exception and returns the un-loaded cache.  Next call
+        # retries hydration; queued events drain on success.
         import requests
 
         reg = self._reg()
         gh = MagicMock()
         gh.get_issue_comments.side_effect = requests.RequestException("boom")
-        with pytest.raises(requests.RequestException):
-            reg.get_comment_cache("foo/bar", 7, gh)
-        # Cache was rolled back — no entry in registry.
-        assert reg.all_comment_caches() == []
-        # Next call retries from scratch.
+        cache = reg.get_comment_cache("foo/bar", 7, gh)
+        # Cache returned (not raised); not yet loaded.
+        assert cache is not None
+        assert cache.is_loaded is False
+        # Still registered.
+        assert len(reg.all_comment_caches()) == 1
+        # Next call retries hydration; succeeds and the cache loads.
         gh.get_issue_comments.side_effect = None
         gh.get_issue_comments.return_value = []
         gh.get_pull_comments.return_value = []
         gh.get_pull_reviews.return_value = []
         cache = reg.get_comment_cache("foo/bar", 7, gh)
-        assert cache is not None
         assert cache.is_loaded is True
+
+    def test_queued_event_during_failed_hydration_survives_retry(self) -> None:
+        # The concrete scenario codex flagged: handler A creates the
+        # cache and the hydrate fails.  Handler A's ``apply_event``
+        # call still queues into the pre-inventory buffer.  Later, a
+        # successful hydration drains the queued event.
+        import requests
+
+        reg = self._reg()
+        gh = MagicMock()
+        gh.get_issue_comments.side_effect = requests.RequestException("boom")
+        cache = reg.get_comment_cache("foo/bar", 7, gh)
+        cache.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": {
+                    "id": 42,
+                    "body": "queued during outage",
+                    "user": {"login": "alice"},
+                    "created_at": "2024-06-01T00:00:00Z",
+                    "updated_at": "2024-06-01T00:00:00Z",
+                },
+            },
+        )
+        # Retry succeeds; the queued event drains.
+        gh.get_issue_comments.side_effect = None
+        gh.get_issue_comments.return_value = []
+        gh.get_pull_comments.return_value = []
+        gh.get_pull_reviews.return_value = []
+        cache = reg.get_comment_cache("foo/bar", 7, gh)
+        assert cache.get("issues", 42) is not None
 
     def test_destroy_comment_cache_removes_existing(self) -> None:
         reg = self._reg()
