@@ -804,14 +804,21 @@ class TestPatchIssueCache:
 class TestPatchCommentCache:
     """Webhook → per-(repo, item) CommentCache routing (#1754)."""
 
-    def test_issue_comment_routes_by_issue_number(self, server: tuple) -> None:
+    def test_pr_top_level_issue_comment_routes_by_pr_number(
+        self, server: tuple
+    ) -> None:
+        # Top-level PR comments arrive as ``issue_comment`` events with
+        # ``issue.pull_request`` set — that's what makes the issue a PR.
         url, cfg = server
         cache = MagicMock()
         WebhookHandler.registry.get_comment_cache.return_value = cache
         payload = {
             **_payload(),
             "action": "created",
-            "issue": {"number": 42},
+            "issue": {
+                "number": 42,
+                "pull_request": {"url": "https://example/p/42"},
+            },
             "comment": {
                 "id": 100,
                 "body": "hi",
@@ -826,6 +833,29 @@ class TestPatchCommentCache:
         )
         cache.apply_event.assert_called_once()
         assert cache.apply_event.call_args.args[0] == "issue_comment"
+
+    def test_plain_issue_comment_does_not_create_cache(self, server: tuple) -> None:
+        # ``issue_comment`` events fire for plain issues too (issues
+        # without a ``pull_request`` field).  Fido's Dispatcher ignores
+        # those, and we ignore them here too so the registry doesn't
+        # accumulate caches for items Fido doesn't work on (codex P2
+        # on #1751).
+        url, cfg = server
+        WebhookHandler.registry.reset_mock()
+        payload = {
+            **_payload(),
+            "action": "created",
+            "issue": {"number": 42},  # no pull_request field
+            "comment": {
+                "id": 100,
+                "body": "hi",
+                "user": {"login": "alice"},
+                "updated_at": "2024-01-15T10:00:00Z",
+            },
+        }
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        WebhookHandler.registry.get_comment_cache.assert_not_called()
 
     def test_pull_request_review_comment_routes_by_pr_number(
         self, server: tuple
@@ -910,7 +940,10 @@ class TestPatchCommentCache:
         payload = {
             **_payload(),
             "action": "created",
-            "issue": {"number": 42},
+            "issue": {
+                "number": 42,
+                "pull_request": {"url": "https://example/p/42"},
+            },
             "comment": {
                 "id": 100,
                 "body": "hi",

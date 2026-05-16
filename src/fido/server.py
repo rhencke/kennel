@@ -660,6 +660,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
         registry, and hands the event to ``apply_event``.  Unrelated
         event types are silently ignored (every webhook hits this
         method; only comment/review events have a cache target).
+
+        ``issue_comment`` events fire for plain-issue comments AND PR
+        top-level comments (PRs are issues for that endpoint).  Fido's
+        dispatcher (``events.py``) ignores plain-issue comments, so
+        we mirror that filter here — otherwise busy repos with lots of
+        issue traffic accumulate caches we'll never use (codex P2 on
+        #1751).  Proper lifecycle binding (cache created only when
+        Fido has work on the item) lands in #1757.
         """
         parent_key = _COMMENT_EVENT_PARENT_KEYS.get(event)
         if parent_key is None:
@@ -669,6 +677,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
         item_number = parent.get("number")
         if not isinstance(item_number, int):
+            return
+        if event == "issue_comment" and not parent.get("pull_request"):
+            # Plain-issue comment — Dispatcher ignores these too.
             return
         cache = self.registry.get_comment_cache(repo_cfg.name, item_number, self.gh)
         cache.apply_event(event, payload)
