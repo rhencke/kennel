@@ -84,7 +84,7 @@ class WebhookCache(ABC, Generic[_K, _V, _M]):
         event is dropped and ``events_dropped_queue_overflow`` is
         bumped.  ``None`` (default) means unbounded — appropriate
         for caches whose hydration is guaranteed to run at startup
-        (e.g. :class:`~fido.issue_cache.IssueTreeCache`).  Caches
+        (e.g. :class:`~fido.issue_cache.IssueCache`).  Caches
         that can stay un-loaded across persistent failures (e.g.
         :class:`~fido.comment_cache.CommentCache` on a permission
         outage) supply a finite cap so memory growth is bounded.

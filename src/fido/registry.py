@@ -32,7 +32,7 @@ from fido.comment_cache import CacheMetrics as CommentCacheMetrics
 from fido.comment_cache import CommentCache
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
-from fido.issue_cache import CacheMetrics, IssueTreeCache
+from fido.issue_cache import CacheMetrics, IssueCache
 from fido.provider import PromptSession, Provider
 from fido.repo import Repo
 from fido.rocq import handler_preemption as preemption_fsm
@@ -151,7 +151,7 @@ class WorkerRegistry:
         # Per-repo issue tree caches shared between worker + webhook
         # threads (closes #812).  Lazily created on first lookup so tests
         # that don't exercise the cache path don't pay setup cost.
-        self._issue_caches: dict[str, IssueTreeCache] = {}
+        self._issue_caches: dict[str, IssueCache] = {}
         self._issue_cache_lock = threading.Lock()
         # Per-(repo, item) comment caches (closes #1754).  Lazily created
         # on first lookup; each cache is bound to one issue/PR's
@@ -334,7 +334,7 @@ class WorkerRegistry:
         provider_module.set_talker_change_callback(
             repo_cfg.name, self._make_talker_publisher(repo_cfg.name)
         )
-        # On crash recovery the existing IssueTreeCache instance is
+        # On crash recovery the existing IssueCache instance is
         # preserved in ``_issue_caches`` but ``zero_repo_state(...)``
         # above reset its snapshot to ``loaded=false``.  Republish the
         # cache's current metrics so /status.json doesn't regress to
@@ -899,7 +899,7 @@ class WorkerRegistry:
         provider = thread.current_provider()
         return provider.agent.session if provider is not None else None
 
-    def get_issue_cache(self, repo_name: str) -> IssueTreeCache:
+    def get_issue_cache(self, repo_name: str) -> IssueCache:
         """Return (lazily creating) the per-repo issue tree cache (#812).
 
         Cache is shared between the worker thread (picker reads) and the
@@ -915,7 +915,7 @@ class WorkerRegistry:
         with self._issue_cache_lock:
             cache = self._issue_caches.get(repo_name)
             if cache is None:
-                cache = IssueTreeCache(
+                cache = IssueCache(
                     repo_name,
                     on_change=self._make_issue_cache_publisher(repo_name),
                 )
@@ -949,7 +949,7 @@ class WorkerRegistry:
 
         return publish
 
-    def all_issue_caches(self) -> list[IssueTreeCache]:
+    def all_issue_caches(self) -> list[IssueCache]:
         """Snapshot list of every issue cache that has been created.
 
         Used by ``fido status`` to surface per-repo cache metrics.
@@ -1118,7 +1118,7 @@ def _make_thread(
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with the provided GitHub client.
 
-    Hands the per-repo :class:`IssueTreeCache` (created lazily by the
+    Hands the per-repo :class:`IssueCache` (created lazily by the
     registry) into the worker so the picker reads from the cache and the
     webhook handler can patch it (closes #812).
     """

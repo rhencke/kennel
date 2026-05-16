@@ -1,11 +1,11 @@
-"""Tests for fido.issue_cache.IssueTreeCache (closes #812)."""
+"""Tests for fido.issue_cache.IssueCache (closes #812)."""
 
 import threading
 from datetime import datetime, timedelta, timezone
 
 from fido.issue_cache import (
     CacheMetrics,
-    IssueTreeCache,
+    IssueCache,
 )
 
 _T0 = datetime(2026, 4, 18, 22, 0, 0, tzinfo=timezone.utc)
@@ -58,7 +58,7 @@ def _evt(
 
 class TestLoadInventory:
     def test_seeds_nodes(self) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         cache.load_inventory(
             [
                 _inv(1, title="root", sub_issues=[2, 3]),
@@ -80,13 +80,13 @@ class TestLoadInventory:
         assert n3.milestone == "v1"
 
     def test_marks_loaded(self) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         assert cache.is_loaded is False
         cache.load_inventory([_inv(1)], snapshot_started_at=_T0)
         assert cache.is_loaded is True
 
     def test_drains_pre_inventory_queue_in_timestamp_order(self) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         # Queue events while not loaded — their 'login' adds should run in
         # timestamp order, not arrival order.
         cache.apply_event("assigned", _evt(1, timestamp=_ts(20), login="alice"))
@@ -104,7 +104,7 @@ class TestLoadInventory:
         assert node.last_applied_at == _ts(20)
 
     def test_pre_inventory_event_predating_snapshot_is_dropped(self) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         cache.apply_event(
             "assigned", _evt(1, timestamp=_T0 - timedelta(hours=1), login="ghost")
         )
@@ -120,8 +120,8 @@ class TestLoadInventory:
 
 
 class TestEventIdempotency:
-    def _loaded(self) -> IssueTreeCache:
-        cache = IssueTreeCache("o/r")
+    def _loaded(self) -> IssueCache:
+        cache = IssueCache("o/r")
         cache.load_inventory(
             [
                 _inv(1, title="parent", sub_issues=[2]),
@@ -189,8 +189,8 @@ class TestEventIdempotency:
 
 
 class TestEventMutations:
-    def _loaded(self) -> IssueTreeCache:
-        cache = IssueTreeCache("o/r")
+    def _loaded(self) -> IssueCache:
+        cache = IssueCache("o/r")
         cache.load_inventory(
             [
                 _inv(1, title="parent", sub_issues=[2, 3]),
@@ -265,7 +265,7 @@ class TestEventMutations:
         assert node.milestone == "v2"
 
     def test_milestoned_to_none_clears_milestone(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1, milestone="v1")], snapshot_started_at=_T0)
         cache.apply_event("milestoned", _evt(1, timestamp=_ts(10)))
         node = cache.get(1)
@@ -321,8 +321,8 @@ class TestHandlersAgainstMissingNode:
     """Every node-mutation handler must no-op cleanly when the target
     node is absent from the cache (idempotent on missing)."""
 
-    def _loaded(self) -> IssueTreeCache:
-        cache = IssueTreeCache("o/r")
+    def _loaded(self) -> IssueCache:
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1)], snapshot_started_at=_T0)
         return cache
 
@@ -349,7 +349,7 @@ class TestHandlersAgainstMissingNode:
 
 class TestStalenessRejection:
     def test_event_older_than_last_applied_at_dropped(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory(
             [_inv(1, assignees=["fido"])], snapshot_started_at=_ts(100)
         )
@@ -361,7 +361,7 @@ class TestStalenessRejection:
         assert cache.metrics().events_dropped_stale == 1
 
     def test_event_after_advances_last_applied_at(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1)], snapshot_started_at=_T0)
         cache.apply_event("assigned", _evt(1, timestamp=_ts(60), login="x"))
         cache.apply_event("assigned", _evt(1, timestamp=_ts(30), login="y"))
@@ -372,7 +372,7 @@ class TestStalenessRejection:
         assert cache.metrics().events_dropped_stale == 1
 
     def test_unknown_event_type_is_ignored(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1)], snapshot_started_at=_T0)
         cache.apply_event(
             "transferred",
@@ -389,7 +389,7 @@ class TestStalenessRejection:
 
 class TestReconcile:
     def test_reports_zero_drift_when_in_sync(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         snap = [_inv(1, title="x", sub_issues=[]), _inv(2, parent=1)]
         cache.load_inventory(snap, snapshot_started_at=_T0)
         drift = cache.reconcile_with_inventory(snap, snapshot_started_at=_ts(60))
@@ -399,14 +399,14 @@ class TestReconcile:
         assert m.last_reconcile_at is not None
 
     def test_removes_nodes_absent_from_snapshot(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1), _inv(2)], snapshot_started_at=_T0)
         drift = cache.reconcile_with_inventory([_inv(1)], snapshot_started_at=_ts(60))
         assert drift == 1
         assert cache.get(2) is None
 
     def test_adds_nodes_present_only_in_snapshot(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1)], snapshot_started_at=_T0)
         drift = cache.reconcile_with_inventory(
             [_inv(1), _inv(2, title="new")], snapshot_started_at=_ts(60)
@@ -417,7 +417,7 @@ class TestReconcile:
         assert n2.title == "new"
 
     def test_replaces_diverged_node(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1, assignees=["fido"])], snapshot_started_at=_T0)
         drift = cache.reconcile_with_inventory(
             [_inv(1, assignees=["alice"])], snapshot_started_at=_ts(60)
@@ -433,7 +433,7 @@ class TestReconcile:
 
 class TestThreadSafety:
     def test_concurrent_assigned_unassigned_does_not_corrupt(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1)], snapshot_started_at=_T0)
 
         def writer(login: str, n_iters: int) -> None:
@@ -460,8 +460,8 @@ class TestThreadSafety:
 
 
 class TestQueryAPI:
-    def _loaded(self) -> IssueTreeCache:
-        cache = IssueTreeCache("o/r")
+    def _loaded(self) -> IssueCache:
+        cache = IssueCache("o/r")
         cache.load_inventory(
             [
                 _inv(
@@ -533,7 +533,7 @@ class TestQueryAPI:
 
 class TestMetrics:
     def test_metrics_before_inventory(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         m = cache.metrics()
         assert isinstance(m, CacheMetrics)
         assert m.repo_name == "o/r"
@@ -545,7 +545,7 @@ class TestMetrics:
         assert m.last_reconcile_at is None
 
     def test_metrics_after_load_and_event(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory([_inv(1), _inv(2)], snapshot_started_at=_T0)
         cache.apply_event("assigned", _evt(1, timestamp=_ts(10), login="x"))
         m = cache.metrics()
@@ -557,7 +557,7 @@ class TestMetrics:
 
 class TestNodeShape:
     def test_inventory_with_missing_created_at_falls_back_to_min(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory(
             [
                 {
@@ -577,7 +577,7 @@ class TestNodeShape:
         assert node.created_at == datetime.min.replace(tzinfo=timezone.utc)
 
     def test_inventory_with_no_assignees(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory(
             [
                 {
@@ -600,7 +600,7 @@ class TestNodeShape:
         assert node.milestone is None
 
     def test_inventory_with_login_blank_skipped(self) -> None:
-        cache = IssueTreeCache("o/r")
+        cache = IssueCache("o/r")
         cache.load_inventory(
             [
                 {

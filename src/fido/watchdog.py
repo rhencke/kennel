@@ -150,11 +150,11 @@ def run(registry: WorkerRegistry, repos: dict[str, RepoConfig]) -> int:
     return Watchdog(registry, repos).run()
 
 
-class ReconcileWatchdog:
+class IssueReconcileWatchdog:
     """Hourly cache reconcile to heal drift from missed webhooks (#812).
 
     For each repo, fetches a fresh ``find_all_open_issues`` snapshot and
-    calls :meth:`~fido.issue_cache.IssueTreeCache.reconcile_with_inventory`
+    calls :meth:`~fido.issue_cache.IssueCache.reconcile_with_inventory`
     to apply any divergence.  Skips repos whose cache hasn't been
     bootstrapped yet — the worker thread does that on its first
     ``find_next_issue`` iteration.
@@ -184,7 +184,7 @@ class ReconcileWatchdog:
             cache = self.registry.get_issue_cache(repo_name)
             if not cache.is_loaded:
                 log.info(
-                    "reconcile-watchdog[%s]: cache not yet loaded — skipping",
+                    "issue-reconcile-watchdog[%s]: cache not yet loaded — skipping",
                     repo_name,
                 )
                 continue
@@ -202,7 +202,7 @@ class ReconcileWatchdog:
                 # Logic bugs (KeyError, TypeError, AttributeError, …) are NOT
                 # caught; they propagate and crash this thread loudly.
                 log.exception(
-                    "reconcile-watchdog[%s]: find_all_open_issues failed — "
+                    "issue-reconcile-watchdog[%s]: find_all_open_issues failed — "
                     "next hourly tick will retry",
                     repo_name,
                 )
@@ -210,7 +210,9 @@ class ReconcileWatchdog:
             drift = cache.reconcile_with_inventory(
                 inventory, snapshot_started_at=snapshot_started_at
             )
-            log.info("reconcile-watchdog[%s]: applied %d corrections", repo_name, drift)
+            log.info(
+                "issue-reconcile-watchdog[%s]: applied %d corrections", repo_name, drift
+            )
         return 0
 
     def start_thread(
@@ -223,6 +225,86 @@ class ReconcileWatchdog:
                 time.sleep(_interval)
                 self.run()
 
-        t = threading.Thread(target=_loop, daemon=True, name="reconcile-watchdog")
+        t = threading.Thread(target=_loop, daemon=True, name="issue-reconcile-watchdog")
+        t.start()
+        return t
+
+
+class CommentReconcileWatchdog:
+    """Hourly comment-cache reconcile to heal drift from missed
+    webhooks (#1759).
+
+    For each live :class:`~fido.comment_cache.CommentCache` in the
+    registry, calls :meth:`~fido.comment_cache.CommentCache.refresh`
+    which re-fetches the three list endpoints
+    (top-level + review-thread comments + review submissions) and
+    reconciles against the cache.  Ids absent from the fresh
+    snapshot are evicted (closes the codex P2 about evict-missing
+    on list fetches via the periodic sweep that healing relies on).
+
+    Skips caches whose initial hydration hasn't completed yet —
+    nothing to reconcile against.  Per-cache failures (transient
+    GitHub/network errors, including HTTP errors propagated from
+    the post-INV-3 refresh path) log the exception and continue;
+    the next hourly tick retries.  Logic bugs propagate and crash
+    the thread loudly.
+    """
+
+    def __init__(self, registry: WorkerRegistry) -> None:
+        self.registry = registry
+
+    def run(self) -> int:
+        """Run one reconcile pass across every live comment cache.
+
+        Returns 0 (parallels :class:`IssueReconcileWatchdog.run`).
+        """
+        for cache in self.registry.all_comment_caches():
+            metrics = cache.metrics()
+            if not cache.is_loaded:
+                log.info(
+                    "comment-reconcile-watchdog[%s#%d]: cache not yet "
+                    "loaded — skipping",
+                    metrics.repo_name,
+                    metrics.item,
+                )
+                continue
+            snapshot_started_at = datetime.now(tz=timezone.utc)
+            try:
+                cache.refresh(snapshot_started_at)
+            except (
+                requests.RequestException,
+                GraphQLError,
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ):
+                # Transient GitHub/network failure — next tick retries.
+                # Logic bugs are NOT caught; they propagate.
+                log.exception(
+                    "comment-reconcile-watchdog[%s#%d]: refresh failed — "
+                    "next hourly tick will retry",
+                    metrics.repo_name,
+                    metrics.item,
+                )
+                continue
+            log.info(
+                "comment-reconcile-watchdog[%s#%d]: refreshed",
+                metrics.repo_name,
+                metrics.item,
+            )
+        return 0
+
+    def start_thread(
+        self, *, _interval: float = _RECONCILE_INTERVAL
+    ) -> threading.Thread:
+        """Start a daemon thread that reconciles every *_interval* seconds."""
+
+        def _loop() -> None:
+            while True:
+                time.sleep(_interval)
+                self.run()
+
+        t = threading.Thread(
+            target=_loop, daemon=True, name="comment-reconcile-watchdog"
+        )
         t.start()
         return t
