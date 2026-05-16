@@ -2992,20 +2992,31 @@ class TestBootstrapIssueCaches:
 class TestBootstrapCommentCaches:
     """Tests for bootstrap_comment_caches() (#1757)."""
 
-    def _state_json(self, work_dir: Path, *, pr_number: int | None) -> None:
-        fido_dir = work_dir / ".git" / "fido"
-        fido_dir.mkdir(parents=True, exist_ok=True)
-        state_path = fido_dir / "state.json"
-        data = {"issue": 100, "pr_number": pr_number} if pr_number else {"issue": 100}
-        state_path.write_text(json.dumps(data))
+    def _registry_with_state(self, repo_states: dict[str, dict[str, Any]]) -> MagicMock:
+        """Build a mock registry whose ``state_for(name).load()``
+        returns the canned state.json contents for that repo.  This
+        mirrors the real registry: ``state_for`` returns a ``State``
+        scoped to the canonical git dir, so the bootstrap path
+        works for linked worktrees / submodules where
+        ``work_dir/.git`` is a file pointer (codex P2 on #1757)."""
+        registry = MagicMock()
+
+        def state_for(name: str) -> MagicMock:
+            state = MagicMock()
+            state.load.return_value = repo_states.get(name, {})
+            return state
+
+        registry.state_for.side_effect = state_for
+        return registry
 
     def test_creates_cache_when_state_has_pr_number(self, tmp_path: Path) -> None:
         from fido.server import bootstrap_comment_caches
 
-        self._state_json(tmp_path, pr_number=42)
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         mock_gh = MagicMock()
-        mock_registry = MagicMock()
+        mock_registry = self._registry_with_state(
+            {"owner/repo": {"issue": 100, "pr_number": 42}}
+        )
         bootstrap_comment_caches(repos, mock_gh, mock_registry)
         mock_registry.get_comment_cache.assert_called_once_with(
             "owner/repo", 42, mock_gh
@@ -3014,32 +3025,45 @@ class TestBootstrapCommentCaches:
     def test_skips_when_state_lacks_pr_number(self, tmp_path: Path) -> None:
         from fido.server import bootstrap_comment_caches
 
-        self._state_json(tmp_path, pr_number=None)
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         mock_gh = MagicMock()
-        mock_registry = MagicMock()
+        mock_registry = self._registry_with_state({"owner/repo": {"issue": 100}})
         bootstrap_comment_caches(repos, mock_gh, mock_registry)
         mock_registry.get_comment_cache.assert_not_called()
 
     def test_skips_when_pr_number_is_zero(self, tmp_path: Path) -> None:
         from fido.server import bootstrap_comment_caches
 
-        self._state_json(tmp_path, pr_number=0)
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         mock_gh = MagicMock()
-        mock_registry = MagicMock()
+        mock_registry = self._registry_with_state(
+            {"owner/repo": {"issue": 100, "pr_number": 0}}
+        )
         bootstrap_comment_caches(repos, mock_gh, mock_registry)
         mock_registry.get_comment_cache.assert_not_called()
 
-    def test_skips_when_state_json_missing(self, tmp_path: Path) -> None:
+    def test_skips_when_state_is_empty(self, tmp_path: Path) -> None:
         from fido.server import bootstrap_comment_caches
 
-        # No state.json written.
+        # State.load() returns {} when state.json is absent.
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         mock_gh = MagicMock()
-        mock_registry = MagicMock()
+        mock_registry = self._registry_with_state({})
         bootstrap_comment_caches(repos, mock_gh, mock_registry)
         mock_registry.get_comment_cache.assert_not_called()
+
+    def test_uses_registry_state_for_for_worktree_safety(self, tmp_path: Path) -> None:
+        """Bootstrap reads state via ``registry.state_for(name)`` —
+        not by hardcoding ``work_dir/.git/fido`` — so linked
+        worktrees and submodules (where ``work_dir/.git`` is a file
+        pointer) resolve to the real fido dir (codex P2 on #1757)."""
+        from fido.server import bootstrap_comment_caches
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_registry = self._registry_with_state({"owner/repo": {"pr_number": 42}})
+        bootstrap_comment_caches(repos, mock_gh, mock_registry)
+        mock_registry.state_for.assert_called_with("owner/repo")
 
     def test_per_repo_failure_is_swallowed(self, tmp_path: Path) -> None:
         """A transient GH error on one repo must not stop other repos
@@ -3048,18 +3072,18 @@ class TestBootstrapCommentCaches:
 
         from fido.server import bootstrap_comment_caches
 
-        a_dir = tmp_path / "a"
-        b_dir = tmp_path / "b"
-        a_dir.mkdir()
-        b_dir.mkdir()
-        self._state_json(a_dir, pr_number=42)
-        self._state_json(b_dir, pr_number=99)
         repos = {
-            "a/r1": RepoConfig(name="a/r1", work_dir=a_dir),
-            "b/r2": RepoConfig(name="b/r2", work_dir=b_dir),
+            "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
+            "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
         }
         mock_gh = MagicMock()
         call_log: list[tuple[str, int]] = []
+        mock_registry = self._registry_with_state(
+            {
+                "a/r1": {"pr_number": 42},
+                "b/r2": {"pr_number": 99},
+            }
+        )
 
         def get_or_fail(repo: str, item: int, _gh: object) -> MagicMock:
             call_log.append((repo, item))
@@ -3067,9 +3091,7 @@ class TestBootstrapCommentCaches:
                 raise requests.RequestException("API down")
             return MagicMock()
 
-        mock_registry = MagicMock()
         mock_registry.get_comment_cache.side_effect = get_or_fail
-        # Must not raise even though the first repo errored.
         bootstrap_comment_caches(repos, mock_gh, mock_registry)
         # Second repo still bootstrapped.
         assert ("b/r2", 99) in call_log

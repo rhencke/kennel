@@ -61,7 +61,6 @@ from fido.registry import (
 )
 from fido.rocq import self_restart as restart_fsm
 from fido.session_lock_watchdog import SessionLockWatchdog
-from fido.state import State
 from fido.static_files import StaticFiles
 from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
@@ -1230,30 +1229,34 @@ def bootstrap_comment_caches(
     repos: dict[str, RepoConfig],
     gh: GitHub,
     registry: WorkerRegistry,
-    *,
-    _State: type[State] = State,
 ) -> None:
     """Bootstrap per-(repo, PR) :class:`~fido.comment_cache.CommentCache`
     instances for repos whose worker is mid-PR at startup (#1757).
 
-    Called once in :func:`run` after the registry is created.  For
-    each managed repo, reads ``state.json`` for the active PR number
-    (if any) and creates + hydrates a CommentCache for that ``(repo,
-    pr)`` pair.  Restart-safety mirror of
+    Called once in :func:`run` after the registry is created (so
+    :meth:`WorkerRegistry.state_for` is wired with the canonical git
+    dir — matters for linked worktrees and submodules where
+    ``work_dir/.git`` is a file pointer rather than the real
+    directory).  For each managed repo, reads ``state.json`` for the
+    active PR number (if any) and creates + hydrates a CommentCache
+    for that ``(repo, pr)`` pair.  Restart-safety mirror of
     :func:`bootstrap_issue_caches`: avoids paying the three-list-
     fetch cost on the first webhook arrival after restart.
 
     Per-repo failures are swallowed (logged, not raised): a single
-    GitHub API hiccup must not block fido from starting.  The next
-    webhook arrival for the PR will lazy-create the cache as a
-    safety net.
+    GitHub API hiccup must not block fido from starting.  The
+    registry rolls back the half-built cache on hydrate failure
+    (codex P1 on #1756), and the next webhook arrival for the PR
+    will lazy-create the cache as a safety net.
     """
-    for name, repo_cfg in repos.items():
-        state = _State(repo_cfg.work_dir / ".git" / "fido")
-        # State.load() returns {} when state.json is absent — no need
-        # to catch FileNotFoundError.  Missing pr_number then falls
-        # out of the isinstance check below.
-        pr_number = state.load().get("pr_number")
+    for name in repos:
+        # Reuse the registry's State — it was constructed against the
+        # canonical git dir (``git rev-parse --absolute-git-dir``), so
+        # worktrees and submodules where ``work_dir/.git`` is a file
+        # pointer resolve to the real fido dir.  Codex P2 on #1757:
+        # hardcoding ``work_dir/.git/fido`` silently misses pr_number
+        # in those configurations.
+        pr_number = registry.state_for(name).load().get("pr_number")
         if not isinstance(pr_number, int) or pr_number <= 0:
             continue
         try:
