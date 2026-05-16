@@ -361,6 +361,100 @@ class TestRecoverReplyPromises:
             "lineage_comment_ids": [302],
         }
 
+    def test_foreign_pr_promise_falls_back_to_gh_and_is_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P1 follow-up: ``recover_reply_promises`` iterates
+        repo-wide promises but reads from the per-PR ``CommentCache``.
+        A promise belonging to a *different* PR must fall back to the
+        direct ``gh.get_issue_comment`` lookup and be silently skipped
+        (its ``issue_url`` resolves to a different PR), not marked
+        failed."""
+        fido_dir = tmp_path / ".git" / "fido"
+        # Stage a promise for a comment that actually belongs to PR #99
+        # while we recover against PR #7.
+        promise = self._prepare_promise(tmp_path, "issues", 999)
+        gh = _make_mock_gh()
+        gh.view_issue.return_value = {"title": "PR 7", "body": "body"}
+        gh.get_issue_comment.return_value = {
+            "id": 999,
+            "body": "on a different PR",
+            "html_url": "https://github.com/owner/repo/pull/99#issuecomment-999",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/99",
+            "user": {"login": "owner"},
+        }
+        # The PR-7 cache does not carry comment 999 (per-(repo, item)
+        # isolation); ``_registry_mirroring_gh`` returns the gh stub
+        # via the fallback path, so we explicitly stub the cache to
+        # miss while the gh fallback succeeds.
+        registry = MagicMock(spec=ActivityReporter)
+        cache = MagicMock()
+        cache.is_loaded = True
+        cache.get.return_value = None  # cache miss for foreign PR
+        cache.list_top_level.return_value = []
+        registry.get_comment_cache.return_value = cache
+
+        result = recover_reply_promises(
+            fido_dir,
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            7,
+            registry=registry,
+            dispatcher=_FakeDispatcher(),
+        )
+        assert result is False
+        # Promise must NOT be marked failed — it belongs to a different
+        # PR and will be reconciled when that PR's recovery runs.
+        record = FidoStore(tmp_path).promise(promise.promise_id)
+        assert record is not None
+        assert record.state == "prepared"
+        gh.get_issue_comment.assert_called_once_with("owner/repo", 999)
+
+    def test_unhydrated_cache_falls_back_to_gh_for_top_level_list(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P1 follow-up: when ``CommentCache`` hydration failed
+        (``is_loaded == False``) the previous direct-GitHub call would
+        have raised or returned the real comment list; an empty
+        ``cache.list_top_level()`` must not silently drop the recovery
+        attempt for a stale marker."""
+        fido_dir = tmp_path / ".git" / "fido"
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="webhook", comment_type="issues", anchor_comment_id=404
+        )
+        assert promise is not None
+        gh = _make_mock_gh()
+        gh.view_issue.return_value = {"title": "PR 7", "body": "body"}
+        # The stale marker that proves recovery already happened lives
+        # on the GitHub side; the unhydrated cache cannot see it.
+        gh.get_issue_comments.return_value = [
+            {
+                "id": 1,
+                "body": f"done\n\n<!-- fido:reply-promise:{promise.promise_id} -->",
+            }
+        ]
+        registry = MagicMock(spec=ActivityReporter)
+        cache = MagicMock()
+        cache.is_loaded = False  # hydration silently failed
+        cache.list_top_level.return_value = []  # empty — would lose marker
+        registry.get_comment_cache.return_value = cache
+
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
+            assert recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+                registry=registry,
+                dispatcher=_FakeDispatcher(),
+            )
+        mock_reply.assert_not_called()
+        assert store.promise(promise.promise_id).state == "acked"
+        gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
+
     def test_recovers_stale_issue_marker_without_reposting(
         self, tmp_path: Path
     ) -> None:
@@ -5865,6 +5959,78 @@ class TestBuildOnIntentDispositions:
         mock_gh.reply_to_review_comment.assert_not_called()
 
 
+class TestCacheOrGhFallback:
+    """Codex P1 follow-ups on INV-6: cache miss / unhydrated cache must fall
+    back to GitHub so foreign-PR promises are not marked failed and the
+    one-shot startup backfill doesn't silently lose missed comments."""
+
+    def test_comment_via_cache_returns_cache_hit_without_gh(self) -> None:
+        from fido.events import _comment_via_cache_or_gh
+
+        cache = MagicMock()
+        cache.get.return_value = {"id": 1, "body": "cached"}
+        gh = MagicMock()
+        result = _comment_via_cache_or_gh(
+            cache, "issues", gh=gh, repo="owner/repo", comment_id=1
+        )
+        assert result == {"id": 1, "body": "cached"}
+        gh.get_issue_comment.assert_not_called()
+        gh.get_pull_comment.assert_not_called()
+
+    def test_comment_via_cache_falls_back_to_gh_on_miss_issues(self) -> None:
+        from fido.events import _comment_via_cache_or_gh
+
+        cache = MagicMock()
+        cache.get.return_value = None
+        gh = MagicMock()
+        gh.get_issue_comment.return_value = {"id": 2, "body": "from gh"}
+        result = _comment_via_cache_or_gh(
+            cache, "issues", gh=gh, repo="owner/repo", comment_id=2
+        )
+        assert result == {"id": 2, "body": "from gh"}
+        gh.get_issue_comment.assert_called_once_with("owner/repo", 2)
+
+    def test_comment_via_cache_falls_back_to_gh_on_miss_pulls(self) -> None:
+        from fido.events import _comment_via_cache_or_gh
+
+        cache = MagicMock()
+        cache.get.return_value = None
+        gh = MagicMock()
+        gh.get_pull_comment.return_value = {"id": 3, "body": "from gh"}
+        result = _comment_via_cache_or_gh(
+            cache, "pulls", gh=gh, repo="owner/repo", comment_id=3
+        )
+        assert result == {"id": 3, "body": "from gh"}
+        gh.get_pull_comment.assert_called_once_with("owner/repo", 3)
+
+    def test_top_level_uses_loaded_cache(self) -> None:
+        from fido.events import _top_level_comments_via_cache_or_gh
+
+        cache = MagicMock()
+        cache.is_loaded = True
+        cache.list_top_level.return_value = [{"id": 1}]
+        gh = MagicMock()
+        result = _top_level_comments_via_cache_or_gh(
+            cache, gh=gh, repo="owner/repo", pr_number=7
+        )
+        assert result == [{"id": 1}]
+        gh.get_issue_comments.assert_not_called()
+
+    def test_top_level_falls_back_when_unloaded(self) -> None:
+        from fido.events import _top_level_comments_via_cache_or_gh
+
+        cache = MagicMock()
+        cache.is_loaded = False
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = [{"id": 9, "body": "missed"}]
+        result = _top_level_comments_via_cache_or_gh(
+            cache, gh=gh, repo="owner/repo", pr_number=7
+        )
+        assert result == [{"id": 9, "body": "missed"}]
+        gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
+        cache.list_top_level.assert_not_called()
+
+
 class TestBackfillMissedPrComments:
     """Replay of issue_comment webhooks missed during fido downtime (fix #794).
 
@@ -5939,6 +6105,33 @@ class TestBackfillMissedPrComments:
         assert kwargs["thread"]["comment_id"] == 100
         assert kwargs["thread"]["comment_type"] == "issues"
         assert kwargs["thread"]["author"] == "rhencke"
+
+    def test_unhydrated_cache_falls_back_to_gh(self, tmp_path: Path) -> None:
+        """Codex P1 follow-up: ``backfill_missed_pr_comments`` runs once
+        per WorkerThread lifetime — if the per-(repo, item) cache failed
+        to hydrate (``is_loaded == False``), trusting an empty
+        ``cache.list_top_level()`` would silently drop every missed
+        ``issue_comment`` event until the next process restart.  Fall
+        back to ``gh.get_issue_comments`` so the missed comment is
+        still replayed."""
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [self._comment(123)]
+        mock_gh.is_thread_resolved_for_comment.return_value = False
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        registry = MagicMock()
+        cache = MagicMock()
+        cache.is_loaded = False  # hydration silently failed
+        cache.list_top_level.return_value = []  # would lose missed events
+        registry.get_comment_cache.return_value = cache
+
+        with patch("fido.events.create_task") as mock_create:
+            count = Dispatcher(
+                cfg, repo_cfg, mock_gh, registry
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
+        assert count == 1
+        mock_create.assert_called_once()
+        mock_gh.get_issue_comments.assert_called_once_with(repo_cfg.name, 1)
 
     def test_skips_fido_own_comments(self, tmp_path: Path) -> None:
         mock_gh = MagicMock()

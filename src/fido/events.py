@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fido.comment_cache import KIND_ISSUES, KIND_PULLS
+from fido.comment_cache import KIND_ISSUES, KIND_PULLS, CommentCache
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
@@ -331,6 +331,64 @@ def _pr_number_from_api_url(url: str, kind: str) -> int:
     if match is None:
         raise ValueError(f"invalid GitHub API URL for {kind}: {url!r}")
     return int(match.group(1))
+
+
+def _comment_via_cache_or_gh(
+    cache: CommentCache,
+    kind: str,
+    *,
+    gh: GitHub,
+    repo: str,
+    comment_id: int,
+) -> Mapping[str, Any] | None:
+    """Cache-first lookup with authoritative fallback to GitHub.
+
+    The per-(repo, item) :class:`CommentCache` only carries comments
+    that belong to its scoped item, so :meth:`CommentCache.get`
+    legitimately returns ``None`` in two non-failure cases:
+
+    * the requested comment belongs to a *different* PR — common when
+      :func:`recover_reply_promises` iterates the repo-wide promise
+      table; the caller skips foreign-PR matches downstream;
+    * the cache failed to hydrate and silently stayed empty
+      (``WorkerRegistry.get_comment_cache`` swallows hydration errors
+      so the webhook handler can still queue the triggering event).
+
+    In both cases the previous direct-GitHub call was authoritative,
+    and treating cache misses as "comment deleted" would mark valid
+    promises failed.  Fall back to ``gh`` so the caller sees the same
+    behaviour as before the cache migration (INV-6 of #1748).
+    """
+    cached = cache.get(kind, comment_id)
+    if cached is not None:
+        return cached
+    if kind == KIND_PULLS:
+        return gh.get_pull_comment(repo, comment_id)
+    return gh.get_issue_comment(repo, comment_id)
+
+
+def _top_level_comments_via_cache_or_gh(
+    cache: CommentCache,
+    *,
+    gh: GitHub,
+    repo: str,
+    pr_number: int,
+) -> list[Mapping[str, Any]]:
+    """Cache-first list of top-level PR comments with authoritative fallback.
+
+    :meth:`CommentCache.list_top_level` returns ``[]`` both when the
+    PR genuinely has no top-level comments and when hydration failed
+    silently (``is_loaded == False``).  The latter would cause
+    :meth:`Dispatcher.backfill_missed_pr_comments` — a one-shot
+    startup replay — to drop every missed ``issue_comment`` event
+    until the next process restart.  Falling back to the
+    ``gh.get_issue_comments`` call that backfill used pre-INV-6
+    preserves the original loud-failure semantics for the only path
+    where the cache might still be unhydrated.
+    """
+    if cache.is_loaded:
+        return list(cache.list_top_level())
+    return [dict(c) for c in gh.get_issue_comments(repo, pr_number)]
 
 
 def build_review_comment_action(
@@ -936,13 +994,15 @@ def recover_reply_promises(
     pr_body = pr_issue["body"] or ""
     processed_any = False
     pull_entries: dict[str, tuple[Mapping[str, Any], int, int]] = {}
-    # INV-6: comment lookups route through the per-(repo, pr) cache.
-    # The cache is already hydrated at PR-open / startup; reads here
-    # are O(1) dict lookups instead of GH round-trips.
+    # INV-6: comment lookups route through the per-(repo, pr) cache,
+    # falling back to direct GitHub calls on cache miss or unhydrated
+    # cache (see ``_comment_via_cache_or_gh`` / ``_top_level_comments_via_cache_or_gh``).
     comment_cache = registry.get_comment_cache(repo_cfg.name, pr_number, gh)
     issue_comments: list[Mapping[str, Any]] = []
     if any(p.comment_type == "issues" for p in promises):
-        issue_comments = comment_cache.list_top_level()
+        issue_comments = _top_level_comments_via_cache_or_gh(
+            comment_cache, gh=gh, repo=repo_cfg.name, pr_number=pr_number
+        )
         if store.recover_from_bodies(c.get("body", "") for c in issue_comments):
             processed_any = True
         issue_comments_by_id = {int(c["id"]): c for c in issue_comments if c.get("id")}
@@ -964,7 +1024,13 @@ def recover_reply_promises(
             ):
                 processed_any = True
                 continue
-            comment = comment_cache.get(KIND_PULLS, promise.anchor_comment_id)
+            comment = _comment_via_cache_or_gh(
+                comment_cache,
+                KIND_PULLS,
+                gh=gh,
+                repo=repo_cfg.name,
+                comment_id=promise.anchor_comment_id,
+            )
             if comment is None:
                 store.mark_failed(promise.promise_id)
                 continue
@@ -978,7 +1044,13 @@ def recover_reply_promises(
         else:
             comment = issue_comments_by_id.get(promise.anchor_comment_id)
             if comment is None:
-                comment = comment_cache.get(KIND_ISSUES, promise.anchor_comment_id)
+                comment = _comment_via_cache_or_gh(
+                    comment_cache,
+                    KIND_ISSUES,
+                    gh=gh,
+                    repo=repo_cfg.name,
+                    comment_id=promise.anchor_comment_id,
+                )
             if comment is None:
                 store.mark_failed(promise.promise_id)
                 continue
@@ -1415,9 +1487,12 @@ class Dispatcher:
         """
         repo_cfg = self._repo_cfg
         log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
-        comments = self._registry.get_comment_cache(
-            repo_cfg.name, pr_number, self._gh
-        ).list_top_level()
+        comments = _top_level_comments_via_cache_or_gh(
+            self._registry.get_comment_cache(repo_cfg.name, pr_number, self._gh),
+            gh=self._gh,
+            repo=repo_cfg.name,
+            pr_number=pr_number,
+        )
         for c in comments:
             user = (c.get("user") or {}).get("login", "")
             if not user:
@@ -1835,9 +1910,12 @@ def reply_to_issue_comment(
     conversation_context = ""
     if number:
         try:
-            all_comments = registry.get_comment_cache(
-                repo_cfg.name, int(number), gh
-            ).list_top_level()
+            all_comments = _top_level_comments_via_cache_or_gh(
+                registry.get_comment_cache(repo_cfg.name, int(number), gh),
+                gh=gh,
+                repo=repo_cfg.name,
+                pr_number=int(number),
+            )
             preceding = [c for c in all_comments if c.get("body", "") != comment]
             if preceding:
                 lines = [
