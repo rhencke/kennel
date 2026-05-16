@@ -9,11 +9,14 @@ from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from frozendict import frozendict
+
 from fido import provider as provider_module
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _ZERO_CRASH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _ZERO_TALKER,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    CommentCacheSnapshot,
     FidoState,
     IssueCacheSnapshot,
     ProviderSnapshot,
@@ -25,6 +28,7 @@ from fido.appstate import (
     zero_repo_state,
 )
 from fido.atomic import AtomicUpdater
+from fido.comment_cache import CacheMetrics as CommentCacheMetrics
 from fido.comment_cache import CommentCache
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
@@ -49,6 +53,27 @@ log = logging.getLogger(__name__)
 def _utcnow() -> datetime:
     """Return the current UTC time as a timezone-aware datetime."""
     return datetime.now(tz=timezone.utc)
+
+
+def _comment_cache_snapshot(cache: CommentCache) -> CommentCacheSnapshot:
+    """Build a :class:`CommentCacheSnapshot` from a live cache's metrics.
+
+    Module-level helper (not a method) because it's a pure
+    projection — no collaborators, no behavior beyond the
+    field-by-field copy.
+    """
+    metrics = cache.metrics()
+    return CommentCacheSnapshot(
+        item=metrics.item,
+        loaded=metrics.inventory_loaded_at is not None,
+        entries_cached=metrics.entries_cached,
+        events_applied=metrics.events_applied,
+        events_dropped_stale=metrics.events_dropped_stale,
+        events_dropped_queue_overflow=metrics.events_dropped_queue_overflow,
+        last_event_at=metrics.last_event_at or _EPOCH,
+        last_reconcile_at=metrics.last_reconcile_at or _EPOCH,
+        last_reconcile_drift=metrics.last_reconcile_drift,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +344,13 @@ class WorkerRegistry:
             existing_cache = self._issue_caches.get(repo_cfg.name)
         if existing_cache is not None:
             existing_cache._notify_change()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        # Same crash-recovery republish for comment caches (codex P2
+        # follow-up on #1758): ``zero_repo_state`` above reset
+        # ``comment_caches`` to ``frozendict()``, but the live
+        # CommentCache instances in ``_comment_caches`` survive
+        # the restart.  Republish so /status.json reflects them
+        # without waiting for the next cache mutation.
+        self._publish_comment_caches(repo_cfg.name)
         thread.start()
         self._publish_thread_snapshot(repo_cfg.name)
         self._publish_provider_snapshot(repo_cfg.name)
@@ -965,7 +997,12 @@ class WorkerRegistry:
         with self._comment_cache_lock:
             cache = self._comment_caches.get(key)
             if cache is None:
-                cache = CommentCache(repo_name, gh, item)
+                cache = CommentCache(
+                    repo_name,
+                    gh,
+                    item,
+                    on_change=self._make_comment_cache_publisher(repo_name),
+                )
                 self._comment_caches[key] = cache
         if not cache.is_loaded:
             try:
@@ -978,6 +1015,14 @@ class WorkerRegistry:
                     repo_name,
                     item,
                 )
+                # Surface the un-loaded cache in SCADA (codex P2
+                # follow-up on #1758): otherwise the stuck cache
+                # with its queue-overflow / staleness counters is
+                # invisible during the very outage that makes it
+                # worth watching.  Successful hydrate fires
+                # on_change via load_inventory; the failure path
+                # has to publish manually.
+                self._publish_comment_caches(repo_name)
         return cache
 
     def all_comment_caches(self) -> list[CommentCache]:
@@ -991,10 +1036,72 @@ class WorkerRegistry:
         Called when the PR closes/merges (#1757) — the cache is no
         longer useful and would otherwise leak per the codex P2 about
         unbounded growth.  Idempotent: calling twice is a no-op.
+
+        On successful removal, republishes the per-repo SCADA dict
+        from the surviving caches (#1758).  Sibling caches in the
+        same repo retain their snapshots; the destroyed item is
+        dropped from the dict.
         """
         key = (repo_name, item)
         with self._comment_cache_lock:
-            return self._comment_caches.pop(key, None) is not None
+            removed = self._comment_caches.pop(key, None) is not None
+        if removed:
+            self._publish_comment_caches(repo_name)
+        return removed
+
+    def _make_comment_cache_publisher(
+        self, repo_name: str
+    ) -> "Callable[[CommentCacheMetrics], None]":
+        """Return a per-repo on_change callback that republishes the
+        repo's full ``comment_caches`` dict on every cache mutation.
+
+        Closure binds *repo_name* so each repo's caches all route
+        through the same per-repo recompute path.  Per-item dict
+        means sibling caches survive any one cache's mutation
+        (codex P2 on #1758: the singleton field would have
+        clobbered them).  And the recompute reads from current
+        registry membership, so a destroyed cache's late firing
+        callback can't republish a snapshot for an unregistered
+        item (codex P2 on #1758: stale-handle republish race).
+        """
+
+        def publish(_metrics: "CommentCacheMetrics") -> None:
+            self._publish_comment_caches(repo_name)
+
+        return publish
+
+    def _publish_comment_caches(self, repo_name: str) -> None:
+        """Compute the per-item snapshot dict from currently-registered
+        caches for *repo_name* and publish it to FidoState.
+
+        Mirror of :meth:`_publish_webhook_activities`: the
+        authoritative state is the registry's ``_comment_caches``
+        map; this method serialises a snapshot and the state-updater
+        CAS together so concurrent membership changes can't have
+        their compute interleaved with someone else's publish
+        (codex P1 follow-up on #1758: a publisher that snapshotted
+        before a peer's ``destroy_comment_cache`` could otherwise
+        write a stale dict — including the destroyed item — after
+        the destroy's publish committed, resurrecting the dead
+        cache in /status.json).
+
+        Holds ``_comment_cache_lock`` through the
+        ``state_updater.update`` call.  The CAS is microseconds;
+        the lock-ordering rule "_comment_cache_lock before any
+        cache._lock (acquired by metrics()) before the atomic
+        cell's internal lock" is preserved throughout the registry.
+        """
+        with self._comment_cache_lock:
+            snaps = frozendict(
+                {
+                    item: _comment_cache_snapshot(cache)
+                    for (name, item), cache in self._comment_caches.items()
+                    if name == repo_name
+                }
+            )
+            self._state_updater.update(
+                lambda root: root.repos[repo_name].comment_caches, snaps
+            )
 
 
 def _make_thread(
