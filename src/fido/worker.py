@@ -33,7 +33,6 @@ from fido.comment_cache import (
     KIND_PULLS,
     CommentCache,
     comment_via_cache_or_gh,
-    top_level_comments_via_cache_or_gh,
 )
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
@@ -1834,27 +1833,6 @@ class Worker:
             default,
         )
 
-    def _resolved_top_level_comments(
-        self, repo: str, item: int
-    ) -> list[Mapping[str, Any]]:
-        """Cache-first list of top-level comments for ``(repo, item)``.
-
-        INV-7 of #1748: every comment-fetch site in this module reads
-        from the per-(repo, item) :class:`CommentCache` instead of
-        going to GitHub directly.  Falls back to ``gh.get_issue_comments``
-        on unhydrated cache (handled inside
-        :func:`top_level_comments_via_cache_or_gh`) or when the worker
-        was constructed without a registry (test paths).
-        """
-        if self._registry is None:
-            return [dict(c) for c in self.gh.get_issue_comments(repo, item)]
-        return top_level_comments_via_cache_or_gh(
-            self._registry.get_comment_cache(repo, item, self.gh),
-            gh=self.gh,
-            repo=repo,
-            pr_number=item,
-        )
-
     def _resolved_comment(
         self, repo: str, item: int, kind: str, comment_id: int
     ) -> Mapping[str, Any] | None:
@@ -1903,7 +1881,11 @@ class Worker:
             if e.get("event") == "reopened":
                 last_opened = e.get("created_at", last_opened)
 
-        comments = self._resolved_top_level_comments(repo, issue)
+        # Authoritative read (codex P2 follow-up on INV-7): this is a
+        # non-PR issue, and ``CommentCache`` only covers PR items —
+        # going through the cache here would 404 on the ``/pulls``
+        # hydration endpoints every call.
+        comments = self.gh.get_issue_comments(repo, issue)
         has_retry_ack = any(
             c.get("user", {}).get("login") == gh_user
             and c.get("created_at", "") >= last_opened
@@ -2937,8 +2919,13 @@ class Worker:
         cleanup.  Best-effort: on upstream error returns an empty set, which
         conservatively means every later fido comment is treated as new.
         """
+        # Authoritative read (codex P2 follow-up on INV-7): leak-cleanup
+        # diffs the live comment set against a before-image, so reading
+        # from the eventually-consistent ``CommentCache`` would let a
+        # delayed/dropped webhook leave newly-leaked comments invisible
+        # to the snapshot and silently skip the cleanup.
         try:
-            comments = self._resolved_top_level_comments(repo, pr_number)
+            comments = self.gh.get_issue_comments(repo, pr_number)
         except _requests.RequestException:
             log.exception(
                 "leak-check: failed to snapshot issue comments on %s#%d",
@@ -2966,8 +2953,12 @@ class Worker:
         after the task completion path; HTTP errors here are logged and
         swallowed so a transient GitHub hiccup doesn't abort the caller.
         """
+        # Authoritative read (codex P2 follow-up on INV-7): see
+        # :meth:`_snapshot_fido_issue_comment_ids` — the cleanup diff
+        # must observe the current GitHub state, not a webhook-lagged
+        # cache snapshot, or new leaked comments slip through.
         try:
-            comments = self._resolved_top_level_comments(repo, pr_number)
+            comments = self.gh.get_issue_comments(repo, pr_number)
         except _requests.RequestException:
             log.exception(
                 "leak-check: failed to fetch issue comments on %s#%d",
@@ -3221,9 +3212,13 @@ class Worker:
         # a crash between the comment post and the close calls doesn't leave
         # the issue/PR permanently open on retry.
         if closed_sub_issues and not has_real_diff and explicit_no_tasks:
-            existing_issue_comments = self._resolved_top_level_comments(
-                repo_ctx.repo, issue
-            )
+            # Authoritative read (codex P2 follow-up on INV-7):
+            # ``issue`` here is a non-PR issue number — ``CommentCache``
+            # only covers PR items.  Also a post-then-read dedupe gate
+            # for the sub-issue coverage comment, which requires
+            # read-your-writes that the eventually-consistent cache
+            # cannot guarantee.
+            existing_issue_comments = self.gh.get_issue_comments(repo_ctx.repo, issue)
             already_posted = any(
                 _NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "")
                 for c in existing_issue_comments
@@ -3292,7 +3287,12 @@ class Worker:
         # pr_ready / add_pr_reviewers still run unconditionally (they are
         # API-idempotent) so a crash between the comment and the ready call
         # is retried correctly.
-        existing = self._resolved_top_level_comments(repo_ctx.repo, pr_number)
+        # Authoritative read (codex P2 follow-up on INV-7): the marker
+        # check is a post-then-read dedupe gate to keep the worker loop
+        # from re-posting on every iteration.  An eventually-consistent
+        # cache read could miss a just-posted marker and break the
+        # idempotency invariant.
+        existing = self.gh.get_issue_comments(repo_ctx.repo, pr_number)
         already_posted = any(
             _NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "") for c in existing
         )
@@ -3402,8 +3402,14 @@ class Worker:
         which prevents the worker loop from re-posting the same comment
         on every iteration.
         """
+        # Authoritative read (codex P1 follow-up on INV-7): this whole
+        # method is documented as idempotent on
+        # :data:`_EMPTY_PR_COMMENT_MARKER` so the worker loop won't
+        # re-post each iteration.  Reading through the eventually-
+        # consistent ``CommentCache`` would miss a just-posted marker
+        # if its webhook is delayed/dropped and break that invariant.
         try:
-            existing = self._resolved_top_level_comments(repo, pr_number)
+            existing = self.gh.get_issue_comments(repo, pr_number)
         except _requests.RequestException:
             log.exception(
                 "_post_empty_pr_comment_once: failed to fetch comments on %s#%d",
@@ -4005,7 +4011,13 @@ class Worker:
             if e.get("event") == "reopened":
                 last_opened = e.get("created_at", last_opened)
 
-        comments = self._resolved_top_level_comments(repo, issue)
+        # Authoritative read (codex P2 follow-up on INV-7): ``issue``
+        # may be a non-PR issue (``CommentCache`` only covers PRs), and
+        # this is the dedupe gate for the pickup-marker comment that
+        # ``_ensure_pickup_comment`` calls *before* writing the
+        # ``pickup_comment_ensured`` durable bit — a stale cache could
+        # re-post the marker on crash/restart.
+        comments = self.gh.get_issue_comments(repo, issue)
         has_pickup_comment = any(
             c.get("user", {}).get("login") == gh_user
             and c.get("created_at", "") >= last_opened
