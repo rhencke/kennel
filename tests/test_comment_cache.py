@@ -485,6 +485,25 @@ class TestHydrate:
                 continue
             raise AssertionError(f"expected HTTPError for status {status} to propagate")
 
+    def test_concurrent_hydrates_are_serialized_via_lock(self) -> None:
+        # Codex P1 follow-up on #1766: two threads racing on
+        # hydrate must not both fetch + load (the second
+        # load_inventory would clobber the first's results).  The
+        # hydration lock serializes them; the second call sees
+        # ``is_loaded`` and no-ops.
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
+        cache = CommentCache("owner/repo", gh, 7)
+        # First call hydrates.
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Second call no-ops — no extra fetches.
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Only ONE round of three fetches.
+        kinds_called = [name for name, _ in gh.calls]
+        assert kinds_called.count("get_issue_comments") == 1
+        assert kinds_called.count("get_pull_comments") == 1
+        assert kinds_called.count("get_pull_reviews") == 1
+
     def test_events_arriving_during_hydration_are_drained_in_order(self) -> None:
         # WebhookCache's pre-inventory queue catches events that
         # arrive before hydrate completes.  An event applies before
@@ -674,3 +693,45 @@ class TestListGetters:
             },
         )
         assert [int(c["id"]) for c in cache.list_top_level()] == [10, 20, 30]
+
+
+class TestPreInventoryQueueBound:
+    """Codex P1 follow-up on #1766: pre-inventory queue is capped so a
+    cache stuck un-loaded across persistent hydration failures can't
+    grow unboundedly while webhook traffic continues."""
+
+    def test_overflow_drops_oldest_and_bumps_counter(self) -> None:
+        # Construct a cache but never hydrate, so apply_event events
+        # all queue.  Send more events than the cap; oldest get
+        # dropped; counter bumps.
+        from fido.comment_cache import _PRE_INVENTORY_QUEUE_LIMIT
+
+        cache = CommentCache("owner/repo", _FakeGH(), 7)
+        # Queue cap + 5 events; expect 5 oldest dropped, last one
+        # we apply is kept.
+        for cid in range(_PRE_INVENTORY_QUEUE_LIMIT + 5):
+            # Stagger timestamps minute-by-minute so cap-eviction
+            # order is well-defined; oldest is the first sent.
+            mm = cid // 60
+            ss = cid % 60
+            cache.apply_event(
+                "issue_comment",
+                {
+                    "action": "created",
+                    "issue": {"number": 7},
+                    "comment": _comment_payload(
+                        item=7,
+                        comment_id=1000 + cid,
+                        updated_at=f"2024-06-01T00:{mm:02d}:{ss:02d}Z",
+                    ),
+                },
+            )
+        metrics = cache.metrics()
+        assert metrics.events_dropped_queue_overflow == 5
+        # Hydrate and confirm the SURVIVING events are the newest 1000.
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # The oldest 5 ids (1000..1004) dropped; ids 1005..1004+1000 kept.
+        # First surviving id = 1005, last = 1000 + _PRE_INVENTORY_QUEUE_LIMIT + 4
+        assert cache.get(KIND_ISSUES, 1000) is None  # oldest, dropped
+        assert cache.get(KIND_ISSUES, 1004) is None  # also dropped
+        assert cache.get(KIND_ISSUES, 1005) is not None  # first survivor
