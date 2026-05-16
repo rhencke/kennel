@@ -2306,3 +2306,21 @@ class TestCommentCacheRegistry:
         cache = reg.get_comment_cache("foo/bar", 7, gh)
         assert cache is not None
         assert cache.is_loaded is True
+
+    def test_destroy_comment_cache_removes_existing(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        reg.get_comment_cache("foo/bar", 7, gh)
+        assert reg.destroy_comment_cache("foo/bar", 7) is True
+        assert len(reg.all_comment_caches()) == 0
+
+    def test_destroy_comment_cache_returns_false_when_missing(self) -> None:
+        reg = self._reg()
+        assert reg.destroy_comment_cache("foo/bar", 7) is False
+
+    def test_destroy_comment_cache_idempotent(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        reg.get_comment_cache("foo/bar", 7, gh)
+        assert reg.destroy_comment_cache("foo/bar", 7) is True
+        assert reg.destroy_comment_cache("foo/bar", 7) is False  # idempotent

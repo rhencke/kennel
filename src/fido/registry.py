@@ -974,6 +974,17 @@ class WorkerRegistry:
         with self._comment_cache_lock:
             return list(self._comment_caches.values())
 
+    def destroy_comment_cache(self, repo_name: str, item: int) -> bool:
+        """Remove the cache for ``(repo_name, item)``; return whether it existed.
+
+        Called when the PR closes/merges (#1757) — the cache is no
+        longer useful and would otherwise leak per the codex P2 about
+        unbounded growth.  Idempotent: calling twice is a no-op.
+        """
+        key = (repo_name, item)
+        with self._comment_cache_lock:
+            return self._comment_caches.pop(key, None) is not None
+
 
 def _make_thread(
     repo_cfg: RepoConfig,
