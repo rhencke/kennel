@@ -28,7 +28,13 @@ from fido.appstate import (
 )
 from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
-from fido.comment_cache import CommentCache
+from fido.comment_cache import (
+    KIND_ISSUES,
+    KIND_PULLS,
+    CommentCache,
+    comment_via_cache_or_gh,
+    top_level_comments_via_cache_or_gh,
+)
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import HarnessCommitter
@@ -1828,6 +1834,51 @@ class Worker:
             default,
         )
 
+    def _resolved_top_level_comments(
+        self, repo: str, item: int
+    ) -> list[Mapping[str, Any]]:
+        """Cache-first list of top-level comments for ``(repo, item)``.
+
+        INV-7 of #1748: every comment-fetch site in this module reads
+        from the per-(repo, item) :class:`CommentCache` instead of
+        going to GitHub directly.  Falls back to ``gh.get_issue_comments``
+        on unhydrated cache (handled inside
+        :func:`top_level_comments_via_cache_or_gh`) or when the worker
+        was constructed without a registry (test paths).
+        """
+        if self._registry is None:
+            return [dict(c) for c in self.gh.get_issue_comments(repo, item)]
+        return top_level_comments_via_cache_or_gh(
+            self._registry.get_comment_cache(repo, item, self.gh),
+            gh=self.gh,
+            repo=repo,
+            pr_number=item,
+        )
+
+    def _resolved_comment(
+        self, repo: str, item: int, kind: str, comment_id: int
+    ) -> Mapping[str, Any] | None:
+        """Cache-first single-comment lookup for ``(repo, item)``.
+
+        INV-7 of #1748: see :meth:`_resolved_top_level_comments`.
+        Falls back to ``gh.get_*_comment`` on cache miss / unhydrated
+        cache (handled inside :func:`comment_via_cache_or_gh`) or
+        when the worker was constructed without a registry.
+        """
+        if self._registry is None:
+            return (
+                self.gh.get_pull_comment(repo, comment_id)
+                if kind == KIND_PULLS
+                else self.gh.get_issue_comment(repo, comment_id)
+            )
+        return comment_via_cache_or_gh(
+            self._registry.get_comment_cache(repo, item, self.gh),
+            kind,
+            gh=self.gh,
+            repo=repo,
+            comment_id=comment_id,
+        )
+
     def _post_retry_acknowledgement(
         self,
         repo: str,
@@ -1852,7 +1903,7 @@ class Worker:
             if e.get("event") == "reopened":
                 last_opened = e.get("created_at", last_opened)
 
-        comments = self.gh.get_issue_comments(repo, issue)
+        comments = self._resolved_top_level_comments(repo, issue)
         has_retry_ack = any(
             c.get("user", {}).get("login") == gh_user
             and c.get("created_at", "") >= last_opened
@@ -2525,7 +2576,9 @@ class Worker:
             promise = promise_by_anchor.get(first_db_id)
             if promise is None:
                 continue
-            comment = self.gh.get_pull_comment(repo_ctx.repo, first_db_id)
+            comment = self._resolved_comment(
+                repo_ctx.repo, pr_number, KIND_PULLS, first_db_id
+            )
             if comment is None:
                 log.info("skipping thread %s — root comment missing", first_db_id)
                 store.mark_failed(promise.promise_id)
@@ -2764,7 +2817,9 @@ class Worker:
     ) -> "Action | None":
         from fido import events
 
-        comment = self.gh.get_pull_comment(repo, queued.comment_id)
+        comment = self._resolved_comment(
+            repo, queued.pr_number, KIND_PULLS, queued.comment_id
+        )
         if comment is None:
             log.info("queued review comment %s is gone — completing", queued.comment_id)
             return None
@@ -2787,7 +2842,9 @@ class Worker:
     ) -> "Action | None":
         from fido import events
 
-        comment = self.gh.get_issue_comment(repo, queued.comment_id)
+        comment = self._resolved_comment(
+            repo, queued.pr_number, KIND_ISSUES, queued.comment_id
+        )
         if comment is None:
             log.info("queued issue comment %s is gone — completing", queued.comment_id)
             return None
@@ -2881,7 +2938,7 @@ class Worker:
         conservatively means every later fido comment is treated as new.
         """
         try:
-            comments = self.gh.get_issue_comments(repo, pr_number)
+            comments = self._resolved_top_level_comments(repo, pr_number)
         except _requests.RequestException:
             log.exception(
                 "leak-check: failed to snapshot issue comments on %s#%d",
@@ -2910,7 +2967,7 @@ class Worker:
         swallowed so a transient GitHub hiccup doesn't abort the caller.
         """
         try:
-            comments = self.gh.get_issue_comments(repo, pr_number)
+            comments = self._resolved_top_level_comments(repo, pr_number)
         except _requests.RequestException:
             log.exception(
                 "leak-check: failed to fetch issue comments on %s#%d",
@@ -3164,7 +3221,9 @@ class Worker:
         # a crash between the comment post and the close calls doesn't leave
         # the issue/PR permanently open on retry.
         if closed_sub_issues and not has_real_diff and explicit_no_tasks:
-            existing_issue_comments = self.gh.get_issue_comments(repo_ctx.repo, issue)
+            existing_issue_comments = self._resolved_top_level_comments(
+                repo_ctx.repo, issue
+            )
             already_posted = any(
                 _NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "")
                 for c in existing_issue_comments
@@ -3233,7 +3292,7 @@ class Worker:
         # pr_ready / add_pr_reviewers still run unconditionally (they are
         # API-idempotent) so a crash between the comment and the ready call
         # is retried correctly.
-        existing = self.gh.get_issue_comments(repo_ctx.repo, pr_number)
+        existing = self._resolved_top_level_comments(repo_ctx.repo, pr_number)
         already_posted = any(
             _NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "") for c in existing
         )
@@ -3344,7 +3403,7 @@ class Worker:
         on every iteration.
         """
         try:
-            existing = self.gh.get_issue_comments(repo, pr_number)
+            existing = self._resolved_top_level_comments(repo, pr_number)
         except _requests.RequestException:
             log.exception(
                 "_post_empty_pr_comment_once: failed to fetch comments on %s#%d",
@@ -3946,7 +4005,7 @@ class Worker:
             if e.get("event") == "reopened":
                 last_opened = e.get("created_at", last_opened)
 
-        comments = self.gh.get_issue_comments(repo, issue)
+        comments = self._resolved_top_level_comments(repo, issue)
         has_pickup_comment = any(
             c.get("user", {}).get("login") == gh_user
             and c.get("created_at", "") >= last_opened
