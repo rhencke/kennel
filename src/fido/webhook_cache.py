@@ -318,21 +318,32 @@ class WebhookCache(ABC, Generic[_K, _V, _M]):
                 # Cap depth (codex P1 follow-up on #1766): when
                 # hydration stays failed for a long time and webhook
                 # traffic keeps arriving, an unbounded queue would
-                # grow indefinitely.  Drop oldest when over the cap
-                # so the worst-case memory cost stays bounded.
+                # grow indefinitely.  Drop oldest by *timestamp*
+                # (not arrival order) when over the cap — the drain
+                # in :meth:`load_inventory` replays sorted by
+                # timestamp anyway (events can arrive out of order),
+                # so eviction has to match that ordering or it would
+                # discard a newer update while keeping older stale
+                # events (codex P2 follow-up on #1766).
                 if (
                     self._pre_inventory_queue_limit is not None
                     and len(self._pre_inventory_queue) > self._pre_inventory_queue_limit
                 ):
-                    dropped = self._pre_inventory_queue.pop(0)
+                    oldest_idx = min(
+                        range(len(self._pre_inventory_queue)),
+                        key=lambda i: self._pre_inventory_queue[i][0],
+                    )
+                    dropped = self._pre_inventory_queue.pop(oldest_idx)
                     self._events_dropped_queue_overflow += 1
                     log.warning(
                         "%s[%s]: pre-inventory queue at cap %d — "
-                        "dropped oldest event %s (queue overflow=%d)",
+                        "dropped oldest-timestamp event %s @ %s "
+                        "(queue overflow=%d)",
                         type(self).__name__,
                         self._repo,
                         self._pre_inventory_queue_limit,
                         dropped[1],
+                        dropped[0].isoformat(),
                         self._events_dropped_queue_overflow,
                     )
                 else:

@@ -702,16 +702,14 @@ class TestPreInventoryQueueBound:
 
     def test_overflow_drops_oldest_and_bumps_counter(self) -> None:
         # Construct a cache but never hydrate, so apply_event events
-        # all queue.  Send more events than the cap; oldest get
-        # dropped; counter bumps.
+        # all queue.  Send more events than the cap; oldest-by-
+        # *timestamp* get dropped; counter bumps.
         from fido.comment_cache import _PRE_INVENTORY_QUEUE_LIMIT
 
         cache = CommentCache("owner/repo", _FakeGH(), 7)
-        # Queue cap + 5 events; expect 5 oldest dropped, last one
-        # we apply is kept.
+        # Queue cap + 5 events; expect 5 oldest dropped, newer ones kept.
         for cid in range(_PRE_INVENTORY_QUEUE_LIMIT + 5):
-            # Stagger timestamps minute-by-minute so cap-eviction
-            # order is well-defined; oldest is the first sent.
+            # Stagger timestamps so cap-eviction order is well-defined.
             mm = cid // 60
             ss = cid % 60
             cache.apply_event(
@@ -728,10 +726,52 @@ class TestPreInventoryQueueBound:
             )
         metrics = cache.metrics()
         assert metrics.events_dropped_queue_overflow == 5
-        # Hydrate and confirm the SURVIVING events are the newest 1000.
         cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
-        # The oldest 5 ids (1000..1004) dropped; ids 1005..1004+1000 kept.
-        # First surviving id = 1005, last = 1000 + _PRE_INVENTORY_QUEUE_LIMIT + 4
-        assert cache.get(KIND_ISSUES, 1000) is None  # oldest, dropped
-        assert cache.get(KIND_ISSUES, 1004) is None  # also dropped
-        assert cache.get(KIND_ISSUES, 1005) is not None  # first survivor
+        # The 5 oldest-timestamped ids (1000..1004) dropped; the rest survive.
+        assert cache.get(KIND_ISSUES, 1000) is None
+        assert cache.get(KIND_ISSUES, 1004) is None
+        assert cache.get(KIND_ISSUES, 1005) is not None
+
+    def test_overflow_evicts_by_timestamp_not_arrival(self) -> None:
+        # Codex P2 follow-up on #1766: ``load_inventory`` drains the
+        # queue sorted by timestamp, so eviction must drop the
+        # oldest-timestamp entry — not the earliest arrival.
+        # Otherwise out-of-order delivery could discard a newer
+        # update while keeping older stale events.
+        from fido.comment_cache import _PRE_INVENTORY_QUEUE_LIMIT
+
+        cache = CommentCache("owner/repo", _FakeGH(), 7)
+        # Fill the queue to the cap with NEWER timestamps...
+        for cid in range(_PRE_INVENTORY_QUEUE_LIMIT):
+            cache.apply_event(
+                "issue_comment",
+                {
+                    "action": "created",
+                    "issue": {"number": 7},
+                    "comment": _comment_payload(
+                        item=7,
+                        comment_id=2000 + cid,
+                        updated_at="2024-07-01T00:00:00Z",
+                    ),
+                },
+            )
+        # ...then send an OLDER-timestamped event (e.g. delayed
+        # delivery).  It arrives LAST but its timestamp is the
+        # smallest — that's the one that should get evicted.
+        cache.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": _comment_payload(
+                    item=7,
+                    comment_id=9999,
+                    updated_at="2024-01-01T00:00:00Z",  # very old
+                ),
+            },
+        )
+        cache.hydrate(datetime(2024, 8, 1, tzinfo=timezone.utc))
+        # The old-mtime event was the one evicted (not the earliest
+        # arrival).  All the newer-mtime events survive.
+        assert cache.get(KIND_ISSUES, 9999) is None  # evicted by mtime
+        assert cache.get(KIND_ISSUES, 2000) is not None  # earliest arrival, survives
