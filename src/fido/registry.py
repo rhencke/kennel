@@ -1143,18 +1143,22 @@ def make_registry(
     gh: GitHub,
     config: Config | None = None,
     *,
-    dispatchers: "dict[str, Dispatcher]",
+    dispatcher_factory: "Callable[[RepoConfig, WorkerRegistry], Dispatcher]",
     state_updater: "AtomicUpdater[FidoState]",
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
-) -> WorkerRegistry:
-    """Create a :class:`WorkerRegistry` and start threads for all repos.
+) -> "tuple[WorkerRegistry, dict[str, Dispatcher]]":
+    """Create a :class:`WorkerRegistry`, build per-repo dispatchers, start threads.
 
-    Uses :func:`_make_thread` as the factory; all threads share the provided
-    :class:`~fido.github.GitHub` client.  The caller (composition root) is
-    responsible for creating the atomic cell via :func:`~fido.atomic.create_atomic`
-    and passing the updater face here.  Pass a custom registry directly
-    (with a mock factory) in tests instead of calling this.
+    Dispatchers are built *after* the registry exists so they can receive it
+    via constructor-DI (#1760 INV-6 — `Dispatcher.backfill_missed_pr_comments`
+    routes comment fetches through the per-(repo, item) `CommentCache`).  The
+    ``dispatcher_factory`` callback receives the registry and the per-repo
+    config and returns a fully-constructed :class:`Dispatcher` instance.
+
+    Returns ``(registry, dispatchers)``; the caller owns both for placement
+    onto :class:`~fido.server.WebhookHandler`.
     """
+    dispatchers: dict[str, Dispatcher] = {}
 
     def factory(
         cfg: RepoConfig,
@@ -1175,5 +1179,6 @@ def make_registry(
 
     registry = WorkerRegistry(factory, state_updater)
     for repo_cfg in repos.values():
+        dispatchers[repo_cfg.name] = dispatcher_factory(repo_cfg, registry)
         registry.start(repo_cfg)
-    return registry
+    return registry, dispatchers

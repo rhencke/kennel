@@ -28,6 +28,7 @@ from fido.appstate import (
 )
 from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
+from fido.comment_cache import CommentCache
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import HarnessCommitter
@@ -253,6 +254,10 @@ class ActivityReporter(Protocol):
     def tasks_for(self, repo_name: str) -> Tasks: ...
 
     def state_for(self, repo_name: str) -> State: ...
+
+    def get_comment_cache(
+        self, repo_name: str, item: int, gh: GitHub
+    ) -> CommentCache: ...
 
 
 class LockHeld(Exception):

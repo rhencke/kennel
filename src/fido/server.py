@@ -1331,7 +1331,9 @@ def run(
     *,
     _from_args: Callable[..., Config] = Config.from_args,
     _HTTPServer: Callable[..., HTTPServer] = FidoHTTPServer,
-    _make_registry: Callable[..., WorkerRegistry] = make_registry,
+    _make_registry: Callable[..., tuple[WorkerRegistry, dict[str, Dispatcher]]] = (
+        make_registry
+    ),
     _path_home: Callable[[], Path] = Path.home,
     _basic_config: Callable[..., None] = logging.basicConfig,
     _stderr: IO[str] = sys.stderr,
@@ -1406,11 +1408,6 @@ def run(
     # Composition root sets the class-level lazy collaborator; the proper
     # constructor-DI redo is tracked in #1762.
     WebhookHandler._gh = gh  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-    dispatchers = {
-        name: Dispatcher(config, repo_cfg, gh)
-        for name, repo_cfg in config.repos.items()
-    }
-    WebhookHandler.dispatchers = dispatchers
     WebhookHandler.static_files = StaticFiles(
         Path(__file__).resolve().parent / "static"
     )
@@ -1430,9 +1427,21 @@ def run(
             process_started_at=process_started_at,
         )
     )
-    registry = _make_registry(
-        config.repos, gh, config, dispatchers=dispatchers, state_updater=state_updater
+
+    # Dispatchers are constructed inside _make_registry so each one can
+    # receive the registry via constructor-DI — Dispatcher needs it for
+    # CommentCache routing (INV-6 of #1748).
+    def _build_dispatcher(repo_cfg: RepoConfig, reg: WorkerRegistry) -> Dispatcher:
+        return Dispatcher(config, repo_cfg, gh, reg)
+
+    registry, dispatchers = _make_registry(
+        config.repos,
+        gh,
+        config,
+        dispatcher_factory=_build_dispatcher,
+        state_updater=state_updater,
     )
+    WebhookHandler.dispatchers = dispatchers
     WebhookHandler.registry = registry
     WebhookHandler.state_reader = state_reader
     # Bootstrap issue caches eagerly so the picker has populated data immediately —

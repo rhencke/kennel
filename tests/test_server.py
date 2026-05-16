@@ -234,7 +234,9 @@ def server(tmp_path: Path) -> object:
     WebhookHandler.registry = MagicMock()
     WebhookHandler.state_reader = MagicMock()
     WebhookHandler._gh = MagicMock()
-    WebhookHandler.dispatchers = {"owner/repo": Dispatcher(cfg, repo_cfg, MagicMock())}
+    WebhookHandler.dispatchers = {
+        "owner/repo": Dispatcher(cfg, repo_cfg, MagicMock(), MagicMock())
+    }
     WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
     port = srv.server_address[1]
@@ -3166,7 +3168,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3213,7 +3215,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3245,7 +3247,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3277,7 +3279,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3319,7 +3321,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3351,7 +3353,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3380,7 +3382,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _stderr=mock_stderr,
@@ -3424,7 +3426,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3470,7 +3472,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3494,7 +3496,7 @@ class TestRun:
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         mock_registry = MagicMock()
-        mock_make_registry = MagicMock(return_value=mock_registry)
+        mock_make_registry = MagicMock(return_value=(mock_registry, {}))
         mock_watchdog_cls = MagicMock()
 
         run(
@@ -3524,7 +3526,7 @@ class TestRun:
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
-        mock_make_registry = MagicMock(return_value=MagicMock())
+        mock_make_registry = MagicMock(return_value=(MagicMock(), {}))
         mock_rl_cls = MagicMock()
         mock_gh_instance = MagicMock()
 
@@ -3557,6 +3559,42 @@ class TestRun:
         assert rl_args[1] is mock_make_registry.call_args.kwargs["state_updater"]
         mock_rl_cls.return_value.start_thread.assert_called_once()
 
+    def test_run_dispatcher_factory_builds_dispatcher_with_registry(
+        self, tmp_path: Path
+    ) -> None:
+        """INV-6: ``run`` passes a ``dispatcher_factory`` to ``make_registry``;
+        invoking it must produce a :class:`Dispatcher` wired with the registry
+        so :meth:`Dispatcher.backfill_missed_pr_comments` can reach the
+        per-(repo, item) :class:`CommentCache`."""
+        from fido.events import Dispatcher
+        from fido.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_make_registry = MagicMock(return_value=(MagicMock(), {}))
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=mock_make_registry,
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
+            _ProviderPressureMonitor=MagicMock(),
+            _RateLimitMonitor=MagicMock(),
+        )
+
+        factory = mock_make_registry.call_args.kwargs["dispatcher_factory"]
+        repo_cfg = next(iter(fake_cfg.repos.values()))
+        produced = factory(repo_cfg, MagicMock())
+        assert isinstance(produced, Dispatcher)
+
     def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(
         self, tmp_path: Path
     ) -> None:
@@ -3566,7 +3604,7 @@ class TestRun:
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         mock_registry = MagicMock()
-        mock_make_registry = MagicMock(return_value=mock_registry)
+        mock_make_registry = MagicMock(return_value=(mock_registry, {}))
         mock_reconcile_cls = MagicMock()
         mock_gh_instance = MagicMock()
 
@@ -3611,7 +3649,7 @@ class TestRun:
             run(
                 _from_args=lambda: fake_cfg,
                 _HTTPServer=lambda *a, **kw: mock_server,
-                _make_registry=MagicMock(),
+                _make_registry=MagicMock(return_value=(MagicMock(), {})),
                 _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
@@ -3668,7 +3706,7 @@ class TestRun:
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         mock_registry = MagicMock()
-        mock_make_registry = MagicMock(return_value=mock_registry)
+        mock_make_registry = MagicMock(return_value=(mock_registry, {}))
         mock_bootstrap = MagicMock()
         mock_gh_instance = MagicMock()
 
@@ -3913,7 +3951,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3946,7 +3984,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3979,7 +4017,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -4012,7 +4050,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
+            _make_registry=MagicMock(return_value=(MagicMock(), {})),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -4044,7 +4082,7 @@ class TestPreflightRepoIdentity:
             run(
                 _from_args=lambda: fake_cfg,
                 _HTTPServer=lambda *a, **kw: mock_server,
-                _make_registry=MagicMock(),
+                _make_registry=MagicMock(return_value=(MagicMock(), {})),
                 _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
@@ -4334,7 +4372,7 @@ class TestSelfRestart:
         WebhookHandler.config = cfg
         WebhookHandler.registry = mock_registry
         WebhookHandler.dispatchers = {
-            "owner/fido": Dispatcher(cfg, repo_cfg, MagicMock())
+            "owner/fido": Dispatcher(cfg, repo_cfg, MagicMock(), MagicMock())
         }
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]

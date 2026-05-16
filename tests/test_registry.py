@@ -1150,14 +1150,14 @@ class TestMakeRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        result = make_registry(
+        registry, _dispatchers = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
-            dispatchers={},
+            dispatcher_factory=lambda _c, _r: MagicMock(),
             state_updater=updater,
             _thread_factory=MagicMock(return_value=mock_thread),
         )
-        assert isinstance(result, WorkerRegistry)
+        assert isinstance(registry, WorkerRegistry)
 
     def test_starts_thread_for_each_repo(self, tmp_path: Path) -> None:
         cfg1 = _repo("foo/bar", tmp_path)
@@ -1174,7 +1174,7 @@ class TestMakeRegistry:
         make_registry(
             {"foo/bar": cfg1, "foo/baz": cfg2},
             MagicMock(),
-            dispatchers={},
+            dispatcher_factory=lambda _c, _r: MagicMock(),
             state_updater=updater,
             _thread_factory=mock_factory,
         )
@@ -1189,9 +1189,14 @@ class TestMakeRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        result = make_registry({}, MagicMock(), dispatchers={}, state_updater=updater)
-        assert isinstance(result, WorkerRegistry)
-        assert result.is_alive("anything") is False
+        registry, _dispatchers = make_registry(
+            {},
+            MagicMock(),
+            dispatcher_factory=lambda _c, _r: MagicMock(),
+            state_updater=updater,
+        )
+        assert isinstance(registry, WorkerRegistry)
+        assert registry.is_alive("anything") is False
 
     def test_wakes_registered_repos(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
@@ -1204,10 +1209,10 @@ class TestMakeRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        reg = make_registry(
+        reg, _dispatchers = make_registry(
             {"foo/bar": cfg},
             MagicMock(),
-            dispatchers={},
+            dispatcher_factory=lambda _c, _r: MagicMock(),
             state_updater=updater,
             _thread_factory=MagicMock(return_value=mock_thread),
         )
@@ -1237,7 +1242,7 @@ class TestMakeRegistry:
             {"foo/bar": cfg},
             MagicMock(),
             config,
-            dispatchers={},
+            dispatcher_factory=lambda _c, _r: MagicMock(),
             state_updater=updater,
             _thread_factory=mock_factory,
         )
@@ -1257,7 +1262,7 @@ class TestMakeRegistry:
         make_registry(
             {"foo/bar": cfg},
             MagicMock(),
-            dispatchers={},
+            dispatcher_factory=lambda _c, _r: MagicMock(),
             state_updater=updater,
             _thread_factory=mock_factory,
         )
