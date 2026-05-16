@@ -2428,6 +2428,44 @@ class TestCommentCacheRegistry:
         after = reader.get().repos["foo/bar"].comment_caches
         assert after is before  # no FidoState mutation
 
+    def test_hydrate_failure_publishes_unloaded_cache(self) -> None:
+        """Codex P2 follow-up on #1758: hydrate failure must publish
+        the un-loaded cache so SCADA shows the stuck instance and
+        its queue-overflow / staleness counters during the outage."""
+        import requests
+
+        reg, reader = self._reg("foo/bar")
+        gh = MagicMock()
+        gh.get_issue_comments.side_effect = requests.RequestException("boom")
+        reg.get_comment_cache("foo/bar", 7, gh)
+        caches = reader.get().repos["foo/bar"].comment_caches
+        assert 7 in caches
+        assert caches[7].loaded is False
+
+    def test_start_republishes_existing_comment_caches(self, tmp_path: Path) -> None:
+        """Codex P2 follow-up on #1758: ``WorkerRegistry.start()``
+        resets the per-repo SCADA leaf to zero, but live
+        CommentCache instances in ``_comment_caches`` survive crash
+        recovery (registry-lifetime).  ``start()`` must republish so
+        ``/status.json`` doesn't go blank until the next mutation —
+        mirror of the existing IssueCache restart republish."""
+        reg, reader = self._reg("foo/bar")
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = []
+        gh.get_pull_comments.return_value = []
+        gh.get_pull_reviews.return_value = []
+        reg.get_comment_cache("foo/bar", 7, gh)
+        assert 7 in reader.get().repos["foo/bar"].comment_caches
+        # Simulate a worker start (e.g. crash recovery): zero_repo_state
+        # wipes the leaf back to ``frozendict()``.
+        reg._state_updater.update(  # noqa: SLF001
+            lambda root: root.repos["foo/bar"].comment_caches, frozendict()
+        )
+        assert reader.get().repos["foo/bar"].comment_caches == frozendict()
+        # Re-run start against a real (git-initialised) work_dir.
+        reg.start(_repo("foo/bar", tmp_path))
+        assert 7 in reader.get().repos["foo/bar"].comment_caches
+
     def test_late_publisher_from_destroyed_cache_does_not_resurrect(self) -> None:
         """A destroyed cache instance held by a concurrent webhook
         handler can still mutate (its on_change fires), but the

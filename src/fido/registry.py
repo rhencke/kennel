@@ -344,6 +344,13 @@ class WorkerRegistry:
             existing_cache = self._issue_caches.get(repo_cfg.name)
         if existing_cache is not None:
             existing_cache._notify_change()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        # Same crash-recovery republish for comment caches (codex P2
+        # follow-up on #1758): ``zero_repo_state`` above reset
+        # ``comment_caches`` to ``frozendict()``, but the live
+        # CommentCache instances in ``_comment_caches`` survive
+        # the restart.  Republish so /status.json reflects them
+        # without waiting for the next cache mutation.
+        self._publish_comment_caches(repo_cfg.name)
         thread.start()
         self._publish_thread_snapshot(repo_cfg.name)
         self._publish_provider_snapshot(repo_cfg.name)
@@ -1008,6 +1015,14 @@ class WorkerRegistry:
                     repo_name,
                     item,
                 )
+                # Surface the un-loaded cache in SCADA (codex P2
+                # follow-up on #1758): otherwise the stuck cache
+                # with its queue-overflow / staleness counters is
+                # invisible during the very outage that makes it
+                # worth watching.  Successful hydrate fires
+                # on_change via load_inventory; the failure path
+                # has to publish manually.
+                self._publish_comment_caches(repo_name)
         return cache
 
     def all_comment_caches(self) -> list[CommentCache]:
@@ -1061,22 +1076,32 @@ class WorkerRegistry:
 
         Mirror of :meth:`_publish_webhook_activities`: the
         authoritative state is the registry's ``_comment_caches``
-        map; this method serialises a snapshot under
-        ``_comment_cache_lock``, then releases the lock before the
-        state-updater CAS.
+        map; this method serialises a snapshot and the state-updater
+        CAS together so concurrent membership changes can't have
+        their compute interleaved with someone else's publish
+        (codex P1 follow-up on #1758: a publisher that snapshotted
+        before a peer's ``destroy_comment_cache`` could otherwise
+        write a stale dict — including the destroyed item — after
+        the destroy's publish committed, resurrecting the dead
+        cache in /status.json).
+
+        Holds ``_comment_cache_lock`` through the
+        ``state_updater.update`` call.  The CAS is microseconds;
+        the lock-ordering rule "_comment_cache_lock before any
+        cache._lock (acquired by metrics()) before the atomic
+        cell's internal lock" is preserved throughout the registry.
         """
         with self._comment_cache_lock:
-            caches_for_repo = {
-                item: cache
-                for (name, item), cache in self._comment_caches.items()
-                if name == repo_name
-            }
-        snaps = frozendict(
-            {item: _comment_cache_snapshot(c) for item, c in caches_for_repo.items()}
-        )
-        self._state_updater.update(
-            lambda root: root.repos[repo_name].comment_caches, snaps
-        )
+            snaps = frozendict(
+                {
+                    item: _comment_cache_snapshot(cache)
+                    for (name, item), cache in self._comment_caches.items()
+                    if name == repo_name
+                }
+            )
+            self._state_updater.update(
+                lambda root: root.repos[repo_name].comment_caches, snaps
+            )
 
 
 def _make_thread(
