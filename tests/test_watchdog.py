@@ -12,7 +12,8 @@ from fido.provider import ProviderID
 from fido.watchdog import (
     _RECONCILE_INTERVAL,  # noqa: PLC2701
     _STALE_THRESHOLD,  # noqa: PLC2701
-    ReconcileWatchdog,
+    CommentReconcileWatchdog,
+    IssueReconcileWatchdog,
     Watchdog,
     run,
 )
@@ -215,14 +216,14 @@ class TestModuleLevelRun:
         assert run(_registry(), {"owner/repo": _repo()}) == 0
 
 
-# ── ReconcileWatchdog (closes #812) ───────────────────────────────────────────
+# ── IssueReconcileWatchdog (closes #812) ───────────────────────────────────────────
 
 
 def _reconcile(
     repos: dict[str, RepoConfig] | None = None,
     *,
     cache_loaded: bool = True,
-) -> tuple[ReconcileWatchdog, MagicMock, MagicMock, MagicMock]:
+) -> tuple[IssueReconcileWatchdog, MagicMock, MagicMock, MagicMock]:
     if repos is None:
         repos = {"owner/repo": _repo()}
     registry = MagicMock()
@@ -230,10 +231,10 @@ def _reconcile(
     cache.is_loaded = cache_loaded
     registry.get_issue_cache.return_value = cache
     gh = MagicMock()
-    return ReconcileWatchdog(registry, repos, gh), registry, cache, gh
+    return IssueReconcileWatchdog(registry, repos, gh), registry, cache, gh
 
 
-class TestReconcileWatchdogRun:
+class TestIssueReconcileWatchdogRun:
     def test_returns_zero(self) -> None:
         rw, _registry, _cache, gh = _reconcile(cache_loaded=False)
         assert rw.run() == 0
@@ -291,16 +292,16 @@ class TestReconcileWatchdogRun:
         assert gh.find_all_open_issues.call_count == 2
 
 
-class TestReconcileWatchdogStartThread:
+class TestIssueReconcileWatchdogStartThread:
     def test_returns_daemon_thread(self) -> None:
         rw, _registry, _cache, _gh = _reconcile(cache_loaded=False)
         t = rw.start_thread(_interval=60.0)
         assert t.daemon
 
-    def test_thread_name_is_reconcile_watchdog(self) -> None:
+    def test_thread_name_is_issue_reconcile_watchdog(self) -> None:
         rw, _registry, _cache, _gh = _reconcile(cache_loaded=False)
         t = rw.start_thread(_interval=60.0)
-        assert t.name == "reconcile-watchdog"
+        assert t.name == "issue-reconcile-watchdog"
 
     def test_thread_is_alive(self) -> None:
         rw, _registry, _cache, _gh = _reconcile(cache_loaded=False)
@@ -317,3 +318,92 @@ class TestReconcileWatchdogStartThread:
 class TestReconcileInterval:
     def test_default_interval_is_one_hour(self) -> None:
         assert _RECONCILE_INTERVAL == 3600.0
+
+
+# ── CommentReconcileWatchdog (closes #1759) ───────────────────────────────
+
+
+def _comment_watchdog(
+    *, caches: list[MagicMock] | None = None
+) -> tuple[CommentReconcileWatchdog, MagicMock]:
+    registry = MagicMock()
+    registry.all_comment_caches.return_value = caches or []
+    return CommentReconcileWatchdog(registry), registry
+
+
+def _live_comment_cache(
+    *,
+    item: int = 7,
+    repo_name: str = "owner/repo#7",
+    loaded: bool = True,
+) -> MagicMock:
+    """A mock CommentCache shaped like the production one."""
+    cache = MagicMock()
+    cache.is_loaded = loaded
+    metrics = MagicMock()
+    metrics.item = item
+    metrics.repo_name = repo_name
+    cache.metrics.return_value = metrics
+    return cache
+
+
+class TestCommentReconcileWatchdogRun:
+    def test_returns_zero_with_no_caches(self) -> None:
+        rw, _registry = _comment_watchdog()
+        assert rw.run() == 0
+
+    def test_skips_unloaded_cache(self) -> None:
+        cache = _live_comment_cache(loaded=False)
+        rw, _registry = _comment_watchdog(caches=[cache])
+        rw.run()
+        cache.refresh.assert_not_called()
+
+    def test_refreshes_loaded_cache(self) -> None:
+        cache = _live_comment_cache()
+        rw, _registry = _comment_watchdog(caches=[cache])
+        rw.run()
+        cache.refresh.assert_called_once()
+        # snapshot_started_at is a positional datetime arg.
+        ts = cache.refresh.call_args.args[0]
+        assert ts.tzinfo is not None
+
+    def test_continues_to_next_cache_when_refresh_raises(self) -> None:
+        """Transient errors swallowed; next cache still refreshes."""
+        a = _live_comment_cache(item=7)
+        b = _live_comment_cache(item=8)
+        a.refresh.side_effect = requests.RequestException("rate limited")
+        rw, _registry = _comment_watchdog(caches=[a, b])
+        rw.run()
+        b.refresh.assert_called_once()
+
+    def test_logic_bug_propagates(self) -> None:
+        """Logic bugs (e.g. KeyError) propagate so the thread crashes
+        loudly rather than silently corrupting."""
+        cache = _live_comment_cache()
+        cache.refresh.side_effect = KeyError("unexpected")
+        rw, _registry = _comment_watchdog(caches=[cache])
+        with pytest.raises(KeyError):
+            rw.run()
+
+
+class TestCommentReconcileWatchdogStartThread:
+    def test_returns_daemon_thread(self) -> None:
+        rw, _registry = _comment_watchdog()
+        t = rw.start_thread(_interval=60.0)
+        assert t.daemon
+
+    def test_thread_name_is_comment_reconcile_watchdog(self) -> None:
+        rw, _registry = _comment_watchdog()
+        t = rw.start_thread(_interval=60.0)
+        assert t.name == "comment-reconcile-watchdog"
+
+    def test_thread_is_alive(self) -> None:
+        rw, _registry = _comment_watchdog()
+        t = rw.start_thread(_interval=60.0)
+        assert t.is_alive()
+
+    def test_calls_run_periodically(self) -> None:
+        rw, registry = _comment_watchdog()
+        rw.start_thread(_interval=0.01)
+        time.sleep(0.1)
+        registry.all_comment_caches.assert_called()

@@ -253,12 +253,12 @@ _ZERO_TASK_LIST = TaskListSnapshot(
 
 @dataclass(frozen=True, slots=True)
 class IssueCacheSnapshot:
-    """Immutable snapshot of one repo's :class:`~fido.issue_cache.IssueTreeCache`
+    """Immutable snapshot of one repo's :class:`~fido.issue_cache.IssueCache`
     health for the SCADA display path.
 
     Mirrors the public fields of :class:`~fido.issue_cache.CacheMetrics`
     as JSON-friendly primitives.  Published by
-    :class:`~fido.issue_cache.IssueTreeCache` after every mutation
+    :class:`~fido.issue_cache.IssueCache` after every mutation
     (load_inventory / apply_event / reconcile_with_inventory) via the
     ``on_change`` callback supplied at construction (#1696 parity).
 

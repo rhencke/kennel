@@ -44,7 +44,7 @@ class IssueNode:
 
     ``sub_issues`` is the ordered list of *all* sub-issue numbers
     (including ones that have since closed); openness is determined at
-    query time by membership in :attr:`IssueTreeCache._nodes`.  Storing
+    query time by membership in :attr:`IssueCache._nodes`.  Storing
     closed children's numbers preserves the original GitHub ordering for
     strict first-priority descent — GitHub doesn't reorder when a child
     closes, and neither do we.
@@ -74,7 +74,7 @@ class CacheMetrics:
     last_reconcile_drift: int
 
 
-class IssueTreeCache(WebhookCache[int, IssueNode, CacheMetrics]):
+class IssueCache(WebhookCache[int, IssueNode, CacheMetrics]):
     """Per-repo issue tree cache populated by inventory + webhook events.
 
     Lifecycle:
@@ -344,5 +344,5 @@ def _copy_node(node: IssueNode) -> IssueNode:
 __all__ = [
     "CacheMetrics",
     "IssueNode",
-    "IssueTreeCache",
+    "IssueCache",
 ]

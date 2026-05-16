@@ -3510,7 +3510,7 @@ class TestRun:
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
             _Watchdog=mock_watchdog_cls,
-            _ReconcileWatchdog=MagicMock(),
+            _IssueReconcileWatchdog=MagicMock(),
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
         )
@@ -3541,7 +3541,7 @@ class TestRun:
             _preflight_gh_auth=MagicMock(),
             _GitHub=lambda: mock_gh_instance,
             _Watchdog=MagicMock(),
-            _ReconcileWatchdog=MagicMock(),
+            _IssueReconcileWatchdog=MagicMock(),
             _RateLimitMonitor=mock_rl_cls,
             _ProviderPressureMonitor=MagicMock(),
         )
@@ -3583,7 +3583,7 @@ class TestRun:
             _preflight_gh_auth=MagicMock(),
             _GitHub=lambda: mock_gh_instance,
             _Watchdog=MagicMock(),
-            _ReconcileWatchdog=mock_reconcile_cls,
+            _IssueReconcileWatchdog=mock_reconcile_cls,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
         )
@@ -3685,7 +3685,7 @@ class TestRun:
             _preflight_gh_auth=MagicMock(),
             _GitHub=lambda: mock_gh_instance,
             _Watchdog=MagicMock(),
-            _ReconcileWatchdog=MagicMock(),
+            _IssueReconcileWatchdog=MagicMock(),
             _bootstrap_issue_caches=mock_bootstrap,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),

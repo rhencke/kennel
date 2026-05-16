@@ -66,7 +66,8 @@ from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks
 from fido.watchdog import (
-    ReconcileWatchdog,
+    CommentReconcileWatchdog,
+    IssueReconcileWatchdog,
     Watchdog,
 )
 from fido.worker import RepoContextFilter
@@ -632,7 +633,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self, event: str, payload: dict[str, Any], repo_cfg: RepoConfig
     ) -> None:
         """Translate the webhook to a cache event and apply it to the
-        per-repo :class:`~fido.issue_cache.IssueTreeCache` (#812).
+        per-repo :class:`~fido.issue_cache.IssueCache` (#812).
 
         No-op when the event isn't picker-relevant (translator returns
         ``None``).  No-op also when the cache hasn't been initialized —
@@ -1285,7 +1286,7 @@ def bootstrap_issue_caches(
     gh: GitHub,
     registry: WorkerRegistry,
 ) -> None:
-    """Bootstrap every per-repo :class:`~fido.issue_cache.IssueTreeCache` at startup (#837).
+    """Bootstrap every per-repo :class:`~fido.issue_cache.IssueCache` at startup (#837).
 
     Called once in :func:`run` after the registry is created but before the
     watchdog threads start.  Each repo gets a fresh ``find_all_open_issues``
@@ -1298,7 +1299,7 @@ def bootstrap_issue_caches(
 
     Per-repo failures are swallowed (logged, not raised): a single GitHub
     API hiccup must not prevent fido from starting.  The hourly
-    :class:`~fido.watchdog.ReconcileWatchdog` will heal any cold repo
+    :class:`~fido.watchdog.IssueReconcileWatchdog` will heal any cold repo
     within the hour.
     """
     for name in repos:
@@ -1316,12 +1317,12 @@ def bootstrap_issue_caches(
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
         ):
-            # Transient GitHub/network failure — ReconcileWatchdog heals within
+            # Transient GitHub/network failure — IssueReconcileWatchdog heals within
             # the hour.  Auth errors (RuntimeError) and logic bugs are NOT
             # caught; they crash startup loud so misconfiguration is visible.
             log.exception(
                 "startup: failed to bootstrap issue cache for %s — "
-                "ReconcileWatchdog will heal within the hour",
+                "IssueReconcileWatchdog will heal within the hour",
                 name,
             )
 
@@ -1338,7 +1339,10 @@ def run(
     _signal: Callable[..., Any] = signal.signal,
     _kill_active_children: Callable[..., None] = kill_active_children,
     _Watchdog: type[Watchdog] = Watchdog,
-    _ReconcileWatchdog: type[ReconcileWatchdog] = ReconcileWatchdog,
+    _IssueReconcileWatchdog: type[IssueReconcileWatchdog] = IssueReconcileWatchdog,
+    _CommentReconcileWatchdog: type[
+        CommentReconcileWatchdog
+    ] = CommentReconcileWatchdog,
     _SessionLockWatchdog: type[SessionLockWatchdog] = SessionLockWatchdog,
     _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
     _ProviderPressureMonitor: type[ProviderPressureMonitor] = ProviderPressureMonitor,
@@ -1443,7 +1447,11 @@ def run(
     # ClaudeSession (closes #479 — "one claude per repo" invariant).
     provider.set_session_resolver(registry.get_session)
     _Watchdog(registry, config.repos).start_thread()
-    _ReconcileWatchdog(registry, config.repos, gh).start_thread()
+    _IssueReconcileWatchdog(registry, config.repos, gh).start_thread()
+    # Per-(repo, item) CommentCache reconcile (#1759) — analog to the
+    # IssueReconcileWatchdog.  Iterates every live CommentCache and
+    # calls ``refresh`` to heal drift from missed webhook deliveries.
+    _CommentReconcileWatchdog(registry).start_thread()
     # Session-lock watchdog evicts FSM lock holders that have parked past
     # the deadline — without it, a holder wedged inside
     # ``consume_until_result`` on a streaming-forever subprocess holds

@@ -20,7 +20,7 @@ from fido.appstate import (
 )
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig, RepoMembership
-from fido.issue_cache import IssueNode, IssueTreeCache
+from fido.issue_cache import IssueCache, IssueNode
 from fido.prompts import Prompts
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
@@ -135,7 +135,7 @@ class Worker(_WorkerBase):
                 membership=kwargs.get("membership"),
             )
         if "issue_cache" not in kwargs:
-            kwargs["issue_cache"] = IssueTreeCache(kwargs.get("repo_name", "test/repo"))
+            kwargs["issue_cache"] = IssueCache(kwargs.get("repo_name", "test/repo"))
         if "dispatcher" not in kwargs:
             kwargs["dispatcher"] = _FakeDispatcher()
         super().__init__(work_dir, gh, *args, **kwargs)
@@ -165,7 +165,7 @@ class WorkerThread(_WorkerThreadBase):
                 membership=kwargs.get("membership"),
             )
         if "issue_cache" not in kwargs:
-            kwargs["issue_cache"] = IssueTreeCache(repo_name)
+            kwargs["issue_cache"] = IssueCache(repo_name)
         if "dispatcher" not in kwargs:
             kwargs["dispatcher"] = _FakeDispatcher()
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
@@ -2520,7 +2520,7 @@ class TestIssueHasOpenSubIssues:
 
     def _worker(self, tmp_path: Path, inventory: list[dict] | None = None) -> Worker:
         gh = MagicMock()
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         if inventory is not None:
             cache.load_inventory(
                 inventory,
@@ -2601,7 +2601,7 @@ class TestAssertGitIdentity:
                 tmp_path,
                 gh,
                 dispatcher=_FakeDispatcher(),
-                issue_cache=IssueTreeCache("test/repo"),
+                issue_cache=IssueCache("test/repo"),
             ),
             gh,
         )
@@ -3056,7 +3056,7 @@ class TestWorkerPickFromCache:
     """``Worker._pick_from_cache`` is the cache-driven picker entry point."""
 
     def _worker_with_cache(
-        self, tmp_path: Path, cache: IssueTreeCache
+        self, tmp_path: Path, cache: IssueCache
     ) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
         provider = MagicMock()
@@ -3082,7 +3082,7 @@ class TestWorkerPickFromCache:
         )
 
     def test_picks_from_preloaded_cache_without_api_call(self, tmp_path: Path) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         cache.load_inventory(
             [
                 {
@@ -3104,7 +3104,7 @@ class TestWorkerPickFromCache:
     def test_does_not_reload_inventory_when_cache_already_loaded(
         self, tmp_path: Path
     ) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         cache.load_inventory(
             [
                 {
@@ -3124,7 +3124,7 @@ class TestWorkerPickFromCache:
         gh.find_all_open_issues.assert_not_called()
 
     def test_returns_none_when_no_candidates_for_login(self, tmp_path: Path) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         cache.load_inventory(
             [
                 {
@@ -3143,7 +3143,7 @@ class TestWorkerPickFromCache:
         gh.view_issue.assert_not_called()
 
     def test_returns_none_when_verify_says_closed(self, tmp_path: Path) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         cache.load_inventory(
             [
                 {
@@ -3165,10 +3165,10 @@ class TestWorkerPickFromCache:
 
 class TestWorkerFindNextIssueCacheBranch:
     """``Worker.find_next_issue`` selects the cache branch when an
-    :class:`IssueTreeCache` is injected (closes #812)."""
+    :class:`IssueCache` is injected (closes #812)."""
 
     def test_cache_branch_picks_via_cache_not_graphql(self, tmp_path: Path) -> None:
-        cache = IssueTreeCache("owner/repo")
+        cache = IssueCache("owner/repo")
         cache.load_inventory(
             [
                 {

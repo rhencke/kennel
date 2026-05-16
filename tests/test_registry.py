@@ -442,11 +442,11 @@ class TestWorkerRegistry:
     # ── issue tree cache (fix #812) ──────────────────────────────────────
 
     def test_get_issue_cache_creates_lazily(self) -> None:
-        from fido.issue_cache import IssueTreeCache
+        from fido.issue_cache import IssueCache
 
         reg, _, reader = self._make_registry()
         cache = reg.get_issue_cache("foo/bar")
-        assert isinstance(cache, IssueTreeCache)
+        assert isinstance(cache, IssueCache)
 
     def test_get_issue_cache_returns_same_instance(self) -> None:
         reg, _, reader = self._make_registry()
@@ -1516,7 +1516,7 @@ class TestParityPublishers:
     def test_restart_republishes_existing_issue_cache(self, tmp_path: Path) -> None:
         """Codex parity: ``zero_repo_state`` resets ``issue_cache`` to
         ``loaded=false`` on every ``start()``, but on crash recovery the
-        existing :class:`IssueTreeCache` instance is preserved.  ``start()``
+        existing :class:`IssueCache` instance is preserved.  ``start()``
         must republish the cache's current metrics so /status.json
         doesn't regress to an empty snapshot until the next mutation."""
         from datetime import datetime, timezone

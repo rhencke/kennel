@@ -1,4 +1,4 @@
-"""Translate raw GitHub webhook payloads into :class:`IssueTreeCache`
+"""Translate raw GitHub webhook payloads into :class:`IssueCache`
 event tuples (closes #812, sub-issue half closes #817).
 
 Pure value-only helper — no I/O, no cache mutation.  Caller passes the
@@ -47,7 +47,7 @@ def translate(
     event_type: str, payload: dict[str, Any]
 ) -> tuple[str, dict[str, Any]] | None:
     """Translate a webhook event to ``(cache_event_type, payload)`` for
-    :meth:`IssueTreeCache.apply_event`, or ``None`` if the event isn't
+    :meth:`IssueCache.apply_event`, or ``None`` if the event isn't
     relevant to the cache.
 
     Webhook source-of-truth shape per GitHub docs:
@@ -145,7 +145,7 @@ def _translate_sub_issues(
     Both shapes carry the same ``parent_issue`` + ``sub_issue`` snapshots,
     so we map all four actions to the existing
     ``sub_issue_added`` / ``sub_issue_removed`` cache events keyed by the
-    parent's number.  ``IssueTreeCache._handle_sub_issue_added`` already
+    parent's number.  ``IssueCache._handle_sub_issue_added`` already
     updates *both* nodes (parent.sub_issues and child.parent), so handling
     either side once is enough — and idempotent if both sides arrive.
     """

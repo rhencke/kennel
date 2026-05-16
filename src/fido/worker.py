@@ -32,7 +32,7 @@ from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import HarnessCommitter
 from fido.infra import RealProcessRunner
-from fido.issue_cache import IssueNode, IssueTreeCache
+from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts, render_active_context
 from fido.provider import (
@@ -1240,7 +1240,7 @@ class Worker:
         state_updater: AtomicUpdater[FidoState] | None = None,
         *,
         dispatcher: "Dispatcher",
-        issue_cache: IssueTreeCache,
+        issue_cache: IssueCache,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -1443,7 +1443,7 @@ class Worker:
         Called each outer iteration so fido abandons an issue that was a
         leaf at pickup but has since acquired children (e.g. fido itself
         groomed it into sub-issues, or a human added children).  Reads
-        from the per-repo :class:`IssueTreeCache` (closes #812 follow-up):
+        from the per-repo :class:`IssueCache` (closes #812 follow-up):
         a child is open iff its number is still in the cache index.
         """
         del repo  # repo is the cache's scope already
@@ -1541,7 +1541,7 @@ class Worker:
         """Find the next eligible open issue assigned to gh_user.
 
         Reads candidates + the issue tree from the per-repo
-        :class:`~fido.issue_cache.IssueTreeCache` (closes #812) — zero
+        :class:`~fido.issue_cache.IssueCache` (closes #812) — zero
         GraphQL on the steady-state pick — and verifies the chosen issue
         is still open via a single REST call before committing the
         assignment.
@@ -1609,7 +1609,7 @@ class Worker:
         """Cache-driven picker (closes #812).
 
         Reads candidates + the full issue tree from the per-repo
-        :class:`~fido.issue_cache.IssueTreeCache` — zero GraphQL on the
+        :class:`~fido.issue_cache.IssueCache` — zero GraphQL on the
         steady-state pick — and runs the same priority-rank +
         strict-first-priority descent as the old GraphQL path.
 
@@ -4596,7 +4596,7 @@ class WorkerThread(threading.Thread):
         state_updater: AtomicUpdater[FidoState] | None = None,
         *,
         dispatcher: "Dispatcher",
-        issue_cache: IssueTreeCache,
+        issue_cache: IssueCache,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir

@@ -9,14 +9,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from fido.github import GitHub
-from fido.issue_cache import IssueTreeCache
+from fido.issue_cache import IssueCache
 from fido.worker import WorkerThread
 from tests.fakes import _FakeDispatcher
 
 
 def _make_thread(tmp_path: Path, **kwargs: object) -> WorkerThread:
     gh = MagicMock(spec=GitHub)
-    kwargs.setdefault("issue_cache", IssueTreeCache("owner/repo"))
+    kwargs.setdefault("issue_cache", IssueCache("owner/repo"))
     kwargs.setdefault("dispatcher", _FakeDispatcher())
     return WorkerThread(
         tmp_path,
