@@ -40,8 +40,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
-import requests
-
 from fido.frozen import freeze_object
 from fido.github import GitHub
 from fido.webhook_cache import WebhookCache
@@ -185,35 +183,24 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
     def _fetch_full_inventory(self) -> list[dict[str, Any]]:
         """Fetch all three resource lists, tagging each item with its kind.
 
-        Each endpoint is 404-tolerant independently (codex P2 on
-        #1756): the ``/pulls/...`` endpoints 404 for plain issues,
-        but a 404 on one of them must not throw away successful
-        data from the other two.  Non-404 errors propagate.
+        Only runs against items we know to be PRs — the webhook
+        router filters non-PR ``issue_comment`` events and
+        ``bootstrap_comment_caches`` only runs for state.json items
+        with a real ``pr_number``.  So 404s from ``/pulls`` are
+        unexpected (auth/permission/network failure) and propagate
+        rather than masquerading as "plain issue, treat as empty"
+        (codex P2 follow-up on #1756 — that fallback would silently
+        produce a partial snapshot on permission errors).
         """
         raw_top_level = self._gh.get_issue_comments(self._gh_repo, self._item)
-        raw_review_comments = self._fetch_or_empty_on_404(
-            lambda: self._gh.get_pull_comments(self._gh_repo, self._item)
-        )
-        raw_reviews = self._fetch_or_empty_on_404(
-            lambda: self._gh.get_pull_reviews(self._gh_repo, self._item)
-        )
+        raw_review_comments = self._gh.get_pull_comments(self._gh_repo, self._item)
+        raw_reviews = self._gh.get_pull_reviews(self._gh_repo, self._item)
         inventory: list[dict[str, Any]] = [
             {"_kind": KIND_ISSUES, **r} for r in raw_top_level
         ]
         inventory += [{"_kind": KIND_PULLS, **r} for r in raw_review_comments]
         inventory += [{"_kind": KIND_REVIEWS, **r} for r in raw_reviews]
         return inventory
-
-    @staticmethod
-    def _fetch_or_empty_on_404(
-        fetch: Callable[[], list[dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
-        try:
-            return fetch()
-        except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                return []
-            raise
 
     # ── public lookup API ────────────────────────────────────────────────
 

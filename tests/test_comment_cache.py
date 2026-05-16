@@ -21,10 +21,8 @@ from fido.comment_cache import (
 class _FakeGH:
     """Hand-rolled GitHub fake — no MagicMock per testing convention.
 
-    Records ``get_*`` calls and serves canned responses for the three
-    hydration endpoints.  ``raise_pull_404`` flips the
-    ``get_pull_*`` methods into raising a 404 to simulate the
-    plain-issue case where ``/pulls/{n}/...`` doesn't exist.
+    Records ``get_*`` calls and serves canned responses for the
+    three hydration endpoints.
     """
 
     def __init__(self) -> None:
@@ -32,7 +30,6 @@ class _FakeGH:
         self.pull_comments: list[dict[str, Any]] = []
         self.pull_reviews: list[dict[str, Any]] = []
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
-        self.raise_pull_404: bool = False
 
     def get_issue_comments(self, repo: str, number: int) -> list[dict[str, Any]]:
         self.calls.append(("get_issue_comments", (repo, number)))
@@ -40,23 +37,11 @@ class _FakeGH:
 
     def get_pull_comments(self, repo: str, pr: int) -> list[dict[str, Any]]:
         self.calls.append(("get_pull_comments", (repo, pr)))
-        if self.raise_pull_404:
-            self._raise_404()
         return list(self.pull_comments)
 
     def get_pull_reviews(self, repo: str, pr: int) -> list[dict[str, Any]]:
         self.calls.append(("get_pull_reviews", (repo, pr)))
-        if self.raise_pull_404:
-            self._raise_404()
         return list(self.pull_reviews)
-
-    @staticmethod
-    def _raise_404() -> None:
-        import requests
-
-        response = requests.Response()
-        response.status_code = 404
-        raise requests.HTTPError(response=response)
 
 
 def _comment_payload(
@@ -472,58 +457,33 @@ class TestHydrate:
             "get_pull_reviews",
         }
 
-    def test_plain_issue_404_on_pulls_endpoints_treated_as_empty(self) -> None:
-        # /pulls/{n} 404s for plain issues — hydrate tolerates this
-        # and treats review/review-comment lists as empty.
-        gh = _FakeGH()
-        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
-        gh.raise_pull_404 = True
-        cache = CommentCache("owner/repo", gh, 7)
-        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
-        assert cache.metrics().entries_cached == 1
-        assert cache.get(KIND_ISSUES, 10) is not None
-
-    def test_404_on_reviews_only_keeps_pull_comments(self) -> None:
-        # Codex P2 on #1756: a 404 on one /pulls endpoint must not
-        # discard successful data from the other.
+    def test_pull_endpoint_errors_propagate(self) -> None:
+        # Codex P2 follow-up on #1756: all errors from /pulls
+        # endpoints propagate — including 404, which would otherwise
+        # masquerade as "plain issue, empty list" but actually
+        # signals an auth/permission problem (the router only
+        # invokes hydrate against known-PR items, so 404 here means
+        # something is genuinely wrong).
         import requests
 
-        gh = _FakeGH()
-        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
-        gh.pull_comments = [
-            _comment_payload(item=7, comment_id=100, path="a.py", body="inline"),
-        ]
+        for status in (404, 403, 503):
+            gh = _FakeGH()
+            gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
 
-        def reviews_404(repo: str, pr: int) -> list[dict[str, Any]]:
-            response = requests.Response()
-            response.status_code = 404
-            raise requests.HTTPError(response=response)
-
-        gh.get_pull_reviews = reviews_404  # type: ignore[method-assign]
-        cache = CommentCache("owner/repo", gh, 7)
-        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
-        # Top-level + pull comments survived; only reviews are empty.
-        assert cache.get(KIND_ISSUES, 10) is not None
-        assert cache.get(KIND_PULLS, 100) is not None
-        assert cache.list_reviews() == []
-
-    def test_non_404_pull_error_propagates(self) -> None:
-        import requests
-
-        class _SocketErrGH(_FakeGH):
-            def get_pull_comments(self, repo: str, pr: int) -> list[dict[str, Any]]:
+            def boom(
+                repo: str, pr: int, *, _status: int = status
+            ) -> list[dict[str, Any]]:
                 response = requests.Response()
-                response.status_code = 503
+                response.status_code = _status
                 raise requests.HTTPError(response=response)
 
-        gh = _SocketErrGH()
-        cache = CommentCache("owner/repo", gh, 7)
-        try:
-            cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
-        except requests.HTTPError:
-            pass
-        else:
-            raise AssertionError("expected HTTPError to propagate")
+            gh.get_pull_comments = boom  # type: ignore[method-assign]
+            cache = CommentCache("owner/repo", gh, 7)
+            try:
+                cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+            except requests.HTTPError:
+                continue
+            raise AssertionError(f"expected HTTPError for status {status} to propagate")
 
     def test_events_arriving_during_hydration_are_drained_in_order(self) -> None:
         # WebhookCache's pre-inventory queue catches events that
@@ -576,15 +536,6 @@ class TestRefresh:
         cache.refresh(datetime(2024, 7, 1, tzinfo=timezone.utc))
         assert cache.metrics().entries_cached == 1
         assert cache.get(KIND_ISSUES, 11) is None
-        assert cache.get(KIND_ISSUES, 10) is not None
-
-    def test_refresh_tolerates_pulls_404(self) -> None:
-        gh = _FakeGH()
-        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
-        cache = CommentCache("owner/repo", gh, 7)
-        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
-        gh.raise_pull_404 = True
-        cache.refresh(datetime(2024, 7, 1, tzinfo=timezone.utc))
         assert cache.get(KIND_ISSUES, 10) is not None
 
     def test_refresh_non_404_pull_error_propagates(self) -> None:

@@ -942,31 +942,42 @@ class WorkerRegistry:
         the cache registered in ``_comment_caches`` before hydrate
         completes and queue their events in the pre-inventory buffer,
         which drains in timestamp order at the tail of ``hydrate``.
+
+        Hydration failure handling (codex P1 follow-ups on #1756):
+
+        * The cache stays in ``_comment_caches`` with
+          ``is_loaded == False`` on hydration failure; any events
+          queued by concurrent webhooks remain in the pre-inventory
+          buffer and a later successful hydration drains them in
+          timestamp order.
+        * This method swallows-and-logs the hydration exception
+          instead of re-raising, so the caller (webhook handler)
+          can still call ``apply_event`` on the returned cache.
+          That queues the triggering event into the pre-inventory
+          buffer — otherwise the handler would return 200 to GitHub
+          (no retry) after silently losing the event that caused
+          cache creation.
+        * Next call to ``get_comment_cache`` for this key re-attempts
+          hydration; failures keep recurring until a real fix
+          arrives, with each attempt logged.
         """
         key = (repo_name, item)
-        snapshot_started_at: datetime | None = None
         with self._comment_cache_lock:
             cache = self._comment_caches.get(key)
             if cache is None:
                 cache = CommentCache(repo_name, gh, item)
                 self._comment_caches[key] = cache
-                snapshot_started_at = datetime.now(tz=timezone.utc)
-        if snapshot_started_at is not None:
+        if not cache.is_loaded:
             try:
-                cache.hydrate(snapshot_started_at)
+                cache.hydrate(datetime.now(tz=timezone.utc))
             except Exception:
-                # Hydration failed — roll back the registration so the
-                # next call retries from scratch (codex P1 on #1756:
-                # otherwise the half-built cache lingers, never gets
-                # ``inventory_loaded_at`` set, and queues webhook
-                # events into a buffer that never drains).
-                with self._comment_cache_lock:
-                    # Only remove the instance we put in, in case a
-                    # concurrent caller already installed a different
-                    # one (unlikely but cheap to guard).
-                    if self._comment_caches.get(key) is cache:
-                        del self._comment_caches[key]
-                raise
+                log.exception(
+                    "comment-cache hydration failed for %s#%d — "
+                    "events queue in the pre-inventory buffer; next "
+                    "get_comment_cache call retries",
+                    repo_name,
+                    item,
+                )
         return cache
 
     def all_comment_caches(self) -> list[CommentCache]:
