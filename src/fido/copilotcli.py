@@ -1118,9 +1118,7 @@ class CopilotCLISession(OwnedSession):
         # nothing to enforce.
         del allowed_tools
         try:
-            return self._prompt_inner(
-                content, model=model, system_prompt=system_prompt
-            )
+            return self._prompt_inner(content, model=model, system_prompt=system_prompt)
         except Exception as exc:
             # ``__enter__`` failure (or any path that didn't reach the
             # inner try/except that attaches ``cancel_observed``): no

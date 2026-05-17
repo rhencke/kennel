@@ -814,7 +814,9 @@ class CodexSession(OwnedSession):
         sandbox_policy = _sandbox_acp_policy_for_phase(allowed_tools)
         try:
             return self._prompt_inner(
-                content, model=model, system_prompt=system_prompt,
+                content,
+                model=model,
+                system_prompt=system_prompt,
                 sandbox_policy=sandbox_policy,
             )
         except Exception as exc:
@@ -844,9 +846,7 @@ class CodexSession(OwnedSession):
                 self.switch_model(model)
             try:
                 self.send(
-                    _combine_prompt(
-                        content, self._base_system_prompt, system_prompt
-                    ),
+                    _combine_prompt(content, self._base_system_prompt, system_prompt),
                     sandbox_policy=sandbox_policy,
                 )
                 result = self.consume_until_result()
