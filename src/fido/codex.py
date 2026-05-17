@@ -22,6 +22,7 @@ from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     ContextOverflowError,
     OwnedSession,
+    PromptOutcome,
     PromptSession,
     Provider,
     ProviderAgent,
@@ -792,7 +793,7 @@ class CodexSession(OwnedSession):
         model: ProviderModel | None = None,
         allowed_tools: str | None = None,
         system_prompt: str | None = None,
-    ) -> str:
+    ) -> PromptOutcome:
         # ``allowed_tools`` is part of the ``PromptSession`` protocol (closes
         # #1413).  Codex has no per-tool primitive but it does have
         # per-turn sandbox modes — we translate the protocol's allowlist
@@ -819,7 +820,12 @@ class CodexSession(OwnedSession):
                 _combine_prompt(content, self._base_system_prompt, system_prompt),
                 sandbox_policy=sandbox_policy,
             )
-            return self.consume_until_result()
+            result = self.consume_until_result()
+            # Capture the cancel bit atomically inside the session lock at
+            # the moment of return — see :class:`PromptOutcome` and PR #1793.
+            with self._state_lock:
+                cancelled = self._last_turn_cancelled
+            return PromptOutcome(result, cancelled=cancelled)
 
     def send(
         self,

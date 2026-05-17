@@ -36,6 +36,7 @@ from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.provider import (
     OwnedSession,
+    PromptOutcome,
     PromptSession,
     Provider,
     ProviderAgent,
@@ -1096,7 +1097,7 @@ class CopilotCLISession(OwnedSession):
         model: ProviderModel | None = None,
         allowed_tools: str | None = None,  # see comment below
         system_prompt: str | None = None,
-    ) -> str:
+    ) -> PromptOutcome:
         # ``allowed_tools`` is part of the ``PromptSession`` protocol (closes
         # #1413), but Copilot CLI's ACP runtime has no equivalent of
         # ``--allowedTools`` so the kwarg is informational here.  Default
@@ -1113,9 +1114,13 @@ class CopilotCLISession(OwnedSession):
             # #1793, matches the same fix in ``ClaudeSession.prompt``
             # and ``CodexSession.prompt``).
             self._last_turn_cancelled = False
-            return self._prompt_locked(
+            result = self._prompt_locked(
                 content, model=model, system_prompt=system_prompt
             )
+            # Capture the cancel bit atomically inside the session lock at
+            # the moment of return — see :class:`PromptOutcome` and PR #1793.
+            cancelled = self._last_turn_cancelled
+            return PromptOutcome(result, cancelled=cancelled)
 
     def send(self, content: str) -> None:
         self._pending_content = content

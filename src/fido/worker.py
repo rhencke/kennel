@@ -9,7 +9,7 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -534,6 +534,29 @@ def _session_turn_prompt(fido_dir: Path) -> str:
     return f"{skill}\n\n---\n\n{prompt}"
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderRunOutcome:
+    """Outcome of one :func:`provider_run` call.
+
+    Carries the cancellation bit by value so callers don't have to
+    read mutable session state after the fact — that read races with
+    the next turn's prompt-entry clear (closes the race Rob flagged on
+    PR #1793).
+
+    Iterable as ``(session_id, text)`` for existing ``session_id, output
+    = provider_run(...)`` unpacking; new code should read fields by
+    name and consult :attr:`cancelled` for preemption.
+    """
+
+    session_id: str
+    text: str
+    cancelled: bool
+
+    def __iter__(self) -> Iterator[Any]:
+        yield self.session_id
+        yield self.text
+
+
 def provider_run(
     fido_dir: Path,
     *,
@@ -544,23 +567,27 @@ def provider_run(
     cwd: Path | str = ".",
     session_mode: TurnSessionMode = TurnSessionMode.REUSE,
     retry_on_preempt: bool = True,
-) -> tuple[str, str]:
+) -> ProviderRunOutcome:
     """Continue or start a provider session, streaming progress as raw text.
 
-    When the provider agent already has an attached persistent session, the
-    prompt is sent through :meth:`ProviderAgent.run_turn` and
-    ``("", output)`` is returned — the session-id slot is always empty for
-    persistent sessions since the session is already tracked by the agent.
+    Returns a :class:`ProviderRunOutcome` carrying the assistant text, the
+    optional new one-shot session id, and the cancellation bit captured at
+    return time.  The returned object also supports ``(session_id, text)``
+    tuple unpacking for backward compatibility.
 
-    When no persistent session is attached, a new one-shot session is started
-    from *fido_dir/system* and *fido_dir/prompt*. Returns ``(session_id,
-    raw_output)`` where *raw_output* is the full provider output.
+    When the provider agent already has an attached persistent session, the
+    prompt is sent through :meth:`ProviderAgent.run_turn` and the
+    session-id slot is left empty — the session is already tracked by the
+    agent.  When no persistent session is attached, a new one-shot session
+    is started from *fido_dir/system* and *fido_dir/prompt* and the
+    cancellation bit is always ``False`` (one-shot sessions don't support
+    preemption — cancellation is only meaningful for the persistent path).
     """
     del session
     if agent is None:
         raise ValueError("provider_run requires agent")
     if agent.session is not None:
-        output = agent.run_turn(
+        outcome = agent.run_turn(
             _session_turn_prompt(fido_dir),
             model=model,
             # Task implementation: implicit ``*`` minus GLOBAL_DISALLOWED_TOOLS.
@@ -568,7 +595,12 @@ def provider_run(
             retry_on_preempt=retry_on_preempt,
             session_mode=session_mode,
         )
-        return "", output
+        # ``run_turn`` returns :class:`PromptOutcome` for real agents but
+        # test doubles may return a plain ``str``; tolerate both.
+        cancelled = bool(getattr(outcome, "cancelled", False))
+        return ProviderRunOutcome(
+            session_id="", text=str(outcome), cancelled=cancelled
+        )
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = agent.print_prompt_from_file(
@@ -581,7 +613,8 @@ def provider_run(
         allowed_tools=None,
     )
     new_session_id = agent.extract_session_id(output)
-    return new_session_id, output
+    # One-shot sessions don't support preemption.
+    return ProviderRunOutcome(session_id=new_session_id, text=output, cancelled=False)
 
 
 @dataclass(frozen=True)
@@ -3504,9 +3537,18 @@ class Worker:
         )
         self._registry.wait_for_inbox_drain(self._repo_name, timeout=30.0)
 
-    def _provider_turn_was_preempted(self) -> bool:
-        session = self._provider_agent.session
-        return bool(session is not None and session.last_turn_cancelled)
+    def _provider_turn_was_preempted(
+        self, run_outcome: ProviderRunOutcome | tuple[str, str]
+    ) -> bool:
+        """Read cancellation from the just-completed provider run.
+
+        Carries the bit by value from :func:`provider_run`'s return rather
+        than reading mutable session state — that read races with the next
+        turn's prompt-entry clear (closes the race Rob flagged on
+        PR #1793).  Tolerates plain tuples for the benefit of tests that
+        still patch ``provider_run`` to return ``(session_id, text)``.
+        """
+        return bool(getattr(run_outcome, "cancelled", False))
 
     def _has_durable_webhook_demand(self, pr_number: int) -> bool:
         """Return whether durable PR-comment demand should run before work."""
@@ -3711,7 +3753,7 @@ class Worker:
             )
             return True
         harness_committer = HarnessCommitter(self.work_dir, RealProcessRunner())
-        session_id, output = provider_run(
+        run_outcome = provider_run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -3720,8 +3762,9 @@ class Worker:
             session_mode=self._consume_turn_session_mode(),
             retry_on_preempt=False,
         )
+        session_id, output = run_outcome
         log.info("task turn done (session=%s)", session_id)
-        if self._provider_turn_was_preempted():
+        if self._provider_turn_was_preempted(run_outcome):
             log.info(
                 "task provider turn preempted for %s — yielding to worker loop",
                 repo_ctx.repo,
@@ -3889,7 +3932,7 @@ class Worker:
                     "task no longer current after webhook turn admission — stopping"
                 )
                 return True
-            session_id, output = provider_run(
+            run_outcome = provider_run(
                 fido_dir,
                 agent=self._provider_agent,
                 model=self._provider_agent.work_model,
@@ -3898,8 +3941,9 @@ class Worker:
                 session_mode=self._consume_turn_session_mode(),
                 retry_on_preempt=False,
             )
+            session_id, output = run_outcome
             log.info("task resume turn done (session=%s)", session_id)
-            if self._provider_turn_was_preempted():
+            if self._provider_turn_was_preempted(run_outcome):
                 log.info(
                     "task provider resume preempted for %s — yielding to worker loop",
                     repo_ctx.repo,

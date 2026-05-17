@@ -28,6 +28,7 @@ from fido.provider import (
     GLOBAL_DISALLOWED_TOOLS,
     READ_ONLY_ALLOWED_TOOLS,
     OwnedSession,
+    PromptOutcome,
     PromptSession,
     Provider,
     ProviderAgent,
@@ -1165,7 +1166,7 @@ class ClaudeSession(OwnedSession):
         model: ProviderModel | None = None,
         allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
-    ) -> str:
+    ) -> PromptOutcome:
         """Send *content* as a user message on the persistent session and
         return the result.
 
@@ -1252,15 +1253,24 @@ class ClaudeSession(OwnedSession):
                 body = content
             self.send(body)
             result = self.consume_until_result()
+            # Capture the sticky cancel bit atomically inside the
+            # session lock at the moment of return so the caller can
+            # observe cancellation by value (see :class:`PromptOutcome`
+            # and the race Rob flagged on PR #1793).  Reading
+            # ``self.last_turn_cancelled`` after this method returns is
+            # unsafe: the next thread to acquire the session clears
+            # the sticky bit at prompt-entry.
+            with self._stream_lock:
+                cancelled = self._last_turn_cancelled_sticky
             log.info(
                 "session.prompt: turn complete (tid=%d, total=%.2fs, "
                 "result_len=%d, cancelled=%s)",
                 tid,
                 time.monotonic() - t_start,
                 len(result or ""),
-                self.last_turn_cancelled,
+                cancelled,
             )
-            return result
+            return PromptOutcome(result, cancelled=cancelled)
 
     def switch_model(self, model: ProviderModel | str) -> None:
         """Switch the active model by respawning the claude subprocess

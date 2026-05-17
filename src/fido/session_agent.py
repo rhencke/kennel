@@ -10,6 +10,7 @@ from fido.appstate import FidoState, ProviderSnapshot
 from fido.atomic import AtomicUpdater
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
+    PromptOutcome,
     PromptSession,
     ProviderModel,
     SnapshotPublisher,
@@ -245,25 +246,22 @@ class SessionBackedAgent(SnapshotPublisher):
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
         session_mode: TurnSessionMode = TurnSessionMode.REUSE,
-    ) -> str:
+    ) -> PromptOutcome:
         session = self._resolve_turn_session(
             model=model,
             session_mode=session_mode,
         )
         attempt = 0
         while True:
-            result = self._prompt_with_recovery(
+            outcome = self._prompt_with_recovery(
                 session,
                 content,
                 model=model,
                 allowed_tools=allowed_tools,
                 system_prompt=system_prompt,
             )
-            if (
-                not retry_on_preempt
-                or getattr(session, "last_turn_cancelled", False) is not True
-            ):
-                return result
+            if not retry_on_preempt or not outcome.cancelled:
+                return outcome
             attempt += 1
             log.info(
                 "%s.run_turn: preempted mid-flight — retry %d",
@@ -347,7 +345,7 @@ class SessionBackedAgent(SnapshotPublisher):
         model: ProviderModel | None,
         allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None,
-    ) -> str:
+    ) -> PromptOutcome:
         # Cancel-survives-respawn FSM oracle (closes #1792).  Backed by the
         # proof in ``models/cancel_survives_respawn.v``: once a cancel is
         # observed in any cycle of this recovery loop, the function must
@@ -365,15 +363,33 @@ class SessionBackedAgent(SnapshotPublisher):
         recovered = False
         while True:
             try:
-                result = session.prompt(
+                raw = session.prompt(
                     content,
                     model=model,
                     allowed_tools=allowed_tools,
                     system_prompt=system_prompt,
                 )
+                # Test doubles may return a plain ``str`` rather than a
+                # :class:`PromptOutcome`; normalize by reading the
+                # session's cancel bit only as the fallback path.
+                if hasattr(raw, "cancelled"):
+                    result = raw
+                else:
+                    result = PromptOutcome(
+                        raw,
+                        cancelled=getattr(session, "last_turn_cancelled", False) is True,
+                    )
             except Exception as exc:
                 if self._prompt_failure_is_passthrough(exc):
                     raise
+                # Exception path: no :class:`PromptOutcome` was returned,
+                # so we must fall back to the session's sticky bit.
+                # This is the one site where reading the session is
+                # unavoidable — the lock-protected capture in
+                # ``session.prompt`` never ran.  The very next call to
+                # ``session.prompt`` will clear the bit at prompt-entry,
+                # so observe-and-recover here, in this single thread,
+                # before any other thread re-enters the session.
                 cancel_observed = getattr(session, "last_turn_cancelled", False) is True
                 if cancel_observed:
                     fsm_state = cancel_fsm.transition(
@@ -410,7 +426,7 @@ class SessionBackedAgent(SnapshotPublisher):
                         "returning empty so the caller observes cancellation",
                         type(self).__name__,
                     )
-                    return ""
+                    return PromptOutcome("", cancelled=True)
                 should_retry = self._should_retry_prompt_failure(exc, session)
                 if (
                     recovered
@@ -426,7 +442,7 @@ class SessionBackedAgent(SnapshotPublisher):
                     "%s: recovered session after prompt failure: %s", log_name, exc
                 )
                 continue
-            cancel_observed = getattr(session, "last_turn_cancelled", False) is True
+            cancel_observed = result.cancelled
             if cancel_observed:
                 fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.CancelFire())
                 assert fsm_state is not None
