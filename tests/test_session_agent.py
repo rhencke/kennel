@@ -263,11 +263,17 @@ class TestSessionBackedAgent:
 
         When the prompt fails because a peer thread fired a cancel
         during the in-flight turn (claude exits -2 from the interrupt
-        signal), ``_prompt_with_recovery`` MUST NOT retry on a respawned
-        session — that would silently consume the cancel intent and the
-        caller would observe a normal return, blocking the worker loop
-        from yielding to ``handle_queued_comments``.  Return empty so the
-        caller's ``last_turn_cancelled`` check fires.
+        signal), ``_prompt_with_recovery`` MUST NOT retry the *prompt*
+        on a respawned session — that would silently consume the
+        cancel intent and the caller would observe a normal return,
+        blocking the worker loop from yielding to
+        ``handle_queued_comments``.  Return empty so the caller's
+        ``last_turn_cancelled`` check fires.
+
+        Recovery of the dead session DOES happen before returning
+        (codex P1 follow-up on PR #1793) — otherwise a subsequent
+        prompt would hit the same dead-session + sticky-cancel state
+        and loop.
 
         Locked in by the FSM oracle from
         ``models/cancel_survives_respawn.v``: any path that observes
@@ -278,9 +284,12 @@ class TestSessionBackedAgent:
         session.is_alive.return_value = False
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", model=agent.voice_model) == ""
-        # Must NOT have recovered/retried — that's the bug.
-        session.recover.assert_not_called()
+        # Prompt MUST NOT have been retried — that's the bug.
         assert session.prompt.call_count == 1
+        # Session MUST have been recovered so the next caller has a
+        # live session waiting — defense in depth for the
+        # ``retry_on_preempt=True`` callers and the next worker turn.
+        session.recover.assert_called_once_with()
 
     def test_prompt_with_recovery_raises_after_second_dead_empty_result(self) -> None:
         session = MagicMock()

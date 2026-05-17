@@ -494,6 +494,12 @@ class ClaudeSession(OwnedSession):
         self._work_dir = work_dir
         self._popen_fn = popen
         self._cancel = threading.Event()
+        # Sticky cancel-observed bit for :attr:`last_turn_cancelled` — set
+        # the moment ``CancelFire`` fires inside :meth:`iter_events`,
+        # cleared at the top of the next turn alongside ``_cancel.clear()``.
+        # Survives subprocess crash so a cancel-induced exit doesn't lose
+        # the observation (#1792).  Set inside ``_stream_lock`` to be safe.
+        self._last_turn_cancelled_sticky = False
         self._repo_name = repo_name
         self._model = model_name(
             ProviderModel("claude-opus-4-6") if model is None else model
@@ -606,40 +612,35 @@ class ClaudeSession(OwnedSession):
 
     @property
     def last_turn_cancelled(self) -> bool:
-        """``True`` when the most recent :meth:`iter_events` call exited
-        early because another thread set the cancel event (preempted the
-        turn via :meth:`prompt` or :meth:`interrupt`).
+        """``True`` when the most recent :meth:`iter_events` call observed
+        a ``CancelFire`` transition on the stream FSM (i.e. a peer thread
+        preempted an in-flight turn).
 
-        Two ways the bit comes ``True``:
+        Sticky for the duration of the current turn cycle: set the
+        moment ``CancelFire`` fires inside :meth:`iter_events` and
+        cleared at the top of the next turn (alongside
+        ``self._cancel.clear()``).  Surviving the cycle is required
+        because the subprocess can die between ``CancelFire`` firing
+        and the boundary that would have closed the FSM to
+        ``Cancelled`` — without the sticky bit, a cancel-induced
+        subprocess crash would silently lose the cancel observation
+        and the recovery loop in
+        ``session_agent._prompt_with_recovery`` would retry the
+        prompt cleanly (the #1792 bug).
 
-        1. Clean preemption: the turn observed ``CancelFire`` and reached
-           its ``TurnReturn`` boundary, leaving the stream FSM in
-           ``Cancelled`` (consumed by the next :meth:`send` via
-           ``TurnReturn``).
-        2. Cancel-induced subprocess crash (#1792): the cancel event was
-           set during the turn but the subprocess exited (e.g. claude
-           exited with code -2 from the interrupt) before producing
-           ``type=result``.  ``_cancel.is_set()`` survives the crash —
-           it is only cleared at the start of the next turn (line ~1350) —
-           so this property reports cancellation faithfully even when
-           the stream FSM never reached ``Cancelled``.
+        Tied to the *FSM transition*, not to ``self._cancel.is_set()``.
+        A cancel event that races in *after* a successful turn boundary
+        but *before* the worker releases the session lock would set
+        ``_cancel`` without firing ``CancelFire``; the sticky bit stays
+        ``False`` and the property correctly reports the completed turn
+        as not cancelled (codex P1 follow-up on #1792).
 
-        Without case 2, the recovery loop in
-        ``session_agent._prompt_with_recovery`` would silently retry the
-        prompt on a respawned session, the new turn would complete
-        normally, and the worker would never observe the preemption it
-        requested.  See ``models/cancel_survives_respawn.v`` for the FSM
-        oracle that locks this in.
-
-        Callers that want resumption semantics can check this after a turn
-        and re-send the same content once the session lock is free again —
-        effectively 'hand the session back to the worker and ask it to
-        resume what it was doing'.
+        See ``models/cancel_survives_respawn.v`` for the FSM oracle
+        that locks the cancel-survives-respawn invariant in code, and
+        ``models/claude_session.v`` for the per-subprocess FSM that
+        defines ``CancelFire`` / ``Cancelled``.
         """
-        with self._stream_lock:
-            if isinstance(self._stream_state, stream_fsm.Cancelled):
-                return True
-        return self._cancel.is_set()
+        return self._last_turn_cancelled_sticky
 
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O.
@@ -1366,6 +1367,11 @@ class ClaudeSession(OwnedSession):
         # previous holder — the FSM's FIFO handler queue ensures the next
         # holder's turn starts clean without needing a separate pending flag.
         self._cancel.clear()
+        # Clear the sticky cancel-observed bit at the same boundary —
+        # see :attr:`last_turn_cancelled`.  Held only briefly without
+        # the stream lock; the bit is single-writer (only this thread's
+        # ``iter_events`` writes it).
+        self._last_turn_cancelled_sticky = False
         idle_deadline = IdleDeadline(
             self._idle_timeout,
             poll_interval=_SELECT_POLL_INTERVAL,
@@ -1409,6 +1415,11 @@ class ClaudeSession(OwnedSession):
                         )
                         assert new_state is not None
                         self._stream_state = new_state
+                        # Latch the cancel observation so the property
+                        # survives a subprocess crash that prevents the
+                        # FSM from reaching ``Cancelled`` via its normal
+                        # ``Draining → TurnReturn`` path (#1792).
+                        self._last_turn_cancelled_sticky = True
                 if in_turn:
                     try:
                         cancel_request_id = self._send_control_interrupt()

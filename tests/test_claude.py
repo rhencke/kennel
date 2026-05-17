@@ -2296,27 +2296,50 @@ class TestClaudeSessionLock:
         assert session.last_turn_cancelled is False
         session.stop()
 
-    def test_last_turn_cancelled_true_when_cancel_event_set(
-        self, tmp_path: Path
-    ) -> None:
+    def test_last_turn_cancelled_true_when_sticky_bit_set(self, tmp_path: Path) -> None:
         """Regression for #1792.
 
-        When the cancel event is set during a turn but the subprocess
-        dies (e.g. claude -2 from the interrupt signal) before the
-        stream FSM reaches its ``Cancelled`` state, the property must
-        still report cancellation — the cancel event survives the
-        crash (cleared only at the start of the next turn) and that
-        is exactly the signal the recovery loop checks before deciding
-        whether to retry the prompt.
+        The cancel-observed bit is sticky: it survives a subprocess
+        crash that prevents the stream FSM from reaching
+        ``Cancelled`` via its normal ``Draining → TurnReturn`` path.
+        The sticky bit is what
+        ``session_agent._prompt_with_recovery`` reads to decide
+        whether a prompt failure was cancel-induced (don't retry)
+        or transient (retry).
 
-        Without this: ``session_agent._prompt_with_recovery`` sees
-        ``last_turn_cancelled = False`` after a cancel-induced crash,
-        respawns the session, retries the prompt cleanly, and the
-        worker never observes the preemption it requested."""
+        Without this: a cancel-induced subprocess exit would leave
+        the FSM in ``Draining``, ``_stream_reset`` would zero it to
+        ``Idle``, and the recovery loop would silently retry the
+        prompt on a respawned session — the worker would never
+        observe the preemption it requested."""
         session = _make_session(tmp_path, _make_session_proc([]))
-        # Simulate "cancel was fired during a turn".
-        session._cancel.set()  # noqa: SLF001
+        session._last_turn_cancelled_sticky = True  # noqa: SLF001
         assert session.last_turn_cancelled is True
+        session.stop()
+
+    def test_last_turn_cancelled_ignores_late_arriving_cancel(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P1 follow-up on PR #1793.
+
+        A cancel event that races in *after* the turn boundary but
+        *before* the worker releases the session lock must NOT make
+        ``last_turn_cancelled`` report ``True`` — the turn already
+        produced its result, the cancel didn't actually interrupt
+        anything, and reporting it as cancelled would make
+        ``Worker._provider_turn_was_preempted()`` discard the
+        produced output and requeue the task.
+
+        The fix ties cancellation reporting to the
+        FSM's ``CancelFire`` transition (latched in the sticky bit)
+        rather than to ``self._cancel.is_set()``, so a late-arriving
+        cancel that never fires ``CancelFire`` cannot trip the
+        property."""
+        session = _make_session(tmp_path, _make_session_proc([]))
+        # Simulate: turn finished cleanly, no CancelFire ever fired;
+        # then a preempt-worker call sets _cancel after the boundary.
+        session._cancel.set()  # noqa: SLF001
+        assert session.last_turn_cancelled is False
         session.stop()
 
     def test_prompt_routes_through_session(self, tmp_path: Path) -> None:

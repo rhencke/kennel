@@ -389,18 +389,25 @@ class SessionBackedAgent(SnapshotPublisher):
                     # during this turn (the subprocess crashed mid-drain).
                     # Retrying would respawn the session in NoCancel state
                     # and silently drop the preemption (codex P1 / #1792).
-                    # Return empty; ``provider_run`` translates this into
-                    # ``last_turn_cancelled = True`` and ``execute_task``
-                    # yields to the worker loop, where ``handle_queued_comments``
-                    # drains the durable PR-comment queue.
+                    # Recover the session BEFORE returning so the next
+                    # prompt call doesn't loop on the same dead-session
+                    # + sticky-cancel-bit state (codex P1 follow-up on
+                    # #1793: ``retry_on_preempt=True`` callers and the
+                    # next worker turn both need a live session waiting).
+                    # The respawn clears the sticky bit naturally — see
+                    # :meth:`ClaudeSession.iter_events` and the
+                    # ``self._cancel.clear()`` boundary.
+                    self._recover_prompt_session(session)
+                    fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.Recover())
+                    assert fsm_state is not None
                     fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.Return())
                     assert fsm_state == cancel_fsm.returned_cancelled, (
                         f"cancel_survives_respawn FSM: expected returned_cancelled, "
                         f"got {fsm_state!r}"
                     )
                     log.info(
-                        "%s: prompt failed mid-cancel — returning empty so the "
-                        "caller observes cancellation (not retrying)",
+                        "%s: prompt failed mid-cancel — recovered session, "
+                        "returning empty so the caller observes cancellation",
                         type(self).__name__,
                     )
                     return ""
