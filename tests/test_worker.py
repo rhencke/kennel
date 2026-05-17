@@ -10141,7 +10141,42 @@ class TestHandleQueuedComments:
         *,
         comment_type: str,
         comment_id: int,
+        comment: dict[str, object] | None = None,
     ) -> PRCommentQueueRecord:
+        """Enqueue a PR comment with a realistic ``payload_json``.
+
+        The worker's queued-comment dispatch reads the comment dict
+        from ``payload_json`` (codex P1 follow-ups on #1772 — the old
+        path re-fetched via ``gh.get_*_comment`` and dropped on
+        transient 404s).  ``comment`` defaults to a minimal valid
+        dict; tests override when the action builder needs specific
+        fields (e.g. ``path`` / ``line`` / ``diff_hunk`` for review
+        comments).
+        """
+        if comment is None:
+            comment = {
+                "id": comment_id,
+                "body": "please fix",
+                "user": {"login": "owner"},
+                "html_url": (
+                    f"https://github.com/owner/repo/pull/7"
+                    f"#{'discussion_r' if comment_type == 'pulls' else 'issuecomment-'}{comment_id}"
+                ),
+                "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+                "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                "path": "x.py",
+                "line": 5,
+                "diff_hunk": "@@",
+            }
+        envelope = {
+            "event": (
+                "pull_request_review_comment"
+                if comment_type == "pulls"
+                else "issue_comment"
+            ),
+            "delivery_id": f"delivery-{comment_type}-{comment_id}",
+            "payload": {"comment": comment},
+        }
         return FidoStore(tmp_path).enqueue_pr_comment(
             delivery_id=f"delivery-{comment_type}-{comment_id}",
             repo="owner/repo",
@@ -10152,7 +10187,7 @@ class TestHandleQueuedComments:
             is_bot=False,
             body="please fix",
             github_created_at="2026-04-30T12:00:00Z",
-            payload_json="{}",
+            payload_json=json.dumps(envelope),
         )
 
     def test_posts_eyes_on_claim_for_human_comment(self, tmp_path: Path) -> None:
@@ -10194,6 +10229,16 @@ class TestHandleQueuedComments:
         to other bots (#1662).
         """
         worker, gh = self._make_worker(tmp_path)
+        bot_comment = {
+            "id": 502,
+            "body": "bumped a dep",
+            "user": {"login": "dependabot[bot]"},
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r502",
+            "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+            "path": "x.py",
+            "line": 5,
+            "diff_hunk": "@@",
+        }
         FidoStore(tmp_path).enqueue_pr_comment(
             delivery_id="delivery-bot",
             repo="owner/repo",
@@ -10204,7 +10249,13 @@ class TestHandleQueuedComments:
             is_bot=True,
             body="bumped a dep",
             github_created_at="2026-04-30T12:00:00Z",
-            payload_json="{}",
+            payload_json=json.dumps(
+                {
+                    "event": "pull_request_review_comment",
+                    "delivery_id": "delivery-bot",
+                    "payload": {"comment": bot_comment},
+                }
+            ),
         )
         gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
         gh.get_pull_comment.return_value = {
@@ -10365,18 +10416,23 @@ class TestHandleQueuedComments:
 
     def test_review_followup_claim_covers_thread_lineage(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        self._enqueue(tmp_path, comment_type="pulls", comment_id=402)
+        self._enqueue(
+            tmp_path,
+            comment_type="pulls",
+            comment_id=402,
+            comment={
+                "id": 402,
+                "in_reply_to_id": 401,
+                "body": "same here",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/7#discussion_r402",
+                "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                "path": "x.py",
+                "line": 5,
+                "diff_hunk": "@@",
+            },
+        )
         gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
-        gh.get_pull_comment.return_value = {
-            "id": 402,
-            "in_reply_to_id": 401,
-            "body": "same here",
-            "user": {"login": "owner"},
-            "html_url": "https://github.com/owner/repo/pull/7#discussion_r402",
-            "path": "x.py",
-            "line": 5,
-            "diff_hunk": "@@",
-        }
 
         with (
             patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
@@ -10425,21 +10481,6 @@ class TestHandleQueuedComments:
             ).fetchone()
         assert row["state"] == "retryable_failed"
         assert row["failure_reason"] == "network down"
-
-    def test_completes_queue_record_when_comment_disappeared(
-        self, tmp_path: Path
-    ) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        self._enqueue(tmp_path, comment_type="pulls", comment_id=601)
-        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
-        gh.get_pull_comment.return_value = None
-
-        result = worker.handle_queued_comments(
-            self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
-        )
-
-        assert result is True
-        assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
 
 class TestRunThreadsIntegration:

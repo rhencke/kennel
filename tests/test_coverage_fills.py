@@ -1692,42 +1692,6 @@ class TestWorkerEmptyPrComment:
         worker._post_empty_pr_comment_once("test/repo", 1)  # type: ignore[attr-defined]
 
 
-class TestWorkerQueuedActions:
-    """Cover ``_queued_*_comment_action`` methods when the comment is gone."""
-
-    def test_queued_issue_comment_action_returns_none_when_comment_gone(
-        self, tmp_path: Path
-    ) -> None:
-        # worker.py:2547-2549 — gh.get_issue_comment returns None → log+return.
-        from fido.store import PRCommentQueueRecord
-        from tests.test_worker import Worker
-
-        gh = MagicMock()
-        gh.get_issue_comment.return_value = None
-        worker = Worker(tmp_path, gh)
-        queued = PRCommentQueueRecord(
-            queue_id="q1",
-            delivery_id="d1",
-            repo="test/repo",
-            pr_number=1,
-            comment_type="issues",
-            comment_id=42,
-            author="alice",
-            is_bot=False,
-            body="hi",
-            github_created_at="2026-01-01T00:00:00Z",
-            state="pending",
-            claim_owner=None,
-            retry_count=0,
-            next_retry_after=None,
-            payload_json="{}",
-        )
-        result = worker._queued_issue_comment_action(  # type: ignore[attr-defined]
-            queued, "test/repo", "PR title", "body"
-        )
-        assert result is None
-
-
 class TestWorkerLeafBranches:
     """Cover small leaf branches in worker.py."""
 
@@ -1801,79 +1765,6 @@ class TestEventsCreateTaskExitUntriaged:
                 )
         registry.enter_untriaged.assert_called_once_with("test/repo")
         registry.exit_untriaged.assert_called_once_with("test/repo")
-
-
-class TestWorkerHandleQueuedCommentsDrain:
-    """Cover the registry note_durable_demand_drained call after draining
-    one or more queued comments (worker.py:2407-2409)."""
-
-    def test_notifies_registry_after_draining_at_least_one_comment(
-        self, tmp_path: Path
-    ) -> None:
-        from fido.store import PRCommentQueueRecord
-        from tests.test_worker import Worker
-
-        gh = MagicMock()
-        gh.get_pr.return_value = {"title": "T", "body": "B"}
-        gh.get_issue_comment.return_value = (
-            None  # forces _queued_issue_comment_action → None
-        )
-        worker = Worker(tmp_path, gh)
-        worker._config = MagicMock()  # type: ignore[attr-defined]
-        worker._repo_cfg = MagicMock()  # type: ignore[attr-defined]
-        worker._repo_cfg.work_dir = tmp_path
-        # INV-7: ``_queued_issue_comment_action`` routes through
-        # ``Worker._resolved_comment`` which consults the per-(repo, item)
-        # ``CommentCache`` first.  Wire the registry's cache to miss so the
-        # fallback path consumes the staged ``gh.get_issue_comment`` return.
-        registry = MagicMock()
-        comment_cache = MagicMock()
-        comment_cache.get.return_value = None
-        registry.get_comment_cache.return_value = comment_cache
-        worker._registry = registry  # type: ignore[attr-defined]
-        worker._repo_name = "test/repo"  # type: ignore[attr-defined]
-
-        queued = PRCommentQueueRecord(
-            queue_id="q1",
-            delivery_id="d1",
-            repo="test/repo",
-            pr_number=1,
-            comment_type="issues",
-            comment_id=42,
-            author="alice",
-            is_bot=False,
-            body="hi",
-            github_created_at="2026-01-01T00:00:00Z",
-            state="pending",
-            claim_owner=None,
-            retry_count=0,
-            next_retry_after=None,
-            payload_json="{}",
-        )
-
-        # First claim returns queued, second returns None.
-        responses = iter([queued, None])
-
-        class _StoreStub:
-            def __init__(self, *_a: object, **_kw: object) -> None:
-                pass
-
-            def claim_next_pr_comment(self, **_kw: object) -> object:
-                return next(responses)
-
-            def complete_pr_comment(self, _qid: str) -> None:
-                pass
-
-        from fido import worker as worker_module
-
-        with patch.object(worker_module, "FidoStore", _StoreStub):
-            repo_ctx = MagicMock()
-            repo_ctx.repo = "test/repo"
-            result = worker.handle_queued_comments(tmp_path, repo_ctx, 1, "slug")
-        assert result is True
-        worker._registry.note_durable_demand_drained.assert_called_once_with(  # type: ignore[attr-defined]
-            "test/repo"
-        )
 
 
 class TestWorkerExecuteTaskBranches:

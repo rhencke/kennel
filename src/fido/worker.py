@@ -290,6 +290,32 @@ class WorkerContext:
         self.lock_fd.close()
 
 
+def _queued_comment_payload(queued: PRCommentQueueRecord) -> dict[str, Any]:
+    """Return the comment dict the webhook handler captured at enqueue time.
+
+    INV-7 / #1772 follow-up: ``_queued_review_comment_action`` /
+    ``_queued_issue_comment_action`` used to re-fetch via
+    ``gh.get_*_comment`` to dispatch a queued comment.  That call maps
+    *any* GitHub 404 to ``None``, and a ``None`` action makes
+    ``_handle_queued_comment`` complete the queue entry as "comment
+    gone" — so a transient propagation lag right after the webhook
+    enqueue would silently discard a real user comment with no retry
+    (codex P1 follow-ups on #1772).
+
+    The webhook payload stored on the queue record at enqueue time
+    has the full comment dict already.  Using it as the dispatch
+    source is *strictly* better: zero network calls, zero
+    eventual-consistency surprise, no transient-404 data loss.  A
+    comment edited after the webhook arrived will have produced its
+    own ``*_edited`` webhook with its own queue entry, so the worker
+    sees both versions in order.
+    """
+    envelope = json.loads(queued.payload_json)
+    payload = envelope["payload"]
+    comment: dict[str, Any] = payload["comment"]
+    return comment
+
+
 def _sub_dir() -> Path:
     """Return the path to the sub/ skill-instructions directory."""
     return default_sub_dir()
@@ -2673,9 +2699,6 @@ class Worker:
             action = self._queued_comment_action(
                 queued, repo_ctx.repo, pr_title, pr_body
             )
-            if action is None:
-                store.complete_pr_comment(queued.queue_id)
-                return
             promise = store.prepare_reply(
                 owner="worker",
                 comment_type=queued.comment_type,
@@ -2722,7 +2745,7 @@ class Worker:
         repo: str,
         pr_title: str,
         pr_body: str,
-    ) -> "Action | None":
+    ) -> "Action":
         if queued.comment_type == "pulls":
             return self._queued_review_comment_action(queued, repo, pr_title, pr_body)
         return self._queued_issue_comment_action(queued, repo, pr_title, pr_body)
@@ -2769,13 +2792,10 @@ class Worker:
         repo: str,
         pr_title: str,
         pr_body: str,
-    ) -> "Action | None":
+    ) -> "Action":
         from fido import events
 
-        comment = self.gh.get_pull_comment(repo, queued.comment_id)
-        if comment is None:
-            log.info("queued review comment %s is gone — completing", queued.comment_id)
-            return None
+        comment = _queued_comment_payload(queued)
         action = events.build_review_comment_action(
             repo,
             queued.pr_number,
@@ -2792,13 +2812,10 @@ class Worker:
         repo: str,
         pr_title: str,
         pr_body: str,
-    ) -> "Action | None":
+    ) -> "Action":
         from fido import events
 
-        comment = self.gh.get_issue_comment(repo, queued.comment_id)
-        if comment is None:
-            log.info("queued issue comment %s is gone — completing", queued.comment_id)
-            return None
+        comment = _queued_comment_payload(queued)
         action = events._build_issue_comment_action(  # pyright: ignore[reportPrivateUsage]
             repo,
             queued.pr_number,
