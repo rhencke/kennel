@@ -1118,28 +1118,43 @@ class CopilotCLISession(OwnedSession):
         # nothing to enforce.
         del allowed_tools
         try:
-            with self:
-                # Clear sticky cancel bit INSIDE the OwnedSession lock
-                # so a peer's clear cannot race with our snapshot
-                # (codex P1 on commit 3a9cd09).
-                with self._metrics_lock:
-                    self._last_turn_cancelled = False
-                try:
-                    result = self._prompt_locked(
-                        content, model=model, system_prompt=system_prompt
-                    )
-                except Exception as exc:
-                    with self._metrics_lock:
-                        cancelled = self._last_turn_cancelled
-                    exc.cancel_observed = cancelled  # type: ignore[attr-defined]
-                    raise
-                with self._metrics_lock:
-                    cancelled = self._last_turn_cancelled
-                return PromptOutcome(result, cancelled=cancelled)
+            return self._prompt_inner(
+                content, model=model, system_prompt=system_prompt
+            )
         except Exception as exc:
+            # ``__enter__`` failure (or any path that didn't reach the
+            # inner try/except that attaches ``cancel_observed``): no
+            # clear happened, so any True we might read would be a
+            # leftover from a previous turn (codex P1 on commit
+            # 3a9cd09).
             if not hasattr(exc, "cancel_observed"):
                 exc.cancel_observed = False  # type: ignore[attr-defined]
             raise
+
+    def _prompt_inner(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None,
+        system_prompt: str | None,
+    ) -> PromptOutcome:
+        with self:
+            # Clear sticky cancel bit INSIDE the OwnedSession lock so a
+            # peer's clear cannot race with our snapshot (codex P1).
+            with self._metrics_lock:
+                self._last_turn_cancelled = False
+            try:
+                result = self._prompt_locked(
+                    content, model=model, system_prompt=system_prompt
+                )
+            except Exception as exc:
+                with self._metrics_lock:
+                    cancelled = self._last_turn_cancelled
+                exc.cancel_observed = cancelled  # type: ignore[attr-defined]
+                raise
+            with self._metrics_lock:
+                cancelled = self._last_turn_cancelled
+            return PromptOutcome(result, cancelled=cancelled)
 
     def send(self, content: str) -> None:
         self._pending_content = content

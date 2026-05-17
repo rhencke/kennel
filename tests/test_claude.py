@@ -2297,6 +2297,17 @@ class TestClaudeSessionLock:
         assert session.last_turn_cancelled is False
         session.stop()
 
+    def test_consume_pending_cancel_reads_and_clears(self, tmp_path: Path) -> None:
+        """codex P1 on PR #1793: atomic read+clear so a subsequent
+        attempt cannot re-observe and mis-attribute the same cancel."""
+        session = _make_session(tmp_path, _make_session_proc([]))
+        session._last_turn_cancelled_sticky = True  # noqa: SLF001
+        assert session.consume_pending_cancel() is True
+        # Bit cleared atomically — a second consume returns False.
+        assert session.consume_pending_cancel() is False
+        assert session.last_turn_cancelled is False
+        session.stop()
+
     def test_last_turn_cancelled_true_when_sticky_bit_set(self, tmp_path: Path) -> None:
         """Regression for #1792.
 
@@ -2372,6 +2383,82 @@ class TestClaudeSessionLock:
         session.prompt("hi")
         assert session.last_turn_cancelled is False
         session.stop()
+
+    def test_prompt_attaches_cancel_observed_from_inner(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: when ``_prompt_inner`` raises with
+        ``cancel_observed`` already set (captured inside the lock at
+        the moment of send/drain failure), the outer wrapper preserves
+        it instead of overwriting with ``False``."""
+        session = _make_session(tmp_path, _make_session_proc([]))
+        boom = BrokenPipeError("claude exited with code -2")
+        boom.cancel_observed = True  # type: ignore[attr-defined]
+        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
+            side_effect=boom
+        )
+        with pytest.raises(BrokenPipeError) as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is True
+        session.stop()
+
+    def test_prompt_attaches_false_cancel_observed_when_inner_lacks_attr(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: when ``_prompt_inner`` raises before
+        reaching the inner try/except (e.g. ``__enter__`` failure),
+        the outer wrapper defaults ``cancel_observed`` to ``False`` —
+        a leftover sticky True from a previous turn must not be
+        misread as current-attempt cancel."""
+        session = _make_session(tmp_path, _make_session_proc([]))
+        with session._stream_lock:  # noqa: SLF001
+            session._last_turn_cancelled_sticky = True  # noqa: SLF001
+        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("enter failed")
+        )
+        with pytest.raises(RuntimeError, match="enter failed") as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is False
+        session.stop()
+
+    def test_prompt_inner_captures_cancel_on_send_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: send/drain failure path captures the
+        sticky cancel bit INSIDE the OwnedSession lock and attaches it
+        to the raised exception so the caller can read by value
+        without racing the next acquirer's prompt-entry clear."""
+        from fido.claude import ClaudeSession
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("persona")
+        proc = _make_session_proc([])
+        proc.pid = 11111
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            repo_name="owner/repo",
+            model="claude-opus-4-6",
+        )
+        try:
+            # send() raises and a concurrent cancel set the sticky bit
+            # before we observed the failure.  Simulate by patching
+            # send to set the sticky and then raise.
+            def failing_send(_body: str) -> None:
+                with session._stream_lock:  # noqa: SLF001
+                    session._last_turn_cancelled_sticky = True  # noqa: SLF001
+                raise BrokenPipeError("claude exited with code -2")
+
+            session.send = failing_send  # type: ignore[method-assign]
+            with pytest.raises(BrokenPipeError) as exc_info:
+                session.prompt("hi", model="claude-opus-4-6")
+            assert exc_info.value.cancel_observed is True
+        finally:
+            session.stop()
 
     def test_prompt_routes_through_session(self, tmp_path: Path) -> None:
         """ClaudeSession.prompt cancels, takes the lock, sends, and returns result."""

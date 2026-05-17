@@ -813,38 +813,51 @@ class CodexSession(OwnedSession):
         # (#1672).
         sandbox_policy = _sandbox_acp_policy_for_phase(allowed_tools)
         try:
-            with self:
-                # Clear sticky cancel bit INSIDE the OwnedSession lock
-                # so a peer's clear cannot race with our snapshot
-                # (codex P1 on commit 3a9cd09).
-                with self._state_lock:
-                    self._last_turn_cancelled = False
-                if model is not None:
-                    self.switch_model(model)
-                try:
-                    self.send(
-                        _combine_prompt(
-                            content, self._base_system_prompt, system_prompt
-                        ),
-                        sandbox_policy=sandbox_policy,
-                    )
-                    result = self.consume_until_result()
-                except Exception as exc:
-                    with self._state_lock:
-                        cancelled = self._last_turn_cancelled
-                    exc.cancel_observed = cancelled  # type: ignore[attr-defined]
-                    raise
-                # Capture cancel bit atomically — see PromptOutcome
-                # and PR #1793.
-                with self._state_lock:
-                    cancelled = self._last_turn_cancelled
-                return PromptOutcome(result, cancelled=cancelled)
+            return self._prompt_inner(
+                content, model=model, system_prompt=system_prompt,
+                sandbox_policy=sandbox_policy,
+            )
         except Exception as exc:
-            # ``__enter__`` failure: no clear happened, so any True we
-            # might read would be a leftover from a previous turn.
+            # ``__enter__`` failure (or any path that didn't reach the
+            # inner try/except that attaches ``cancel_observed``): no
+            # clear happened, so any True we might read would be a
+            # leftover from a previous turn (codex P1 on commit
+            # 3a9cd09).
             if not hasattr(exc, "cancel_observed"):
                 exc.cancel_observed = False  # type: ignore[attr-defined]
             raise
+
+    def _prompt_inner(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None,
+        system_prompt: str | None,
+        sandbox_policy: dict[str, str] | None,
+    ) -> PromptOutcome:
+        with self:
+            # Clear sticky cancel bit INSIDE the OwnedSession lock so a
+            # peer's clear cannot race with our snapshot (codex P1).
+            with self._state_lock:
+                self._last_turn_cancelled = False
+            if model is not None:
+                self.switch_model(model)
+            try:
+                self.send(
+                    _combine_prompt(
+                        content, self._base_system_prompt, system_prompt
+                    ),
+                    sandbox_policy=sandbox_policy,
+                )
+                result = self.consume_until_result()
+            except Exception as exc:
+                with self._state_lock:
+                    cancelled = self._last_turn_cancelled
+                exc.cancel_observed = cancelled  # type: ignore[attr-defined]
+                raise
+            with self._state_lock:
+                cancelled = self._last_turn_cancelled
+            return PromptOutcome(result, cancelled=cancelled)
 
     def send(
         self,

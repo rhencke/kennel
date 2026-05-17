@@ -927,6 +927,101 @@ class TestCodexSession:
         assert params["threadId"] == "thread-new"
         assert params["excludeTurns"] is True
 
+    def test_consume_pending_cancel_reads_and_clears(self, tmp_path: Path) -> None:
+        """codex P1 on PR #1793: atomic read+clear."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: fake,
+        )
+        with session._state_lock:
+            session._last_turn_cancelled = True
+        assert session.consume_pending_cancel() is True
+        assert session.consume_pending_cancel() is False
+        assert session.last_turn_cancelled is False
+
+    def test_prompt_preserves_cancel_observed_from_inner(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: outer wrapper preserves
+        ``cancel_observed`` already attached by the inner try/except."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: fake,
+        )
+        boom = BrokenPipeError("codex pipe gone")
+        boom.cancel_observed = True  # type: ignore[attr-defined]
+        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
+            side_effect=boom
+        )
+        with pytest.raises(BrokenPipeError) as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is True
+
+    def test_prompt_inner_captures_cancel_on_send_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: inner try/except captures the sticky
+        cancel bit INSIDE the OwnedSession lock and attaches to the
+        raised exception."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: fake,
+        )
+
+        # Override ``send`` to simulate a peer-fired cancel mid-send.
+        def failing_send(*_a: object, **_k: object) -> None:
+            with session._state_lock:
+                session._last_turn_cancelled = True
+            raise BrokenPipeError("codex pipe gone")
+
+        session.send = failing_send  # type: ignore[method-assign]
+        with pytest.raises(BrokenPipeError) as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is True
+
+    def test_prompt_attaches_false_cancel_observed_when_inner_lacks_attr(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: when ``_prompt_inner`` raises an
+        exception that lacks ``cancel_observed`` (e.g. ``__enter__``
+        failure before the inner try/except), the outer wrapper
+        defaults ``cancel_observed=False`` — leftover sticky True from
+        a previous turn must not be misread as current-attempt
+        cancel."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServer()
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model="gpt-5.5",
+            client_factory=lambda **_: fake,
+        )
+        # Replace _prompt_inner to raise a bare exception (no
+        # ``cancel_observed`` attached) — simulates ``__enter__``
+        # failure path.
+        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("enter failed")
+        )
+        with pytest.raises(RuntimeError, match="enter failed") as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is False
+
     def test_snapshot_publisher_fires_after_send(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("base")

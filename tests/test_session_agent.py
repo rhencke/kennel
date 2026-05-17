@@ -279,13 +279,15 @@ class TestSessionBackedAgent:
         ``models/cancel_survives_respawn.v``: any path that observes
         ``CancelFire`` cannot return ``RetNormal``."""
         session = MagicMock()
-        session.prompt.side_effect = BrokenPipeError("claude exited with code -2")
-        # ``consume_pending_cancel`` is the authoritative cancel-observation
-        # channel for the exception path (atomic read+clear under the
-        # session lock, codex P1 family on PR #1793).  Return True for
-        # the first exception observation, False after so a hypothetical
-        # second call cannot re-observe.
-        session.consume_pending_cancel.side_effect = [True, False]
+        # ``cancel_observed`` on the exception is the authoritative
+        # channel — real :meth:`PromptSession.prompt` impls capture
+        # the cancel bit INSIDE the lock at the moment of failure and
+        # attach it to the raised exception (codex P1 family on PR
+        # #1793).  The recovery loop reads it by value instead of
+        # racing with the next acquirer for ``last_turn_cancelled``.
+        boom = BrokenPipeError("claude exited with code -2")
+        boom.cancel_observed = True  # type: ignore[attr-defined]
+        session.prompt.side_effect = boom
         session.last_turn_cancelled = True
         session.is_alive.return_value = False
         agent = _FakeAgent(session=session)

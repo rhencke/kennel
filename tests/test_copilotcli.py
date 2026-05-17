@@ -1172,6 +1172,94 @@ class TestCopilotCLISession:
         assert session.sent_count == 2
         assert session.received_count == 2
 
+    def test_consume_pending_cancel_reads_and_clears(self, tmp_path: Path) -> None:
+        """codex P1 on PR #1793: atomic read+clear."""
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+        with session._metrics_lock:
+            session._last_turn_cancelled = True
+        assert session.consume_pending_cancel() is True
+        assert session.consume_pending_cancel() is False
+        assert session.last_turn_cancelled is False
+
+    def test_prompt_inner_captures_cancel_on_runtime_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: inner try/except captures the sticky
+        cancel bit INSIDE the OwnedSession lock and attaches it to the
+        raised exception."""
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+
+        def failing_locked(*_a: object, **_k: object) -> str:
+            with session._metrics_lock:
+                session._last_turn_cancelled = True
+            raise BrokenPipeError("copilot pipe gone")
+
+        session._prompt_locked = failing_locked  # type: ignore[method-assign]
+        with pytest.raises(BrokenPipeError) as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is True
+
+    def test_prompt_preserves_cancel_observed_from_inner(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: outer wrapper preserves
+        ``cancel_observed`` already attached by the inner try/except."""
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+        boom = BrokenPipeError("copilot pipe gone")
+        boom.cancel_observed = True  # type: ignore[attr-defined]
+        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
+            side_effect=boom
+        )
+        with pytest.raises(BrokenPipeError) as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is True
+
+    def test_prompt_attaches_false_cancel_observed_when_inner_lacks_attr(
+        self, tmp_path: Path
+    ) -> None:
+        """codex P1 on PR #1793: ``__enter__``-style failures default
+        ``cancel_observed=False`` — leftover sticky True must not be
+        misread as current-attempt cancel."""
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("enter failed")
+        )
+        with pytest.raises(RuntimeError, match="enter failed") as exc_info:
+            session.prompt("hi")
+        assert exc_info.value.cancel_observed is False
+
     def test_prompt_blanks_cancel_sentinel_even_without_cancelled_stop_reason(
         self, tmp_path: Path
     ) -> None:
