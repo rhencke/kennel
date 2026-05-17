@@ -620,7 +620,15 @@ run_fido_pyproject_image_capped() {
   # instead of pressuring the host into a soft-lock.  The 8 GiB ceiling
   # from PR #1251 was generous enough that CI runs with memory-leaky
   # tests (#1248) still pressured the box.
-  _container_cap_memory="${FIDO_TEST_MEMORY_CAP:-4g}" \
+  # Named ``fido-test`` so an orphaned container from a previous run
+  # (TaskStop / SIGTERM / supervisor crash leaving the daemon-side
+  # container alive) is cleaned up with one fixed command:
+  # ``docker stop fido-test``.  A second concurrent ``./fido pytest``
+  # fails loudly on the name collision rather than silently starting
+  # another container that also leaks — concurrent test runs are not
+  # supported (tracked in #1794).
+  named_run=1 container=fido-test \
+    _container_cap_memory="${FIDO_TEST_MEMORY_CAP:-4g}" \
     _container_cap_timeout="${FIDO_TEST_TIMEOUT:-300}" \
     run_fido_pyproject_image "$@"
 }
