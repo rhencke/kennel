@@ -383,27 +383,28 @@ class SessionBackedAgent(SnapshotPublisher):
             except Exception as exc:
                 if self._prompt_failure_is_passthrough(exc):
                     raise
-                # Exception path: no :class:`PromptOutcome` was returned.
-                # Use ``consume_pending_cancel`` (atomic read+clear under
-                # the session's own lock) so:
-                #   - a subsequent attempt cannot re-observe and
-                #     mis-attribute the same cancel
-                #   - paired with the prompt-entry clear in
-                #     ``session.prompt`` (now moved BEFORE ``with self:``
-                #     so it runs even when ``__enter__`` raises), an
-                #     observed bit here is necessarily from THIS attempt
-                # Together these close the codex P1 family of comments
-                # on PR #1793 about stale-bit false-positive cancel
-                # classification.  Old test doubles may not implement
-                # ``consume_pending_cancel`` — fall back to a one-shot
-                # read of ``last_turn_cancelled`` for those.
-                consume = getattr(session, "consume_pending_cancel", None)
-                if callable(consume):
-                    cancel_observed = consume() is True
+                # Exception path: read cancellation from the exception
+                # itself.  ``session.prompt`` captures the sticky bit
+                # INSIDE its own lock at the moment of failure and
+                # attaches ``cancel_observed`` to the raised exception
+                # (codex P1 round on commit 3a9cd09).  This avoids
+                # reading mutable session state after the lock is
+                # released — that read raced with the next thread
+                # acquiring the session and clearing the bit.  Falls
+                # back to ``consume_pending_cancel`` and then to a
+                # one-shot ``last_turn_cancelled`` read for test
+                # doubles that don't propagate ``cancel_observed``.
+                cancel_attr = getattr(exc, "cancel_observed", None)
+                if cancel_attr is not None:
+                    cancel_observed = cancel_attr is True
                 else:
-                    cancel_observed = (
-                        getattr(session, "last_turn_cancelled", False) is True
-                    )
+                    consume = getattr(session, "consume_pending_cancel", None)
+                    if callable(consume):
+                        cancel_observed = consume() is True
+                    else:
+                        cancel_observed = (
+                            getattr(session, "last_turn_cancelled", False) is True
+                        )
                 if cancel_observed:
                     fsm_state = cancel_fsm.transition(
                         fsm_state, cancel_fsm.CancelFire()

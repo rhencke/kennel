@@ -812,25 +812,39 @@ class CodexSession(OwnedSession):
         # ``None`` is "worker phase" and keeps full implementation access
         # (#1672).
         sandbox_policy = _sandbox_acp_policy_for_phase(allowed_tools)
-        # Clear the sticky cancel-observed bit BEFORE ``with self:`` so
-        # a failure during ``__enter__`` still sees cleared state.
-        # See the matching comment in ``ClaudeSession.prompt`` (codex
-        # P1 on PR #1793).
-        with self._state_lock:
-            self._last_turn_cancelled = False
-        with self:
-            if model is not None:
-                self.switch_model(model)
-            self.send(
-                _combine_prompt(content, self._base_system_prompt, system_prompt),
-                sandbox_policy=sandbox_policy,
-            )
-            result = self.consume_until_result()
-            # Capture the cancel bit atomically inside the session lock at
-            # the moment of return — see :class:`PromptOutcome` and PR #1793.
-            with self._state_lock:
-                cancelled = self._last_turn_cancelled
-            return PromptOutcome(result, cancelled=cancelled)
+        try:
+            with self:
+                # Clear sticky cancel bit INSIDE the OwnedSession lock
+                # so a peer's clear cannot race with our snapshot
+                # (codex P1 on commit 3a9cd09).
+                with self._state_lock:
+                    self._last_turn_cancelled = False
+                if model is not None:
+                    self.switch_model(model)
+                try:
+                    self.send(
+                        _combine_prompt(
+                            content, self._base_system_prompt, system_prompt
+                        ),
+                        sandbox_policy=sandbox_policy,
+                    )
+                    result = self.consume_until_result()
+                except Exception as exc:
+                    with self._state_lock:
+                        cancelled = self._last_turn_cancelled
+                    exc.cancel_observed = cancelled  # type: ignore[attr-defined]
+                    raise
+                # Capture cancel bit atomically — see PromptOutcome
+                # and PR #1793.
+                with self._state_lock:
+                    cancelled = self._last_turn_cancelled
+                return PromptOutcome(result, cancelled=cancelled)
+        except Exception as exc:
+            # ``__enter__`` failure: no clear happened, so any True we
+            # might read would be a leftover from a previous turn.
+            if not hasattr(exc, "cancel_observed"):
+                exc.cancel_observed = False  # type: ignore[attr-defined]
+            raise
 
     def send(
         self,

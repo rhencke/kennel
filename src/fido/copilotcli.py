@@ -1117,21 +1117,29 @@ class CopilotCLISession(OwnedSession):
         # differs from the protocol's READ_ONLY default because there's
         # nothing to enforce.
         del allowed_tools
-        # Clear the sticky cancel-observed bit BEFORE ``with self:`` so
-        # a failure during ``__enter__`` still sees cleared state.
-        # See the matching comment in ``ClaudeSession.prompt`` (codex
-        # P1 on PR #1793).  Lock-guarded for cross-thread safety.
-        with self._metrics_lock:
-            self._last_turn_cancelled = False
-        with self:
-            result = self._prompt_locked(
-                content, model=model, system_prompt=system_prompt
-            )
-            # Capture the cancel bit atomically at the moment of return
-            # — see :class:`PromptOutcome` and PR #1793.
-            with self._metrics_lock:
-                cancelled = self._last_turn_cancelled
-            return PromptOutcome(result, cancelled=cancelled)
+        try:
+            with self:
+                # Clear sticky cancel bit INSIDE the OwnedSession lock
+                # so a peer's clear cannot race with our snapshot
+                # (codex P1 on commit 3a9cd09).
+                with self._metrics_lock:
+                    self._last_turn_cancelled = False
+                try:
+                    result = self._prompt_locked(
+                        content, model=model, system_prompt=system_prompt
+                    )
+                except Exception as exc:
+                    with self._metrics_lock:
+                        cancelled = self._last_turn_cancelled
+                    exc.cancel_observed = cancelled  # type: ignore[attr-defined]
+                    raise
+                with self._metrics_lock:
+                    cancelled = self._last_turn_cancelled
+                return PromptOutcome(result, cancelled=cancelled)
+        except Exception as exc:
+            if not hasattr(exc, "cancel_observed"):
+                exc.cancel_observed = False  # type: ignore[attr-defined]
+            raise
 
     def send(self, content: str) -> None:
         self._pending_content = content

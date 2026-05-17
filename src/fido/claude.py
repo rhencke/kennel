@@ -1205,25 +1205,57 @@ class ClaudeSession(OwnedSession):
         """
         tid = threading.get_ident()
         t_start = time.monotonic()
-        # Clear the sticky cancel-observed bit BEFORE ``with self:``.
-        # If ``__enter__`` raises (e.g. ``SessionLeakError`` during
-        # talker registration) or the lock acquisition itself fails,
-        # a previous turn's cancel bit would otherwise leak into the
-        # caller's exception path and
-        # ``session_agent._prompt_with_recovery`` would misclassify the
-        # failure as a current-turn preemption (codex P1 on PR #1793).
-        # Safe to clear before acquiring the OwnedSession lock: the
-        # previous holder already captured their cancel bit into their
-        # own ``PromptOutcome`` before releasing, and no other thread
-        # can be inside ``iter_events`` setting the bit between turns.
-        with self._stream_lock:
-            self._last_turn_cancelled_sticky = False
+        try:
+            return self._prompt_inner(
+                content,
+                model=model,
+                allowed_tools=allowed_tools,
+                system_prompt=system_prompt,
+                tid=tid,
+                t_start=t_start,
+            )
+        except Exception as exc:
+            # Attach ``cancel_observed`` so the caller's exception path
+            # can read it WITHOUT touching shared mutable session state
+            # (which races with the next thread acquiring the session
+            # — codex P1 round on commit 3a9cd09).  ``__enter__``
+            # failures get the default ``False`` because we never made
+            # it past the lock to clear the sticky bit, so any True we
+            # would read might be a leftover from a previous turn.
+            if not hasattr(exc, "cancel_observed"):
+                exc.cancel_observed = False  # type: ignore[attr-defined]
+            raise
+
+    def _prompt_inner(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None,
+        allowed_tools: str | None,
+        system_prompt: str | None,
+        tid: int,
+        t_start: float,
+    ) -> PromptOutcome:
         with self:
             log.info(
                 "session.prompt: lock acquired (tid=%d, waited=%.2fs)",
                 tid,
                 time.monotonic() - t_start,
             )
+            # Clear the sticky cancel-observed bit at the very start
+            # of the turn — *inside* the OwnedSession lock so the
+            # lock-protected snapshot at return time is race-free.
+            # An earlier rev moved this before ``with self:`` to
+            # handle ``__enter__`` failures, but codex flagged the
+            # race: a waiting thread B could clear the bit during
+            # thread A's still-in-flight turn, then A would snapshot
+            # ``cancelled=False`` at return time and lose the
+            # preemption observation.  ``__enter__`` failures are now
+            # handled by the surrounding ``try/except`` that attaches
+            # ``cancel_observed=False`` to the raised exception
+            # (codex P1 round on commit 3a9cd09).
+            with self._stream_lock:
+                self._last_turn_cancelled_sticky = False
             # Defensive cleanup on acquire (#1670): if a prior turn left
             # the FSM in an in-flight state — ``Sending`` /
             # ``AwaitingReply`` / ``Draining`` — recover (respawn the
@@ -1267,15 +1299,22 @@ class ClaudeSession(OwnedSession):
                 body = f"{system_prompt}\n\n---\n\n{content}"
             else:
                 body = content
-            self.send(body)
-            result = self.consume_until_result()
+            try:
+                self.send(body)
+                result = self.consume_until_result()
+            except Exception as exc:
+                # Capture cancel bit INSIDE the OwnedSession lock so
+                # the next acquirer's prompt-entry clear cannot race
+                # with our snapshot (codex P1 on commit 3a9cd09).
+                # Attach to exception so caller doesn't read mutable
+                # session state after the lock is released.
+                with self._stream_lock:
+                    cancelled = self._last_turn_cancelled_sticky
+                exc.cancel_observed = cancelled  # type: ignore[attr-defined]
+                raise
             # Capture the sticky cancel bit atomically inside the
             # session lock at the moment of return so the caller can
-            # observe cancellation by value (see :class:`PromptOutcome`
-            # and the race Rob flagged on PR #1793).  Reading
-            # ``self.last_turn_cancelled`` after this method returns is
-            # unsafe: the next thread to acquire the session clears
-            # the sticky bit at prompt-entry.
+            # observe cancellation by value (see :class:`PromptOutcome`).
             with self._stream_lock:
                 cancelled = self._last_turn_cancelled_sticky
             log.info(
