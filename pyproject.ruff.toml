@@ -220,6 +220,7 @@ select = [
   "PT031",
   "PTH124",
   "PTH210",
+  "TID251",
   "W",
 ]
 # PLC2401 = "non-ASCII characters in identifiers" — guards against the
@@ -227,6 +228,16 @@ select = [
 # U+043E vs ``Rescope`` with Latin ``o`` U+006F) that bit us once and is
 # invisible to a human reader.
 ignore = ["E501"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# unittest.mock.patch bypasses constructor-DI: it reaches into module internals
+# to swap names from outside, creating invisible coupling and making it impossible
+# to inject collaborators through the constructor.
+# Use constructor-DI instead: production code accepts collaborators via __init__;
+# tests construct the object with a MagicMock or hand-rolled fake at call time.
+"unittest.mock.patch" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch module-level names from outside."}
+"unittest.mock.patch.object" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch object attributes from outside."}
+"unittest.mock.patch.dict" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch dict entries from outside."}
 
 [tool.ruff.lint.per-file-ignores]
 # Generated Rocq extraction output is format-checked by CI, but lint has
@@ -238,3 +249,21 @@ ignore = ["E501"]
   "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204", "ANN206", "ANN401",
   "E741", "F401", "F403", "F405", "F541", "F811", "F821", "F841", "I001",
 ]
+# Temporary TID251 exemptions — existing mock.patch sites pending constructor-DI
+# migration under #1773. Do not add new files here; fix the root cause instead.
+"tests/test___main__.py" = ["TID251"]
+"tests/test_claude.py" = ["TID251"]
+"tests/test_color.py" = ["TID251"]
+"tests/test_coverage_fills.py" = ["TID251"]
+"tests/test_events.py" = ["TID251"]
+"tests/test_github.py" = ["TID251"]
+"tests/test_harness_commit.py" = ["TID251"]
+"tests/test_infra.py" = ["TID251"]
+"tests/test_main.py" = ["TID251"]
+"tests/test_server.py" = ["TID251"]
+"tests/test_status.py" = ["TID251"]
+"tests/test_sync_tasks_cli.py" = ["TID251"]
+"tests/test_tasks.py" = ["TID251"]
+"tests/test_tests_main.py" = ["TID251"]
+"tests/test_turn_outcome.py" = ["TID251"]
+"tests/test_worker.py" = ["TID251"]
