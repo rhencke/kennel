@@ -2342,6 +2342,28 @@ class TestClaudeSessionLock:
         assert session.last_turn_cancelled is False
         session.stop()
 
+    def test_send_clears_sticky_cancel_bit(self, tmp_path: Path) -> None:
+        """Codex P1 follow-up on PR #1793.
+
+        The sticky bit is cleared by :meth:`send` (at the Idle → Sending
+        FSM transition), NOT by ``iter_events``.  If ``iter_events``
+        cleared it instead, a ``send()`` failure that hit before
+        ``iter_events`` ran would observe the *previous* turn's cancel
+        bit and misclassify the failure as a current-turn preemption —
+        ``_prompt_with_recovery`` would return ``""`` for a transient
+        ``BrokenPipeError`` instead of taking the normal dead-session
+        retry path."""
+        session = _make_session(tmp_path, _make_session_proc([]))
+        # Latch a cancel from a prior turn.
+        with session._stream_lock:  # noqa: SLF001
+            session._last_turn_cancelled_sticky = True  # noqa: SLF001
+        assert session.last_turn_cancelled is True
+        # send() commits the new turn — the bit must clear before any
+        # write to claude's stdin (so a write failure inherits a clean bit).
+        session.send("hi")
+        assert session.last_turn_cancelled is False
+        session.stop()
+
     def test_prompt_routes_through_session(self, tmp_path: Path) -> None:
         """ClaudeSession.prompt cancels, takes the lock, sends, and returns result."""
         from fido.claude import ClaudeSession

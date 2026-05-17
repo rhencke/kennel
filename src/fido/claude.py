@@ -612,19 +612,27 @@ class ClaudeSession(OwnedSession):
 
     @property
     def last_turn_cancelled(self) -> bool:
-        """``True`` when the most recent :meth:`iter_events` call observed
-        a ``CancelFire`` transition on the stream FSM (i.e. a peer thread
-        preempted an in-flight turn).
+        """``True`` when the most recent ``send()``-driven turn observed
+        a ``CancelFire`` transition on the stream FSM (i.e. a peer
+        thread preempted an in-flight turn).
 
         Sticky for the duration of the current turn cycle: set the
         moment ``CancelFire`` fires inside :meth:`iter_events` and
-        cleared at the top of the next turn (alongside
-        ``self._cancel.clear()``).  Surviving the cycle is required
-        because the subprocess can die between ``CancelFire`` firing
-        and the boundary that would have closed the FSM to
-        ``Cancelled`` — without the sticky bit, a cancel-induced
-        subprocess crash would silently lose the cancel observation
-        and the recovery loop in
+        cleared at the top of the *next* :meth:`send` call (where the
+        FSM commits to a new turn via ``Idle → Sending``).  Clearing
+        at ``send()`` rather than ``iter_events()`` is what makes
+        "current turn cycle" precise: a send that fails before any
+        events are read still observes its own cleared bit, so a
+        ``send()`` ``BrokenPipeError`` can't be misclassified as
+        cancellation carried over from the previous turn (codex P1
+        follow-up on #1793).
+
+        Surviving the cycle (no clear on subprocess death between
+        ``CancelFire`` firing and the boundary) is required because
+        the subprocess can die before reaching the boundary that
+        would have closed the FSM to ``Cancelled``.  Without the
+        sticky bit, a cancel-induced subprocess crash would silently
+        lose the cancel observation and the recovery loop in
         ``session_agent._prompt_with_recovery`` would retry the
         prompt cleanly (the #1792 bug).
 
@@ -635,12 +643,18 @@ class ClaudeSession(OwnedSession):
         ``False`` and the property correctly reports the completed turn
         as not cancelled (codex P1 follow-up on #1792).
 
+        All reads and writes of the underlying sticky bit go through
+        ``_stream_lock`` — Python 3.14t (free-threaded) does not
+        provide atomicity for unsynchronized ``bool`` access across
+        threads.
+
         See ``models/cancel_survives_respawn.v`` for the FSM oracle
         that locks the cancel-survives-respawn invariant in code, and
         ``models/claude_session.v`` for the per-subprocess FSM that
         defines ``CancelFire`` / ``Cancelled``.
         """
-        return self._last_turn_cancelled_sticky
+        with self._stream_lock:
+            return self._last_turn_cancelled_sticky
 
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O.
@@ -909,7 +923,13 @@ class ClaudeSession(OwnedSession):
         return to ``Idle`` (acknowledging the cancellation), then fire
         ``Send`` to enter ``Sending`` for the new turn.
         """
-        # Acknowledge a prior cancelled turn: Cancelled → Idle.
+        # Acknowledge a prior cancelled turn: Cancelled → Idle.  Also
+        # clear the sticky cancel-observed bit here, under the same
+        # lock that gates FSM transitions: every new turn begins with
+        # ``last_turn_cancelled = False`` regardless of how the
+        # previous turn ended, so a ``send()`` failure cannot inherit
+        # the previous turn's cancel state (codex P1 follow-up on
+        # #1793).
         with self._stream_lock:
             if isinstance(self._stream_state, stream_fsm.Cancelled):
                 new_state = stream_fsm.transition(
@@ -917,6 +937,7 @@ class ClaudeSession(OwnedSession):
                 )
                 assert new_state is not None
                 self._stream_state = new_state
+            self._last_turn_cancelled_sticky = False
         # Idle → Sending.
         self._stream_transition(stream_fsm.Send())
         msg = json.dumps(
@@ -1367,11 +1388,14 @@ class ClaudeSession(OwnedSession):
         # previous holder — the FSM's FIFO handler queue ensures the next
         # holder's turn starts clean without needing a separate pending flag.
         self._cancel.clear()
-        # Clear the sticky cancel-observed bit at the same boundary —
-        # see :attr:`last_turn_cancelled`.  Held only briefly without
-        # the stream lock; the bit is single-writer (only this thread's
-        # ``iter_events`` writes it).
-        self._last_turn_cancelled_sticky = False
+        # The sticky cancel-observed bit is cleared by :meth:`send`
+        # (at the Idle → Sending FSM transition), NOT here.  Clearing
+        # only at ``send()`` is what makes ``last_turn_cancelled``
+        # reflect the *current* turn rather than carrying state from
+        # the previous one — a ``send()`` failure that hits before
+        # ``iter_events`` runs still observes its own cleared bit
+        # instead of inheriting the previous turn's cancel (codex P1
+        # follow-up on #1793).
         idle_deadline = IdleDeadline(
             self._idle_timeout,
             poll_interval=_SELECT_POLL_INTERVAL,
