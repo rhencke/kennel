@@ -566,6 +566,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.registry.destroy_comment_cache(
                 repo_cfg.name, payload["pull_request"]["number"]
             )
+            # The per-repo HTTP cache (see :meth:`GitHub.clear_repo_cache`)
+            # is wiped on the worker's next PR-transition hook rather than
+            # here — webhook-side wipe would need its own access to gh and
+            # the worker already covers it within a few seconds of the
+            # close on its next loop iteration.
 
         # Acknowledge only after dispatch succeeds.
         self._respond(200, "ok")

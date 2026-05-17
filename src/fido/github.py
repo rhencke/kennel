@@ -4,8 +4,10 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.parse
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -82,16 +84,147 @@ _RETRYABLE_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
 
 
 class _TimeoutSession(_requests.Session):
-    """requests.Session that applies _HTTP_TIMEOUT to every request by default."""
+    """``requests.Session`` with a uniform 30s timeout AND a per-repo
+    ETag-validating GET cache.
 
-    def request(  # pyright: ignore[reportIncompatibleMethodOverride]
+    Cache semantics
+    ===============
+
+    Every ``GET`` against ``api.github.com/repos/{owner}/{name}/...``
+    stores its body keyed by the request URL, alongside the response's
+    ``ETag`` and ``Last-Modified`` headers (if present).  The next GET
+    of the same URL replays those headers as ``If-None-Match`` /
+    ``If-Modified-Since``; GitHub returns ``304 Not Modified`` when
+    nothing changed, and we return the cached body.  ``304`` responses
+    do not count against the primary rate limit, so the cache is a
+    free correctness win on every read hot path — the server stays
+    authoritative (no webhook-staleness reasoning) and the client pays
+    one round-trip rather than a full body fetch.
+
+    Per-repo scope + lifecycle
+    --------------------------
+
+    Entries are partitioned by the ``owner/name`` segment of the URL.
+    :meth:`clear_repo_cache` drops all entries for one repo, called by
+    the worker on PR transitions (open / close / handoff) and by the
+    webhook handler on ``pull_request.closed`` — so within a PR's
+    lifetime the cache size is bounded by "URLs touched while working
+    on this PR", which is small and self-limiting.  No LRU eviction
+    needed because the PR-transition wipe is the natural bound.
+
+    Thread safety
+    -------------
+
+    All cache mutations go through ``_lock`` because the worker thread,
+    the webhook handler thread, and any background reconcile thread
+    can hit the same session concurrently (Python 3.14t free-threaded
+    — no GIL).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def request(  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         method: str | bytes,
         url: str | bytes,
-        **kwargs: Any,  # noqa: ANN401  # forwarded verbatim to requests.Session.request
-    ) -> _requests.Response:  # type: ignore[override]
+        *args: Any,  # noqa: ANN401  # forwarded verbatim to base.request
+        **kwargs: Any,  # noqa: ANN401  # forwarded verbatim to base.request
+    ) -> _requests.Response:
         kwargs.setdefault("timeout", _HTTP_TIMEOUT)
-        return super().request(method, url, **kwargs)
+        method_s = method.decode() if isinstance(method, bytes) else method
+        url_s = url.decode() if isinstance(url, bytes) else url
+        if method_s.upper() != "GET":
+            return super().request(method, url, *args, **kwargs)
+        return self._cached_get(url_s, args, kwargs)
+
+    def _cached_get(
+        self,
+        url: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> _requests.Response:
+        with self._lock:
+            cached = self._cache.get(url)
+        headers = dict(kwargs.get("headers") or {})
+        if cached is not None:
+            if cached.etag:
+                headers["If-None-Match"] = cached.etag
+            if cached.last_modified:
+                headers["If-Modified-Since"] = cached.last_modified
+            kwargs["headers"] = headers
+        resp = super().request("GET", url, *args, **kwargs)
+        if resp.status_code == 304 and cached is not None:
+            return cached.replay(resp)
+        if resp.status_code == 200 and (
+            resp.headers.get("ETag") or resp.headers.get("Last-Modified")
+        ):
+            with self._lock:
+                self._cache[url] = _CacheEntry.from_response(resp)
+                self._cache.move_to_end(url)
+        return resp
+
+    def clear_repo_cache(self, repo: str) -> int:
+        """Drop every cached entry whose URL belongs to ``repo``.
+
+        ``repo`` is ``owner/name``.  Returns the number of entries
+        dropped, for logging / metrics.  Called on PR transitions
+        (worker switching to a different issue / PR, or webhook
+        observing ``pull_request.closed``) to keep the cache bounded
+        without LRU machinery.
+        """
+        prefix = f"/repos/{repo}/"
+        with self._lock:
+            doomed = [u for u in self._cache if prefix in u]
+            for u in doomed:
+                del self._cache[u]
+        return len(doomed)
+
+
+class _CacheEntry:
+    """One cached ``GET`` response — body + revalidation headers."""
+
+    __slots__ = ("etag", "last_modified", "content", "headers")
+
+    def __init__(
+        self,
+        etag: str,
+        last_modified: str,
+        content: bytes,
+        headers: Mapping[str, str],
+    ) -> None:
+        self.etag = etag
+        self.last_modified = last_modified
+        self.content = content
+        self.headers = dict(headers)
+
+    @classmethod
+    def from_response(cls, resp: _requests.Response) -> "_CacheEntry":
+        return cls(
+            etag=resp.headers.get("ETag", ""),
+            last_modified=resp.headers.get("Last-Modified", ""),
+            content=resp.content,
+            headers=dict(resp.headers),
+        )
+
+    def replay(self, not_modified: _requests.Response) -> _requests.Response:
+        """Materialize a fresh 200 ``Response`` carrying the cached body.
+
+        ``requests`` returns the live 304 response to the caller by
+        default, which has no body — every GitHub helper would have to
+        learn about 304.  Instead we synthesize a 200 with the cached
+        body so the rest of the codebase reads ``resp.json()`` /
+        ``resp.content`` uniformly.
+        """
+        replayed = _requests.Response()
+        replayed.status_code = 200
+        replayed._content = self.content  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        replayed.headers.update(self.headers)
+        replayed.url = not_modified.url
+        replayed.request = not_modified.request
+        return replayed
 
 
 class GraphQLError(Exception):
@@ -171,6 +304,22 @@ class GitHub:
             }
         )
         self._sleep = sleeper
+
+    def clear_repo_cache(self, repo: str) -> int:
+        """Drop all cached GET responses for ``repo`` from the session.
+
+        Called by the worker on PR transitions (open / close / handoff)
+        and by the webhook handler on ``pull_request.closed`` to bound
+        the in-process ETag cache without LRU machinery — within a
+        PR's lifetime the cache holds only URLs touched while working
+        on that PR.
+
+        Returns the number of entries dropped, or ``0`` if the session
+        does not expose a cache (e.g. an injected test session).
+        """
+        if isinstance(self._s, _TimeoutSession):
+            return self._s.clear_repo_cache(repo)
+        return 0
 
     def refresh_token(self) -> bool:
         """Re-resolve the gh-CLI token; update session headers if changed.

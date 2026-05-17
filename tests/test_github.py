@@ -169,6 +169,148 @@ class TestTimeoutSession:
         gh = GitHub("tok")
         assert isinstance(gh._s, _TimeoutSession)
 
+    def test_get_caches_response_then_replays_on_304(self) -> None:
+        """GET response with ETag is cached; second GET that gets a 304
+        returns a synthesized 200 carrying the original body."""
+        from unittest.mock import patch
+
+        first = MagicMock()
+        first.status_code = 200
+        first.headers = {"ETag": 'W/"abc"', "Content-Type": "application/json"}
+        first.content = b'{"hello": "world"}'
+
+        second = MagicMock()
+        second.status_code = 304
+        second.headers = {}
+        second.url = "https://api.github.com/repos/o/r/issues/1/comments"
+        second.request = None
+
+        with patch("requests.Session.request") as mock_req:
+            mock_req.side_effect = [first, second]
+            s = _TimeoutSession()
+            r1 = s.request("GET", "https://api.github.com/repos/o/r/issues/1/comments")
+            assert r1.status_code == 200
+            r2 = s.request("GET", "https://api.github.com/repos/o/r/issues/1/comments")
+        assert r2.status_code == 200
+        assert r2.content == b'{"hello": "world"}'
+        # If-None-Match must have been sent on the second call.
+        second_call_kwargs = mock_req.call_args_list[1].kwargs
+        assert second_call_kwargs["headers"]["If-None-Match"] == 'W/"abc"'
+
+    def test_get_caches_last_modified_when_no_etag(self) -> None:
+        """Responses with only Last-Modified still get cached and the
+        next GET sends If-Modified-Since."""
+        from unittest.mock import patch
+
+        first = MagicMock()
+        first.status_code = 200
+        first.headers = {"Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT"}
+        first.content = b"body"
+        second = MagicMock()
+        second.status_code = 304
+        second.headers = {}
+        second.url = "https://api.github.com/repos/o/r/issues/2"
+        second.request = None
+        with patch("requests.Session.request") as mock_req:
+            mock_req.side_effect = [first, second]
+            s = _TimeoutSession()
+            s.request("GET", "https://api.github.com/repos/o/r/issues/2")
+            s.request("GET", "https://api.github.com/repos/o/r/issues/2")
+        assert (
+            mock_req.call_args_list[1].kwargs["headers"]["If-Modified-Since"]
+            == "Wed, 21 Oct 2026 07:28:00 GMT"
+        )
+
+    def test_get_without_etag_or_last_modified_is_not_cached(self) -> None:
+        from unittest.mock import patch
+
+        first = MagicMock()
+        first.status_code = 200
+        first.headers = {"Content-Type": "text/plain"}
+        first.content = b"hi"
+        second = MagicMock()
+        second.status_code = 200
+        second.headers = {}
+        second.content = b"hi2"
+        with patch("requests.Session.request") as mock_req:
+            mock_req.side_effect = [first, second]
+            s = _TimeoutSession()
+            s.request("GET", "https://api.github.com/repos/o/r/x")
+            r2 = s.request("GET", "https://api.github.com/repos/o/r/x")
+        # No cache hit — second body returned as-is, no If-None-Match sent.
+        assert r2.content == b"hi2"
+        second_headers = mock_req.call_args_list[1].kwargs.get("headers") or {}
+        assert "If-None-Match" not in second_headers
+
+    def test_non_get_methods_bypass_cache(self) -> None:
+        from unittest.mock import patch
+
+        resp = MagicMock()
+        resp.status_code = 201
+        resp.headers = {}
+        with patch("requests.Session.request") as mock_req:
+            mock_req.return_value = resp
+            s = _TimeoutSession()
+            s.request("POST", "https://api.github.com/repos/o/r/issues")
+            s.request("POST", "https://api.github.com/repos/o/r/issues")
+        # POSTs always reach the underlying session; never cached.
+        assert mock_req.call_count == 2
+        for call in mock_req.call_args_list:
+            assert "If-None-Match" not in (call.kwargs.get("headers") or {})
+
+    def test_bytes_method_and_url_are_accepted(self) -> None:
+        from unittest.mock import patch
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+        with patch("requests.Session.request") as mock_req:
+            mock_req.return_value = resp
+            s = _TimeoutSession()
+            s.request(b"GET", b"https://api.github.com/repos/o/r/x")
+        assert mock_req.call_count == 1
+
+    def test_clear_repo_cache_drops_only_that_repos_entries(self) -> None:
+        from unittest.mock import patch
+
+        def mk(etag: str, body: bytes) -> MagicMock:
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {"ETag": etag}
+            r.content = body
+            return r
+
+        with patch("requests.Session.request") as mock_req:
+            mock_req.side_effect = [
+                mk('W/"a"', b"A"),
+                mk('W/"b"', b"B"),
+            ]
+            s = _TimeoutSession()
+            s.request("GET", "https://api.github.com/repos/owner/foo/issues/1")
+            s.request("GET", "https://api.github.com/repos/owner/bar/issues/1")
+            dropped = s.clear_repo_cache("owner/foo")
+        assert dropped == 1
+        # The bar entry survives — verify by sending a 304 and getting B back.
+        not_modified = MagicMock()
+        not_modified.status_code = 304
+        not_modified.headers = {}
+        not_modified.url = "https://api.github.com/repos/owner/bar/issues/1"
+        not_modified.request = None
+        with patch("requests.Session.request", return_value=not_modified):
+            r = s.request("GET", "https://api.github.com/repos/owner/bar/issues/1")
+        assert r.content == b"B"
+
+    def test_github_clear_repo_cache_delegates_to_session(self) -> None:
+        gh = GitHub("tok")
+        # Empty cache → 0 dropped, no error.
+        assert gh.clear_repo_cache("owner/repo") == 0
+
+    def test_github_clear_repo_cache_returns_zero_for_non_caching_session(
+        self,
+    ) -> None:
+        gh = GitHub("tok", session=MagicMock())
+        assert gh.clear_repo_cache("owner/repo") == 0
+
 
 class TestGitHubClass:
     def _gh(self) -> tuple[GitHub, MagicMock]:

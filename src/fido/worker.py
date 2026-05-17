@@ -1957,6 +1957,10 @@ class Worker:
             with self._state.modify() as state:
                 state["pr_number"] = pr_number
                 state["pr_title"] = pr_title
+            # PR transition (resuming an existing PR after worker
+            # restart / handoff) — drop any cached GET bodies for the
+            # previous session.  See :meth:`GitHub.clear_repo_cache`.
+            self.gh.clear_repo_cache(repo_ctx.repo)
             # Open PR — resume
             log.info("resuming PR #%s on branch %s", pr_number, slug)
             self._git(["fetch", remote])
@@ -2134,6 +2138,11 @@ class Worker:
         with self._state.modify() as state:
             state["pr_number"] = pr_number
             state["pr_title"] = request
+        # PR transition (new PR opened) — drop any cached GET bodies for
+        # the previous PR so the per-repo HTTP cache stays bounded by
+        # "URLs touched on the currently-active PR".  See
+        # :meth:`GitHub.clear_repo_cache` (INV-7 follow-up).
+        self.gh.clear_repo_cache(repo_ctx.repo)
 
         if not self._tasks.list():
             # Setup legitimately produced zero tasks — the model decided no
