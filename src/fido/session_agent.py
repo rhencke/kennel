@@ -377,7 +377,8 @@ class SessionBackedAgent(SnapshotPublisher):
                 else:
                     result = PromptOutcome(
                         raw,
-                        cancelled=getattr(session, "last_turn_cancelled", False) is True,
+                        cancelled=getattr(session, "last_turn_cancelled", False)
+                        is True,
                     )
             except Exception as exc:
                 if self._prompt_failure_is_passthrough(exc):

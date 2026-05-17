@@ -598,9 +598,7 @@ def provider_run(
         # ``run_turn`` returns :class:`PromptOutcome` for real agents but
         # test doubles may return a plain ``str``; tolerate both.
         cancelled = bool(getattr(outcome, "cancelled", False))
-        return ProviderRunOutcome(
-            session_id="", text=str(outcome), cancelled=cancelled
-        )
+        return ProviderRunOutcome(session_id="", text=str(outcome), cancelled=cancelled)
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = agent.print_prompt_from_file(
