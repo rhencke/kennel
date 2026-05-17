@@ -82,6 +82,17 @@ def _pr_state_str(pr: dict[str, object]) -> str:
 _GET_RETRY_DELAYS: tuple[float, ...] = (1.0, 3.0, 10.0)
 _RETRYABLE_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
 
+# Only requests under ``/repos/{owner}/{repo}/...`` may enter the
+# transport-level GET cache.  The per-repo wipe (called on PR
+# transitions) is the cache's only lifecycle hook, so caching
+# endpoints that aren't owned by a repo — ``/user``, ``/users/{login}``,
+# ``/search/issues``, ``/rate_limit``, etc. — would grow unbounded
+# without a parallel LRU mechanism.  Scoping the cache to the URLs
+# the wipe knows about keeps "no LRU needed" honest.
+_CACHEABLE_URL_RE: re.Pattern[str] = re.compile(
+    r"^https://api\.github\.com/repos/(?P<repo>[^/]+/[^/]+)/"
+)
+
 
 class _TimeoutSession(_requests.Session):
     """``requests.Session`` with a uniform 30s timeout AND a per-repo
@@ -146,6 +157,9 @@ class _TimeoutSession(_requests.Session):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> _requests.Response:
+        cacheable = _CACHEABLE_URL_RE.match(url) is not None
+        if not cacheable:
+            return super().request("GET", url, *args, **kwargs)
         with self._lock:
             cached = self._cache.get(url)
         headers = dict(kwargs.get("headers") or {})
@@ -174,6 +188,11 @@ class _TimeoutSession(_requests.Session):
         (worker switching to a different issue / PR, or webhook
         observing ``pull_request.closed``) to keep the cache bounded
         without LRU machinery.
+
+        Cache-eligible URLs are restricted to ``/repos/{owner}/{repo}/...``
+        (see ``_CACHEABLE_URL_RE``), so this wipe is complete — there
+        are no orphan entries from ``/user`` / ``/search/issues`` /
+        ``/rate_limit`` etc. that this method couldn't reach.
         """
         prefix = f"/repos/{repo}/"
         with self._lock:
@@ -181,6 +200,22 @@ class _TimeoutSession(_requests.Session):
             for u in doomed:
                 del self._cache[u]
         return len(doomed)
+
+    def clear_all(self) -> int:
+        """Drop every cached entry across all repos.
+
+        Called by :meth:`GitHub.refresh_token` when the gh-CLI token
+        actually rotates — without this, the next GET would revalidate
+        with an ``If-None-Match`` validated under the *old* token and
+        a server-side 304 would replay the old body, weakening the
+        ``#1207`` identity guard that ``Worker.assert_git_identity``
+        relies on (it calls ``refresh_token`` then immediately reads
+        the authenticated identity).
+        """
+        with self._lock:
+            n = len(self._cache)
+            self._cache.clear()
+        return n
 
 
 class _CacheEntry:
@@ -341,6 +376,14 @@ class GitHub:
             return False
         self._token = new_token
         self._s.headers["Authorization"] = f"Bearer {new_token}"
+        # Wipe every cached response so the next GET re-authenticates
+        # with the new token from scratch.  Without this the URL-keyed
+        # ETag cache would replay bodies validated under the *old*
+        # token on a 304 — bypassing the #1207 identity guard that
+        # ``Worker.assert_git_identity`` relies on (it calls
+        # ``refresh_token`` then ``get_authenticated_identity``).
+        if isinstance(self._s, _TimeoutSession):
+            self._s.clear_all()
         return True
 
     def _retryable_get(self, url: str) -> _requests.Response:

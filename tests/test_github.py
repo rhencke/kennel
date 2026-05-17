@@ -311,6 +311,87 @@ class TestTimeoutSession:
         gh = GitHub("tok", session=MagicMock())
         assert gh.clear_repo_cache("owner/repo") == 0
 
+    def test_non_repo_urls_are_not_cached(self) -> None:
+        """``/user``, ``/search/issues``, ``/rate_limit`` etc. live
+        outside any per-repo lifecycle hook — caching them would grow
+        unbounded.  These URLs must bypass the cache entirely; even
+        on a fresh ``200`` with ``ETag``, the entry is not stored."""
+        from unittest.mock import patch
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"ETag": 'W/"u"'}
+        resp.content = b'{"login": "fido"}'
+        with patch("requests.Session.request", return_value=resp):
+            s = _TimeoutSession()
+            for url in (
+                "https://api.github.com/user",
+                "https://api.github.com/users/rhencke",
+                "https://api.github.com/search/issues?q=foo",
+                "https://api.github.com/rate_limit",
+            ):
+                s.request("GET", url)
+        # Nothing should have landed in the cache.
+        assert len(s._cache) == 0  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def test_non_repo_get_does_not_send_revalidation_headers(self) -> None:
+        """Even if a non-repo URL were sneakily cached, the request
+        path must never inject ``If-None-Match`` for non-cacheable
+        URLs — guards against bypassing the bypass."""
+        from unittest.mock import patch
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+        with patch("requests.Session.request", return_value=resp) as mock_req:
+            s = _TimeoutSession()
+            s.request("GET", "https://api.github.com/user")
+        headers = mock_req.call_args.kwargs.get("headers") or {}
+        assert "If-None-Match" not in headers
+        assert "If-Modified-Since" not in headers
+
+    def test_refresh_token_clears_cache_when_token_changes(self) -> None:
+        """Without this, an attacker (or stale gh-auth state) could
+        replay a body validated under the previous token via a 304 on
+        the next ``/user`` read and bypass the #1207 identity guard."""
+        from unittest.mock import patch
+
+        first = MagicMock()
+        first.status_code = 200
+        first.headers = {"ETag": 'W/"a"'}
+        first.content = b"under old token"
+        with patch("requests.Session.request", return_value=first):
+            gh = GitHub("tok-old", token_fetcher=lambda: "tok-old")
+            gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                "GET", "https://api.github.com/repos/o/r/issues/1"
+            )
+        assert (
+            "https://api.github.com/repos/o/r/issues/1" in gh._s._cache  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        )
+        gh._token_fetcher = lambda: "tok-new"  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        changed = gh.refresh_token()
+        assert changed is True
+        assert len(gh._s._cache) == 0  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def test_refresh_token_keeps_cache_when_token_unchanged(self) -> None:
+        """No-op token refresh must not invalidate the cache —
+        ``refresh_token`` runs at every assertion boundary, so wiping
+        on every call would destroy the ETag win."""
+        from unittest.mock import patch
+
+        first = MagicMock()
+        first.status_code = 200
+        first.headers = {"ETag": 'W/"a"'}
+        first.content = b"stable"
+        with patch("requests.Session.request", return_value=first):
+            gh = GitHub("tok", token_fetcher=lambda: "tok")
+            gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                "GET", "https://api.github.com/repos/o/r/issues/1"
+            )
+        assert len(gh._s._cache) == 1  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        assert gh.refresh_token() is False
+        assert len(gh._s._cache) == 1  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
 
 class TestGitHubClass:
     def _gh(self) -> tuple[GitHub, MagicMock]:
