@@ -430,6 +430,62 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
         )
 
 
+def comment_via_cache_or_gh(
+    cache: "CommentCache",
+    kind: str,
+    *,
+    gh: GitHub,
+    repo: str,
+    comment_id: int,
+) -> Mapping[str, Any] | None:
+    """Cache-first single-comment lookup with authoritative ``gh`` fallback.
+
+    Shared between the events.py recovery path (INV-6) and the
+    worker.py consumer paths (INV-7).  The per-(repo, item) cache
+    legitimately returns ``None`` in two non-failure cases:
+
+    * the requested comment belongs to a *different* item — common
+      when the caller iterates a repo-wide promise table but reads
+      from a single-item cache;
+    * the cache failed to hydrate and silently stayed empty
+      (``WorkerRegistry.get_comment_cache`` swallows hydration
+      errors so the webhook handler can still queue the triggering
+      event).
+
+    In both cases the previous direct-GitHub call was authoritative,
+    so falling back to ``gh`` preserves correctness.
+    """
+    cached = cache.get(kind, comment_id)
+    if cached is not None:
+        return cached
+    if kind == KIND_PULLS:
+        return gh.get_pull_comment(repo, comment_id)
+    return gh.get_issue_comment(repo, comment_id)
+
+
+def top_level_comments_via_cache_or_gh(
+    cache: "CommentCache",
+    *,
+    gh: GitHub,
+    repo: str,
+    pr_number: int,
+) -> list[Mapping[str, Any]]:
+    """Cache-first list of top-level PR comments with ``gh`` fallback.
+
+    :meth:`CommentCache.list_top_level` returns ``[]`` both when the
+    item genuinely has no top-level comments and when hydration
+    failed silently (``is_loaded == False``).  In the latter case
+    callers that act on the empty list — e.g. one-shot startup
+    backfill or scan-once reconciliation — would silently drop
+    missed events until the next process restart.  Falling back to
+    ``gh.get_issue_comments`` for unloaded caches preserves the
+    loud-failure semantics callers had before the cache migration.
+    """
+    if cache.is_loaded:
+        return list(cache.list_top_level())
+    return [dict(c) for c in gh.get_issue_comments(repo, pr_number)]
+
+
 __all__ = [
     "KIND_ISSUES",
     "KIND_PULLS",
@@ -437,4 +493,6 @@ __all__ = [
     "CacheMetrics",
     "CommentCache",
     "CommentNode",
+    "comment_via_cache_or_gh",
+    "top_level_comments_via_cache_or_gh",
 ]

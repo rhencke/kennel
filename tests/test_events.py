@@ -5965,12 +5965,12 @@ class TestCacheOrGhFallback:
     one-shot startup backfill doesn't silently lose missed comments."""
 
     def test_comment_via_cache_returns_cache_hit_without_gh(self) -> None:
-        from fido.events import _comment_via_cache_or_gh
+        from fido.events import comment_via_cache_or_gh
 
         cache = MagicMock()
         cache.get.return_value = {"id": 1, "body": "cached"}
         gh = MagicMock()
-        result = _comment_via_cache_or_gh(
+        result = comment_via_cache_or_gh(
             cache, "issues", gh=gh, repo="owner/repo", comment_id=1
         )
         assert result == {"id": 1, "body": "cached"}
@@ -5978,52 +5978,52 @@ class TestCacheOrGhFallback:
         gh.get_pull_comment.assert_not_called()
 
     def test_comment_via_cache_falls_back_to_gh_on_miss_issues(self) -> None:
-        from fido.events import _comment_via_cache_or_gh
+        from fido.events import comment_via_cache_or_gh
 
         cache = MagicMock()
         cache.get.return_value = None
         gh = MagicMock()
         gh.get_issue_comment.return_value = {"id": 2, "body": "from gh"}
-        result = _comment_via_cache_or_gh(
+        result = comment_via_cache_or_gh(
             cache, "issues", gh=gh, repo="owner/repo", comment_id=2
         )
         assert result == {"id": 2, "body": "from gh"}
         gh.get_issue_comment.assert_called_once_with("owner/repo", 2)
 
     def test_comment_via_cache_falls_back_to_gh_on_miss_pulls(self) -> None:
-        from fido.events import _comment_via_cache_or_gh
+        from fido.events import comment_via_cache_or_gh
 
         cache = MagicMock()
         cache.get.return_value = None
         gh = MagicMock()
         gh.get_pull_comment.return_value = {"id": 3, "body": "from gh"}
-        result = _comment_via_cache_or_gh(
+        result = comment_via_cache_or_gh(
             cache, "pulls", gh=gh, repo="owner/repo", comment_id=3
         )
         assert result == {"id": 3, "body": "from gh"}
         gh.get_pull_comment.assert_called_once_with("owner/repo", 3)
 
     def test_top_level_uses_loaded_cache(self) -> None:
-        from fido.events import _top_level_comments_via_cache_or_gh
+        from fido.events import top_level_comments_via_cache_or_gh
 
         cache = MagicMock()
         cache.is_loaded = True
         cache.list_top_level.return_value = [{"id": 1}]
         gh = MagicMock()
-        result = _top_level_comments_via_cache_or_gh(
+        result = top_level_comments_via_cache_or_gh(
             cache, gh=gh, repo="owner/repo", pr_number=7
         )
         assert result == [{"id": 1}]
         gh.get_issue_comments.assert_not_called()
 
     def test_top_level_falls_back_when_unloaded(self) -> None:
-        from fido.events import _top_level_comments_via_cache_or_gh
+        from fido.events import top_level_comments_via_cache_or_gh
 
         cache = MagicMock()
         cache.is_loaded = False
         gh = MagicMock()
         gh.get_issue_comments.return_value = [{"id": 9, "body": "missed"}]
-        result = _top_level_comments_via_cache_or_gh(
+        result = top_level_comments_via_cache_or_gh(
             cache, gh=gh, repo="owner/repo", pr_number=7
         )
         assert result == [{"id": 9, "body": "missed"}]

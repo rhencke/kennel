@@ -1822,7 +1822,15 @@ class TestWorkerHandleQueuedCommentsDrain:
         worker._config = MagicMock()  # type: ignore[attr-defined]
         worker._repo_cfg = MagicMock()  # type: ignore[attr-defined]
         worker._repo_cfg.work_dir = tmp_path
-        worker._registry = MagicMock()  # type: ignore[attr-defined]
+        # INV-7: ``_queued_issue_comment_action`` routes through
+        # ``Worker._resolved_comment`` which consults the per-(repo, item)
+        # ``CommentCache`` first.  Wire the registry's cache to miss so the
+        # fallback path consumes the staged ``gh.get_issue_comment`` return.
+        registry = MagicMock()
+        comment_cache = MagicMock()
+        comment_cache.get.return_value = None
+        registry.get_comment_cache.return_value = comment_cache
+        worker._registry = registry  # type: ignore[attr-defined]
         worker._repo_name = "test/repo"  # type: ignore[attr-defined]
 
         queued = PRCommentQueueRecord(
