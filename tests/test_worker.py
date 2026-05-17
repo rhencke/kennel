@@ -11282,20 +11282,23 @@ class TestExecuteTask:
     def test_preempted_task_turn_yields_before_commit_or_retry(
         self, tmp_path: Path
     ) -> None:
+        from fido.worker import ProviderRunOutcome
+
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Implement feature")
         session = MagicMock()
         session.last_turn_cancelled = False
-        # ``session`` is now a read-only property on SessionBackedAgent
-        # (session_agent.py:37); write to the underlying attribute so the
-        # property returns our mock when ``provider_turn_was_preempted``
-        # consults ``_provider_agent.session``.
         worker._provider_agent._session = session
 
-        def preempt_provider_turn(*_args: object, **_kwargs: object) -> tuple[str, str]:
-            session.last_turn_cancelled = True
-            return "sid", ""
+        def preempt_provider_turn(
+            *_args: object, **_kwargs: object
+        ) -> ProviderRunOutcome:
+            # Carry the cancel bit by value on the returned outcome —
+            # the worker reads ``run_outcome.cancelled`` and no longer
+            # consults ``session.last_turn_cancelled`` (closes the race
+            # Rob flagged on PR #1793).
+            return ProviderRunOutcome(session_id="sid", text="", cancelled=True)
 
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
