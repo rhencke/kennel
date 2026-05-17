@@ -1215,9 +1215,7 @@ class TestCopilotCLISession:
             session.prompt("hi")
         assert exc_info.value.cancel_observed is True
 
-    def test_prompt_preserves_cancel_observed_from_inner(
-        self, tmp_path: Path
-    ) -> None:
+    def test_prompt_preserves_cancel_observed_from_inner(self, tmp_path: Path) -> None:
         """codex P1 on PR #1793: outer wrapper preserves
         ``cancel_observed`` already attached by the inner try/except."""
         system_file = tmp_path / "persona.md"

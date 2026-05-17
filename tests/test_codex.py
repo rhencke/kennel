@@ -944,9 +944,7 @@ class TestCodexSession:
         assert session.consume_pending_cancel() is False
         assert session.last_turn_cancelled is False
 
-    def test_prompt_preserves_cancel_observed_from_inner(
-        self, tmp_path: Path
-    ) -> None:
+    def test_prompt_preserves_cancel_observed_from_inner(self, tmp_path: Path) -> None:
         """codex P1 on PR #1793: outer wrapper preserves
         ``cancel_observed`` already attached by the inner try/except."""
         system_file = tmp_path / "system.md"
@@ -967,9 +965,7 @@ class TestCodexSession:
             session.prompt("hi")
         assert exc_info.value.cancel_observed is True
 
-    def test_prompt_inner_captures_cancel_on_send_failure(
-        self, tmp_path: Path
-    ) -> None:
+    def test_prompt_inner_captures_cancel_on_send_failure(self, tmp_path: Path) -> None:
         """codex P1 on PR #1793: inner try/except captures the sticky
         cancel bit INSIDE the OwnedSession lock and attaches to the
         raised exception."""

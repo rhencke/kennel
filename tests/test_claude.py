@@ -2384,9 +2384,7 @@ class TestClaudeSessionLock:
         assert session.last_turn_cancelled is False
         session.stop()
 
-    def test_prompt_attaches_cancel_observed_from_inner(
-        self, tmp_path: Path
-    ) -> None:
+    def test_prompt_attaches_cancel_observed_from_inner(self, tmp_path: Path) -> None:
         """codex P1 on PR #1793: when ``_prompt_inner`` raises with
         ``cancel_observed`` already set (captured inside the lock at
         the moment of send/drain failure), the outer wrapper preserves
@@ -2421,9 +2419,7 @@ class TestClaudeSessionLock:
         assert exc_info.value.cancel_observed is False
         session.stop()
 
-    def test_prompt_inner_captures_cancel_on_send_failure(
-        self, tmp_path: Path
-    ) -> None:
+    def test_prompt_inner_captures_cancel_on_send_failure(self, tmp_path: Path) -> None:
         """codex P1 on PR #1793: send/drain failure path captures the
         sticky cancel bit INSIDE the OwnedSession lock and attaches it
         to the raised exception so the caller can read by value
