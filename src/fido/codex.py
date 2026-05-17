@@ -786,6 +786,16 @@ class CodexSession(OwnedSession):
         with self._state_lock:
             return self._last_turn_cancelled
 
+    def consume_pending_cancel(self) -> bool:
+        """Atomically read and clear the sticky cancel-observed bit.
+
+        See :meth:`fido.provider.PromptSession.consume_pending_cancel`.
+        """
+        with self._state_lock:
+            cancelled = self._last_turn_cancelled
+            self._last_turn_cancelled = False
+            return cancelled
+
     def prompt(
         self,
         content: str,
@@ -802,18 +812,13 @@ class CodexSession(OwnedSession):
         # ``None`` is "worker phase" and keeps full implementation access
         # (#1672).
         sandbox_policy = _sandbox_acp_policy_for_phase(allowed_tools)
+        # Clear the sticky cancel-observed bit BEFORE ``with self:`` so
+        # a failure during ``__enter__`` still sees cleared state.
+        # See the matching comment in ``ClaudeSession.prompt`` (codex
+        # P1 on PR #1793).
+        with self._state_lock:
+            self._last_turn_cancelled = False
         with self:
-            # Clear the sticky cancel-observed bit at the very start of
-            # the new turn — *before* any pre-send work (``switch_model``)
-            # that could raise.  Without this, a previous turn's cancel
-            # bit would leak into the new prompt's exception path, and
-            # the recovery loop in
-            # ``session_agent._prompt_with_recovery`` would misclassify
-            # a pre-send failure as a current-turn preemption (codex P1
-            # follow-up on #1793, matches the same fix in
-            # ``ClaudeSession.prompt``).
-            with self._state_lock:
-                self._last_turn_cancelled = False
             if model is not None:
                 self.switch_model(model)
             self.send(

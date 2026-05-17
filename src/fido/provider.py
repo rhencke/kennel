@@ -454,6 +454,21 @@ class PromptSession(Protocol):
         """Report whether the most recent turn was cancelled by preemption."""
         ...
 
+    def consume_pending_cancel(self) -> bool:
+        """Atomically read and clear the sticky cancel-observed bit.
+
+        Returns whether a cancel was observed since the last clear, and
+        clears the bit in the same critical section.  Used by the
+        exception path in
+        :meth:`~fido.session_agent.SessionBackedAgent._prompt_with_recovery`
+        to classify a ``prompt()`` failure as cancel-induced vs. a real
+        provider error without ever leaving the bit set for a later
+        attempt to misread as its own cancellation (closes codex P1
+        comments on PR #1793 about false-positive cancel classification
+        from stale bits).
+        """
+        ...
+
     def switch_model(self, model: ProviderModel) -> None:
         """Switch the live session to *model* in-place without kill, respawn,
         or session-state loss."""

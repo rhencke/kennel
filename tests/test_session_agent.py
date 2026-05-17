@@ -280,7 +280,13 @@ class TestSessionBackedAgent:
         ``CancelFire`` cannot return ``RetNormal``."""
         session = MagicMock()
         session.prompt.side_effect = BrokenPipeError("claude exited with code -2")
-        session.last_turn_cancelled = True  # cancel was fired during the turn
+        # ``consume_pending_cancel`` is the authoritative cancel-observation
+        # channel for the exception path (atomic read+clear under the
+        # session lock, codex P1 family on PR #1793).  Return True for
+        # the first exception observation, False after so a hypothetical
+        # second call cannot re-observe.
+        session.consume_pending_cancel.side_effect = [True, False]
+        session.last_turn_cancelled = True
         session.is_alive.return_value = False
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", model=agent.voice_model) == ""

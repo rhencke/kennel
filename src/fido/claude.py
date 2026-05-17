@@ -657,6 +657,21 @@ class ClaudeSession(OwnedSession):
         with self._stream_lock:
             return self._last_turn_cancelled_sticky
 
+    def consume_pending_cancel(self) -> bool:
+        """Atomically read and clear the sticky cancel-observed bit.
+
+        The exception path in
+        :meth:`~fido.session_agent.SessionBackedAgent._prompt_with_recovery`
+        calls this to classify a ``prompt()`` failure as cancel-induced.
+        Atomic read+clear means a subsequent attempt cannot see the
+        same cancel bit and mis-attribute it (closes codex P1 comments
+        on PR #1793 about stale-bit false positives).
+        """
+        with self._stream_lock:
+            cancelled = self._last_turn_cancelled_sticky
+            self._last_turn_cancelled_sticky = False
+            return cancelled
+
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O.
 
@@ -1190,24 +1205,25 @@ class ClaudeSession(OwnedSession):
         """
         tid = threading.get_ident()
         t_start = time.monotonic()
+        # Clear the sticky cancel-observed bit BEFORE ``with self:``.
+        # If ``__enter__`` raises (e.g. ``SessionLeakError`` during
+        # talker registration) or the lock acquisition itself fails,
+        # a previous turn's cancel bit would otherwise leak into the
+        # caller's exception path and
+        # ``session_agent._prompt_with_recovery`` would misclassify the
+        # failure as a current-turn preemption (codex P1 on PR #1793).
+        # Safe to clear before acquiring the OwnedSession lock: the
+        # previous holder already captured their cancel bit into their
+        # own ``PromptOutcome`` before releasing, and no other thread
+        # can be inside ``iter_events`` setting the bit between turns.
+        with self._stream_lock:
+            self._last_turn_cancelled_sticky = False
         with self:
             log.info(
                 "session.prompt: lock acquired (tid=%d, waited=%.2fs)",
                 tid,
                 time.monotonic() - t_start,
             )
-            # Clear the sticky cancel-observed bit at the very start of
-            # the new turn — *before* any pre-send work (``recover``,
-            # ``switch_model``, ``switch_tools``) that could raise.
-            # Without this, a previous turn's cancel bit would leak
-            # into the new prompt's exception path, and the recovery
-            # loop in ``session_agent._prompt_with_recovery`` would
-            # misclassify a pre-send failure as a current-turn
-            # preemption (codex P1 follow-up on #1793).  Held inside
-            # ``_stream_lock`` to match the read in
-            # :attr:`last_turn_cancelled`.
-            with self._stream_lock:
-                self._last_turn_cancelled_sticky = False
             # Defensive cleanup on acquire (#1670): if a prior turn left
             # the FSM in an in-flight state — ``Sending`` /
             # ``AwaitingReply`` / ``Draining`` — recover (respawn the

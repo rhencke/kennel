@@ -1088,7 +1088,20 @@ class CopilotCLISession(OwnedSession):
 
     @property
     def last_turn_cancelled(self) -> bool:
-        return self._last_turn_cancelled
+        # Guarded by ``_metrics_lock`` for thread-safe read across the
+        # free-threaded runtime (codex P1 on PR #1793 thread safety).
+        with self._metrics_lock:
+            return self._last_turn_cancelled
+
+    def consume_pending_cancel(self) -> bool:
+        """Atomically read and clear the sticky cancel-observed bit.
+
+        See :meth:`fido.provider.PromptSession.consume_pending_cancel`.
+        """
+        with self._metrics_lock:
+            cancelled = self._last_turn_cancelled
+            self._last_turn_cancelled = False
+            return cancelled
 
     def prompt(
         self,
@@ -1104,22 +1117,20 @@ class CopilotCLISession(OwnedSession):
         # differs from the protocol's READ_ONLY default because there's
         # nothing to enforce.
         del allowed_tools
-        with self:
-            # Clear the sticky cancel-observed bit at the very start of
-            # the new turn — *before* ``_prompt_locked`` runs.  Without
-            # this, a previous turn's cancel bit leaks into a
-            # ``runtime.prompt`` failure exception, and
-            # ``session_agent._prompt_with_recovery`` misclassifies it
-            # as a current-turn preemption (codex P1 follow-up on
-            # #1793, matches the same fix in ``ClaudeSession.prompt``
-            # and ``CodexSession.prompt``).
+        # Clear the sticky cancel-observed bit BEFORE ``with self:`` so
+        # a failure during ``__enter__`` still sees cleared state.
+        # See the matching comment in ``ClaudeSession.prompt`` (codex
+        # P1 on PR #1793).  Lock-guarded for cross-thread safety.
+        with self._metrics_lock:
             self._last_turn_cancelled = False
+        with self:
             result = self._prompt_locked(
                 content, model=model, system_prompt=system_prompt
             )
-            # Capture the cancel bit atomically inside the session lock at
-            # the moment of return — see :class:`PromptOutcome` and PR #1793.
-            cancelled = self._last_turn_cancelled
+            # Capture the cancel bit atomically at the moment of return
+            # — see :class:`PromptOutcome` and PR #1793.
+            with self._metrics_lock:
+                cancelled = self._last_turn_cancelled
             return PromptOutcome(result, cancelled=cancelled)
 
     def send(self, content: str) -> None:

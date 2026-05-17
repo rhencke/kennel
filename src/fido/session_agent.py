@@ -383,15 +383,27 @@ class SessionBackedAgent(SnapshotPublisher):
             except Exception as exc:
                 if self._prompt_failure_is_passthrough(exc):
                     raise
-                # Exception path: no :class:`PromptOutcome` was returned,
-                # so we must fall back to the session's sticky bit.
-                # This is the one site where reading the session is
-                # unavoidable — the lock-protected capture in
-                # ``session.prompt`` never ran.  The very next call to
-                # ``session.prompt`` will clear the bit at prompt-entry,
-                # so observe-and-recover here, in this single thread,
-                # before any other thread re-enters the session.
-                cancel_observed = getattr(session, "last_turn_cancelled", False) is True
+                # Exception path: no :class:`PromptOutcome` was returned.
+                # Use ``consume_pending_cancel`` (atomic read+clear under
+                # the session's own lock) so:
+                #   - a subsequent attempt cannot re-observe and
+                #     mis-attribute the same cancel
+                #   - paired with the prompt-entry clear in
+                #     ``session.prompt`` (now moved BEFORE ``with self:``
+                #     so it runs even when ``__enter__`` raises), an
+                #     observed bit here is necessarily from THIS attempt
+                # Together these close the codex P1 family of comments
+                # on PR #1793 about stale-bit false-positive cancel
+                # classification.  Old test doubles may not implement
+                # ``consume_pending_cancel`` — fall back to a one-shot
+                # read of ``last_turn_cancelled`` for those.
+                consume = getattr(session, "consume_pending_cancel", None)
+                if callable(consume):
+                    cancel_observed = consume() is True
+                else:
+                    cancel_observed = (
+                        getattr(session, "last_turn_cancelled", False) is True
+                    )
                 if cancel_observed:
                     fsm_state = cancel_fsm.transition(
                         fsm_state, cancel_fsm.CancelFire()
