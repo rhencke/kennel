@@ -555,6 +555,225 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def rescope_prompt_verdicts(
+        self,
+        task_list: list[dict[str, Any]],
+        commit_summary: str,
+        *,
+        intents: list[RescopeIntent],
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+        prior_attempts: list[ClosedPR] | None = None,
+    ) -> str:
+        """Build an Opus prompt requesting the **verdict-wrapped** envelope.
+
+        This is the INV-D (#1802 / #1798) input shape: instead of asking
+        Opus for a flat ``{"operations": [...]}`` list with per-op
+        ``contributing_intents`` metadata, the rescope output is
+        organized **per intent** — each entry of the top-level
+        ``verdicts`` array names the intent it pertains to, the
+        outcome (honored / reshaped / superseded / no_op), the ops it
+        produced, and the narrative the reply-back layer (INV-E /
+        #1803) will post if the outcome is material.
+
+        Only call when ``intents`` is non-empty.  The no-intent rescope
+        path (e.g. ``rescope_before_pick``) keeps using
+        :meth:`rescope_prompt`'s operations envelope — there are no
+        intents to attribute against, so the verdict shape would be
+        empty noise.
+
+        Parses via :func:`fido.tasks._parse_rescope_verdicts`; on
+        errors, retries via :meth:`rescope_verdicts_parse_nudge`.
+        """
+        pending = [t for t in task_list if t.get("status") != "completed"]
+        completed = [t for t in task_list if t.get("status") == "completed"]
+
+        def _fmt(t: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": t.get("id", ""),
+                "type": t.get("type", "spec"),
+                "status": t.get("status", "pending"),
+                "title": t.get("title", ""),
+                "description": t.get("description", ""),
+            }
+
+        pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
+        completed_titles = [t.get("title", "") for t in completed]
+        completed_block = (
+            "\n".join(f"- {title}" for title in completed_titles)
+            if completed_titles
+            else "(none)"
+        )
+
+        active_ctx_prefix = ""
+        if issue is not None:
+            active_ctx_prefix = (
+                render_active_context(
+                    issue=issue,
+                    pr=pr,
+                    tasks=[_task_snapshot_from_dict(t) for t in task_list],
+                    current_task=None,
+                    prior_attempts=prior_attempts or [],
+                )
+                + "\n\n"
+            )
+
+        # Intents block: same author-rendered format as rescope_prompt
+        # (per INV-C / #1801) so Opus's per-author supersedence
+        # judgment has a consistent referent across both schemas.
+        ordered_intents = sorted(intents, key=lambda i: i.timestamp)
+        intent_lines = [
+            (
+                f"- comment #{intent.comment_id} "
+                f"({intent.timestamp}, by @{intent.author or '?'}): "
+                f"{intent.change_request}"
+            )
+            for intent in ordered_intents
+        ]
+        intent_ids_list = ", ".join(str(i.comment_id) for i in ordered_intents)
+
+        return (
+            f"{TRIAGE_CLAUSE}\n\n"
+            f"{active_ctx_prefix}"
+            "You are reviewing the pending work queue for a pull request in "
+            "progress AND interpreting a batch of pending intent comments.\n\n"
+            "Already completed tasks:\n"
+            f"{completed_block}\n\n"
+            "Recent commits (already implemented):\n"
+            f"{commit_summary or '(none)'}\n\n"
+            "Pending tasks (current order):\n"
+            f"{pending_json}\n\n"
+            "Pending intents from PR comments "
+            "(chronological, oldest first):\n" + "\n".join(intent_lines) + "\n\n"
+            "Your job: produce ONE verdict per intent above (no missing, no "
+            "duplicates) explaining what you did with that intent's ask, "
+            "AND the ops (over the pending task list) that the verdict's "
+            "ops field produces.  Same-author later overrides earlier on "
+            "conflict; cross-author conflict warrants reply-back to the "
+            "older commenter (the runtime handles that — you just emit "
+            "the outcome).\n\n"
+            "Verdict envelope schema:\n"
+            "  {\n"
+            '    "intent_comment_id": <int — one of: '
+            f"{intent_ids_list}>,\n"
+            '    "outcome": "honored" | "reshaped" | "superseded" | "no_op",\n'
+            '    "ops": [<op record>, ...],\n'
+            '    "affected_task_ids": ["<task-id>", ...],\n'
+            '    "by_intent_comment_id": <int | null>,\n'
+            '    "narrative": "<prose explanation>" | null\n'
+            "  }\n\n"
+            "Outcome semantics (drives whether INV-E posts a follow-up "
+            "reply-back):\n"
+            "  honored    — ops fulfill the intent as asked.  Triage "
+            "already replied, no follow-up.\n"
+            "  reshaped   — ops fulfill part of the intent, framing "
+            "changed (e.g. split into prereq + feature).  Material — "
+            "reply-back required.  Narrative MUST be non-empty.\n"
+            "  superseded — another intent in this batch overrode this "
+            "one in whole or part.  Set ``by_intent_comment_id`` to "
+            "the winning intent's comment id.  Material when authors "
+            "differ; self-correction (no reply) when same author.  "
+            "Narrative MUST be non-empty.  ``ops`` may be non-empty "
+            'for *partial* supersedence (e.g. "paint and make it '
+            'red" → "no, green": keep the paint op, supersede only '
+            "the color component).\n"
+            "  no_op      — intent acknowledged but produces no task "
+            "changes (chat ack, or request already satisfied).  ``ops`` "
+            "and ``affected_task_ids`` MUST be empty.\n\n"
+            "Op schema (each entry of a verdict's ``ops`` array):\n"
+            '  {"op": "keep", "id": "<existing-id>"}\n'
+            "      — leave the task unchanged\n"
+            '  {"op": "rewrite", "id": "<existing-id>", '
+            '"title": "...", "description": "..."}\n'
+            "      — replace the title and/or description\n"
+            '  {"op": "rewrite_anchor", "id": "<existing-id>", '
+            '"anchor_comment_id": <int>}\n'
+            "      — re-target the source-comment anchor (reply destination)\n"
+            '  {"op": "remove", "id": "<existing-id>"}\n'
+            "      — close the task (covered by recent commit, no longer needed)\n"
+            '  {"op": "merge", "target_id": "<existing-id>", '
+            '"sources": ["<existing-id>", ...], '
+            '"title": "...", "description": "..."}\n'
+            "      — fold each source's lineage into target; sources close\n"
+            '  {"op": "split", "id": "<existing-id>", "children": '
+            '[{"title": "...", "description": "..."}, ...]}\n'
+            "      — close the source and spawn N children inheriting its lineage\n"
+            '  {"op": "new", "title": "...", "description": "...", '
+            '"type": "spec"}\n'
+            "      — create a brand-new task (fresh id assigned by the runtime)\n"
+            "\n"
+            "Constraints:\n"
+            "1. Exactly one verdict per intent (no missing, no duplicates).\n"
+            "2. ``by_intent_comment_id`` must reference another intent in this "
+            "batch and only set when ``outcome == 'superseded'``.\n"
+            "3. The supersedence graph must be acyclic.\n"
+            "4. ``affected_task_ids`` may overlap across verdicts when "
+            "multiple intents are jointly honored by the same task "
+            "(e.g. three review comments asking the same fix + one "
+            '"just fix all of these" → all four verdicts attribute to '
+            "one consolidated task).\n"
+            "5. Op-level rules: each pending task id may appear in at "
+            "most one op across all verdicts; new tasks use ``new`` ops; "
+            "tasks of type ``ci`` come first.\n"
+            "6. Omitting an existing task id (no op mentions it) means "
+            "KEEP it as-is.  To wipe a task you must emit an explicit "
+            "``remove`` op for it.\n\n"
+            'Reply with ONLY a JSON object in the form {"verdicts": [...]}.\n'
+            "No other text before or after the JSON."
+        )
+
+    def rescope_verdicts_parse_nudge(
+        self, errors: list[str], *, attempts_remaining: int
+    ) -> str:
+        """Build a retry nudge when the verdict-envelope response failed to parse.
+
+        Mirrors :meth:`rescope_parse_nudge` for the
+        :meth:`rescope_prompt_verdicts` schema — full error list,
+        schema recap, attempt budget.
+        """
+        if attempts_remaining == 0:
+            attempt_line = (
+                "This is your final attempt — if the response still fails to "
+                "parse, the rescope batch will be dropped."
+            )
+        else:
+            attempt_line = (
+                f"You have {attempts_remaining} attempt(s) remaining after this one."
+            )
+        bulleted = "\n".join(f"- {e}" for e in errors)
+        return (
+            "Your previous rescope response had the following problems:\n\n"
+            f"{bulleted}\n\n"
+            "Resubmit the full verdicts array, fixing every problem above. "
+            f"{attempt_line}\n\n"
+            "Verdict envelope schema (recap):\n"
+            "  {\n"
+            '    "intent_comment_id": <int — must be one of the batch intents>,\n'
+            '    "outcome": "honored" | "reshaped" | "superseded" | "no_op",\n'
+            '    "ops": [<op>, ...],\n'
+            '    "affected_task_ids": ["<task-id>", ...],\n'
+            '    "by_intent_comment_id": <int | null — only when superseded>,\n'
+            '    "narrative": "<prose>" | null '
+            "(required when reshaped/superseded)\n"
+            "  }\n\n"
+            "Op schema (recap):\n"
+            '  {"op": "keep", "id": "<existing-id>"}\n'
+            '  {"op": "rewrite", "id": "<existing-id>", '
+            '"title": "...", "description": "..."}\n'
+            '  {"op": "rewrite_anchor", "id": "<existing-id>", '
+            '"anchor_comment_id": <int>}\n'
+            '  {"op": "remove", "id": "<existing-id>"}\n'
+            '  {"op": "merge", "target_id": "<existing-id>", '
+            '"sources": ["<existing-id>", ...], '
+            '"title": "...", "description": "..."}\n'
+            '  {"op": "split", "id": "<existing-id>", "children": '
+            '[{"title": "...", "description": "..."}, ...]}\n'
+            '  {"op": "new", "title": "...", "description": "...", '
+            '"type": "spec"}\n\n'
+            'Reply with ONLY a JSON object in the form {"verdicts": [...]}.\n'
+            "No other text before or after the JSON."
+        )
+
     def rescope_parse_nudge(self, errors: list[str], *, attempts_remaining: int) -> str:
         """Build a follow-up nudge when the rescope response failed to parse.
 
