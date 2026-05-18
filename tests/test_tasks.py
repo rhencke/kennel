@@ -1331,6 +1331,42 @@ class TestParseRescopeVerdicts:
         assert verdicts[0].ops == ()
         assert verdicts[0].affected_task_ids == ()
 
+    def test_affected_task_ids_mapping_rejected_by_ctor(self) -> None:
+        # codex P2 on PR #1809: ``{"T1": ...}`` iterates as ("T1",)
+        # and would pass the per-entry str check; reject mappings
+        # explicitly at the ctor boundary.
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"affected_task_ids": {"T1": null}}]}'
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("not a mapping" in e for e in errors)
+
+    def test_duplicate_intent_ids_in_input_batch_rejected(self) -> None:
+        # codex P2 on PR #1809: collapsing intents to a set hides
+        # duplicate comment_ids from coverage checking — a single
+        # verdict could "cover" both silently.  Fail closed at the
+        # parser boundary so the upstream coalescer bug is visible.
+        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(1)])
+        assert any(
+            "duplicate comment_id" in e and "[1]" in e
+            for e in errors
+        )
+
+    def test_multiple_duplicate_intent_ids_all_reported(self) -> None:
+        raw = '{"verdicts": []}'
+        _, errors = _parse_rescope_verdicts(
+            raw,
+            [_intent(1), _intent(1), _intent(2), _intent(2), _intent(2)],
+        )
+        # Single error line lists ALL duplicates so the coalescer
+        # bug is debuggable on sight.
+        assert any(
+            "duplicate comment_id" in e and "1" in e and "2" in e
+            for e in errors
+        )
+
 
 class TestFindCrossOpErrors:
     def test_unknown_id_rejected(self) -> None:

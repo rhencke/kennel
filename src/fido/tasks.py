@@ -1444,7 +1444,26 @@ def _parse_rescope_verdicts(  # pyright: ignore[reportUnusedFunction]
             f"response.verdicts: must be a list, got {type(raw_verdicts).__name__}"
         ]
 
-    intent_ids = {intent.comment_id for intent in intents}
+    # codex P2 on PR #1809: detect duplicate ``RescopeIntent.comment_id``
+    # values in the input batch up front.  If we ``set()``-collapsed
+    # them downstream, a single verdict could "cover" both entries
+    # silently, defeating the one-verdict-per-intent invariant
+    # (callers that coalesce intent lists across comments may merge
+    # without dedup).  Fail closed: name every duplicated id so the
+    # upstream coalescer bug is debuggable on sight.
+    intent_id_list = [intent.comment_id for intent in intents]
+    intent_ids = set(intent_id_list)
+    if len(intent_id_list) != len(intent_ids):
+        seen: set[int] = set()
+        duplicates: list[int] = []
+        for cid in intent_id_list:
+            if cid in seen and cid not in duplicates:
+                duplicates.append(cid)
+            seen.add(cid)
+        return [], [
+            "intents: duplicate comment_id(s) in input batch — coalescer must "
+            f"dedup before calling the parser: {sorted(duplicates)}"
+        ]
     verdicts: list[IntentVerdict] = []
     seen_intent_ids: set[int] = set()
 
