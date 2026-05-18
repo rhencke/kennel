@@ -204,13 +204,10 @@ class IntentVerdict:
     narrative: str | None = None
 
     def __post_init__(self) -> None:
-        # Type checks (codex P2 round 3 on #1802: dataclasses do NOT
-        # enforce annotations at runtime, so a parser typo like
-        # ``outcome="supersede"`` or ``intent_comment_id="123"`` would
-        # silently flow downstream.  Validate at the boundary so the
-        # malformed verdict crashes here instead of producing wrong
-        # reply-back behavior.  ``bool`` is rejected separately
-        # because it is an ``int`` subclass.)
+        # Scalar type checks first (codex P2 on #1802: dataclasses
+        # don't enforce annotations; a parser typo like
+        # ``intent_comment_id="123"`` would silently flow downstream).
+        # ``bool`` rejected separately — it's an ``int`` subclass.
         if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
             self.intent_comment_id, int
         ) or isinstance(self.intent_comment_id, bool):
@@ -234,10 +231,17 @@ class IntentVerdict:
                 "'honored', 'reshaped', 'superseded', 'no_op'; "
                 f"got {self.outcome!r}"
             )
-        # ``ops`` shape: must be a sequence of mappings.  A bare dict
-        # passed as ``ops`` would silently iterate as its keys ("op",
-        # "id", ...) and ``deep_freeze`` would store a tuple of strs
-        # instead of failing the contract.  Reject before coercion.
+        if self.narrative is not None and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            self.narrative, str
+        ):
+            raise TypeError(
+                "IntentVerdict.narrative must be str or None, got "
+                f"{type(self.narrative).__name__}"
+            )
+
+        # Container-shape checks BEFORE materialization (codex P2
+        # round 4 on #1802: reject bare ``str`` / ``set`` / ``dict``
+        # that would silently mis-coerce).
         if isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
             self.ops, Mapping
         ):
@@ -245,7 +249,32 @@ class IntentVerdict:
                 "IntentVerdict.ops must be a sequence of op mappings, "
                 "not a single mapping (did you mean to wrap in a tuple?)"
             )
-        for op in self.ops:
+        if isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            self.affected_task_ids, str
+        ):
+            raise TypeError(
+                "IntentVerdict.affected_task_ids must be a sequence of str, "
+                "not a bare str (a string iterates as single chars and would "
+                f"be silently mis-stored as {tuple(self.affected_task_ids)!r})"
+            )
+        if isinstance(self.affected_task_ids, (set, frozenset)):
+            raise TypeError(
+                "IntentVerdict.affected_task_ids must be ordered "
+                "(docstring contract: 'in result-list order'); got "
+                f"{type(self.affected_task_ids).__name__}, which has "
+                "nondeterministic iteration order"
+            )
+
+        # Materialize collections ONCE before per-entry validation
+        # (codex P2 round 4 on #1802: a generator passed as ops /
+        # affected_task_ids would be exhausted by the validation
+        # loop, and the frozen tuple would silently end up empty —
+        # dropping all op/task attribution).
+        ops_seq = tuple(self.ops)
+        ids_seq = tuple(self.affected_task_ids)
+
+        # Per-entry type checks.
+        for op in ops_seq:
             if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 op, Mapping
             ):
@@ -253,10 +282,7 @@ class IntentVerdict:
                     "IntentVerdict.ops entries must be Mapping, got "
                     f"{type(op).__name__}"
                 )
-        # ``affected_task_ids``: each element must already be a string.
-        # Don't silently ``str(None)`` it — that produces ``"None"`` and
-        # hides upstream parser/schema bugs.
-        for tid in self.affected_task_ids:
+        for tid in ids_seq:
             if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 tid, str
             ):
@@ -265,15 +291,14 @@ class IntentVerdict:
                     f"got {type(tid).__name__}"
                 )
 
-        # codex P1 / P2 on #1802: deep-freeze the payload collections
-        # so the "frozen snapshot" promise holds at the value level,
-        # not just the attribute level.  Callers (tests, the parser
-        # layer when it lands) can pass plain lists / dicts —
-        # ``deep_freeze`` coerces to ``tuple`` + ``frozendict``.
+        # Deep-freeze the materialized collections so the "frozen
+        # snapshot" promise holds at the value level too — callers
+        # can pass plain lists/dicts; ``deep_freeze`` (#1748) coerces
+        # to ``tuple`` of ``frozendict``.
         from fido.frozen import deep_freeze
 
-        object.__setattr__(self, "ops", deep_freeze(list(self.ops)))
-        object.__setattr__(self, "affected_task_ids", tuple(self.affected_task_ids))
+        object.__setattr__(self, "ops", deep_freeze(list(ops_seq)))
+        object.__setattr__(self, "affected_task_ids", ids_seq)
 
         # codex P2 on #1802: enforce supersedence + outcome invariants
         # at construction so a malformed verdict crashes at the

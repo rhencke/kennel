@@ -6,10 +6,14 @@ verdict drives the INV-E (#1803) reply-back classifier downstream.
 """
 
 import dataclasses
+from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
 from fido.types import IntentVerdict
+
+_ = (Iterator, Any)  # keep imports for type hints inside test bodies
 
 
 class TestIntentVerdictShape:
@@ -316,3 +320,73 @@ class TestIntentVerdictTypeChecks:
                 outcome="honored",
                 affected_task_ids=(None,),  # type: ignore[arg-type]
             )
+
+    def test_narrative_must_be_str_or_none(self) -> None:
+        # codex P2 round 4 on #1802: a non-str narrative would hit
+        # ``.strip()`` for reshaped/superseded and AttributeError
+        # instead of a clean boundary error.
+        with pytest.raises(TypeError, match="narrative must be str or None"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                narrative=42,  # type: ignore[arg-type]
+            )
+
+    def test_affected_task_ids_rejects_bare_str(self) -> None:
+        # codex P2 round 4 on #1802: ``affected_task_ids="T1"`` iterates
+        # as ('T', '1') and would silently be mis-stored.  Reject.
+        with pytest.raises(TypeError, match="not a bare str"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                affected_task_ids="T1",  # type: ignore[arg-type]
+            )
+
+    def test_affected_task_ids_rejects_set(self) -> None:
+        # codex P2 round 4 on #1802: docstring contract says ordered.
+        # Set iteration order is nondeterministic — would produce
+        # non-reproducible verdicts.
+        with pytest.raises(TypeError, match="must be ordered"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                affected_task_ids={"T1", "T2"},  # type: ignore[arg-type]
+            )
+
+    def test_affected_task_ids_rejects_frozenset(self) -> None:
+        with pytest.raises(TypeError, match="must be ordered"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                affected_task_ids=frozenset({"T1"}),  # type: ignore[arg-type]
+            )
+
+    def test_ops_generator_input_preserves_entries(self) -> None:
+        # codex P2 round 4 on #1802: a generator iterates once.  If
+        # the validation loop and the freeze pass each iterate, the
+        # second pass sees an exhausted iterator and silently stores
+        # an empty tuple.  Materialize once up-front.
+        def ops_gen() -> "Iterator[dict[str, Any]]":
+            yield {"op": "rewrite", "id": "T1"}
+            yield {"op": "remove", "id": "T2"}
+
+        v = IntentVerdict(
+            intent_comment_id=1,
+            outcome="reshaped",
+            ops=ops_gen(),  # type: ignore[arg-type]
+            affected_task_ids=("T1",),
+            narrative="x",
+        )
+        assert len(v.ops) == 2, "generator entries must not be silently dropped"
+
+    def test_affected_task_ids_generator_input_preserves_entries(self) -> None:
+        def ids_gen() -> "Iterator[str]":
+            yield "T1"
+            yield "T2"
+
+        v = IntentVerdict(
+            intent_comment_id=1,
+            outcome="honored",
+            affected_task_ids=ids_gen(),  # type: ignore[arg-type]
+        )
+        assert v.affected_task_ids == ("T1", "T2")
