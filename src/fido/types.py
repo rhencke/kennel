@@ -264,6 +264,19 @@ class IntentVerdict:
                 f"{type(self.affected_task_ids).__name__}, which has "
                 "nondeterministic iteration order"
             )
+        if isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            self.affected_task_ids, Mapping
+        ):
+            # codex P2 on PR #1809: ``{"T1": ...}`` would iterate as
+            # its keys and pass the per-entry str check, silently
+            # turning ``{"T1": ..., "T2": ...}`` into
+            # ``("T1", "T2")`` — losing the values and accepting an
+            # invalid shape.  Reject mappings up front.
+            raise TypeError(
+                "IntentVerdict.affected_task_ids must be a sequence of str, "
+                "not a mapping (iterating a mapping yields keys and would "
+                "silently mis-store the contents)"
+            )
 
         # Materialize collections ONCE before per-entry validation
         # (codex P2 round 4 on #1802: a generator passed as ops /

@@ -33,6 +33,7 @@ from fido.types import (
     ActiveIssue,
     ActivePR,
     ClosedPR,
+    IntentVerdict,
     RescopeIntent,
     TaskStatus,
     TaskType,
@@ -1382,6 +1383,205 @@ def _parse_rescope_operations(
     if errors:
         return [], errors
     return operations, []
+
+
+def _parse_rescope_verdicts(  # pyright: ignore[reportUnusedFunction]
+    raw: str,
+    intents: list[RescopeIntent],
+) -> tuple[list[IntentVerdict], list[str]]:
+    """Parse the intent-first rescope envelope into :class:`IntentVerdict` list.
+
+    Schema (per #1798 INV-D)::
+
+        {"verdicts": [
+          {
+            "intent_comment_id": <int — one of the batch's comment ids>,
+            "outcome": "honored" | "reshaped" | "superseded" | "no_op",
+            "ops": [<op record>, ...],            // optional, default []
+            "affected_task_ids": ["T1", ...],     // optional, default []
+            "by_intent_comment_id": <int | null>, // optional, null default
+            "narrative": "..." | null             // optional, null default
+          },
+          ...
+        ]}
+
+    Validations (collected one-pass — same all-errors-at-once contract
+    as :func:`_parse_rescope_operations`):
+
+    * Top-level envelope shape (``{"verdicts": [...]}``).
+    * Each verdict entry is a dict.
+    * Per-verdict field types delegated to
+      :class:`~fido.types.IntentVerdict`'s ``__post_init__`` — every
+      ``TypeError`` / ``ValueError`` it raises gets captured as a
+      parse error, not propagated.
+    * **Coverage**: every intent in *intents* has exactly one verdict
+      (no missing, no duplicate ``intent_comment_id``).
+    * **In-batch references**: ``intent_comment_id`` and (when set)
+      ``by_intent_comment_id`` must name a :class:`RescopeIntent`
+      ``comment_id`` from *intents* — no inventing ids.
+    * **Acyclic supersedence**: the directed graph
+      ``intent_comment_id -> by_intent_comment_id`` over the batch's
+      verdicts must be acyclic.  Self-loops are already rejected by
+      :class:`IntentVerdict` itself.
+
+    When errors are non-empty the returned verdict list is also empty
+    — callers must reject the whole batch rather than partially apply
+    (mirrors :func:`_parse_rescope_operations`).
+
+    The op records inside each verdict's ``ops`` are passed through
+    as-is — :func:`_parse_rescope_operations` (or its successor) is
+    responsible for op-level shape validation in a subsequent slice.
+    """
+    errors: list[str] = []
+    envelope = _decode_first_json_object(raw)
+    if envelope is None:
+        return [], ["response: no JSON object found"]
+    if "verdicts" not in envelope:
+        return [], ['response: missing top-level "verdicts" array']
+    raw_verdicts = envelope["verdicts"]
+    if not isinstance(raw_verdicts, list):
+        return [], [
+            f"response.verdicts: must be a list, got {type(raw_verdicts).__name__}"
+        ]
+
+    # codex P2 on PR #1809: detect duplicate ``RescopeIntent.comment_id``
+    # values in the input batch up front.  If we ``set()``-collapsed
+    # them downstream, a single verdict could "cover" both entries
+    # silently, defeating the one-verdict-per-intent invariant
+    # (callers that coalesce intent lists across comments may merge
+    # without dedup).  Fail closed: name every duplicated id so the
+    # upstream coalescer bug is debuggable on sight.
+    intent_id_list = [intent.comment_id for intent in intents]
+    intent_ids = set(intent_id_list)
+    if len(intent_id_list) != len(intent_ids):
+        seen: set[int] = set()
+        duplicates: list[int] = []
+        for cid in intent_id_list:
+            if cid in seen and cid not in duplicates:
+                duplicates.append(cid)
+            seen.add(cid)
+        return [], [
+            "intents: duplicate comment_id(s) in input batch — coalescer must "
+            f"dedup before calling the parser: {sorted(duplicates)}"
+        ]
+    verdicts: list[IntentVerdict] = []
+    seen_intent_ids: set[int] = set()
+
+    for index, raw_v in enumerate(raw_verdicts):
+        path = f"verdicts[{index}]"
+        if not isinstance(raw_v, dict):
+            errors.append(f"{path}: must be a dict, got {type(raw_v).__name__}")
+            continue
+        if "intent_comment_id" not in raw_v:
+            errors.append(f"{path}: missing required field 'intent_comment_id'")
+            continue
+        if "outcome" not in raw_v:
+            errors.append(f"{path}: missing required field 'outcome'")
+            continue
+        intent_id = raw_v["intent_comment_id"]
+        # Catch in-batch reference errors before construction so the
+        # caller learns about *every* unknown comment_id rather than
+        # just the first the IntentVerdict ctor checked.
+        if isinstance(intent_id, int) and not isinstance(intent_id, bool):
+            if intent_id not in intent_ids:
+                errors.append(
+                    f"{path}.intent_comment_id: {intent_id} not in batch "
+                    f"(expected one of {sorted(intent_ids)})"
+                )
+                continue
+            if intent_id in seen_intent_ids:
+                errors.append(
+                    f"{path}.intent_comment_id: {intent_id} already covered by "
+                    "an earlier verdict (each intent gets exactly one verdict)"
+                )
+                continue
+        by_id = raw_v.get("by_intent_comment_id")
+        if (
+            by_id is not None
+            and isinstance(by_id, int)
+            and not isinstance(by_id, bool)
+            and by_id not in intent_ids
+        ):
+            errors.append(
+                f"{path}.by_intent_comment_id: {by_id} not in batch "
+                f"(expected one of {sorted(intent_ids)})"
+            )
+            continue
+        # codex P2 on slice 2: pass raw fields straight to the
+        # ctor — DO NOT collapse with ``or ()`` or pre-wrap with
+        # ``tuple(...)``.  Both would silently coerce malformed
+        # falsy inputs (``{}``, ``""``, ``None``, ``0``) into an
+        # empty tuple and bypass ``IntentVerdict.__post_init__``'s
+        # type rejection.  Absent fields get an empty-tuple default
+        # via ``dict.get``; present-with-malformed-value fields
+        # reach the ctor and raise a clean TypeError that we
+        # capture into ``errors``.
+        try:
+            verdict = IntentVerdict(
+                intent_comment_id=intent_id,
+                outcome=raw_v["outcome"],
+                ops=raw_v.get("ops", ()),
+                affected_task_ids=raw_v.get("affected_task_ids", ()),
+                by_intent_comment_id=by_id,
+                narrative=raw_v.get("narrative"),
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(f"{path}: {exc}")
+            continue
+        verdicts.append(verdict)
+        seen_intent_ids.add(verdict.intent_comment_id)
+
+    # Coverage: every intent in the batch must have a verdict.  Don't
+    # short-circuit on earlier errors — list every missing id so Opus
+    # gets the full picture on the nudge.
+    missing = sorted(intent_ids - seen_intent_ids)
+    for intent_id in missing:
+        errors.append(
+            f"verdicts: missing verdict for intent_comment_id {intent_id} "
+            "(every intent in the batch needs exactly one verdict)"
+        )
+
+    # Acyclic check on the supersedence graph (intent → superseder).
+    if not errors:
+        cycle = _find_supersedence_cycle(verdicts)
+        if cycle is not None:
+            errors.append(
+                "verdicts: supersedence graph has a cycle: "
+                + " -> ".join(str(cid) for cid in cycle)
+            )
+
+    if errors:
+        return [], errors
+    return verdicts, []
+
+
+def _find_supersedence_cycle(
+    verdicts: list[IntentVerdict],
+) -> list[int] | None:
+    """Return one cycle's id sequence in the supersedence graph, or None.
+
+    Walks each ``by_intent_comment_id`` edge and detects revisits.
+    Returns the cycle as ``[a, b, c, a]`` so the error message reads
+    naturally; ``None`` when the graph is acyclic.
+    """
+    by_pointer: dict[int, int] = {
+        v.intent_comment_id: v.by_intent_comment_id
+        for v in verdicts
+        if v.by_intent_comment_id is not None
+    }
+    for start in by_pointer:
+        seen: list[int] = [start]
+        cursor: int | None = by_pointer.get(start)
+        while cursor is not None:
+            if cursor in seen:
+                seen.append(cursor)
+                # Trim to the cycle's start so the message is the
+                # smallest visible loop, not its tail.
+                first = seen.index(cursor)
+                return seen[first:]
+            seen.append(cursor)
+            cursor = by_pointer.get(cursor)
+    return None
 
 
 def _decode_first_json_object(raw: str) -> dict[str, Any] | None:
