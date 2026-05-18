@@ -1,5 +1,7 @@
 """Unit tests for fido/prompts.py — prompt-building functions and Prompts class."""
 
+from typing import Any
+
 from fido.prompts import (
     TRIAGE_CLAUSE,
     Prompts,
@@ -672,6 +674,197 @@ class TestRescopePrompt:
         # Brand-new tasks come from "new" ops, no null-id mechanism
         # in the new schema.
         assert '{"op": "new"' in result
+
+
+# ── Prompts.rescope_prompt_verdicts (#1810 / INV-D wiring leaf) ──────────────
+
+
+class TestRescopePromptVerdicts:
+    @staticmethod
+    def _task(title: str = "Do thing", task_id: str = "1") -> dict[str, Any]:
+        return {
+            "id": task_id,
+            "title": title,
+            "type": "spec",
+            "status": "pending",
+            "description": "",
+        }
+
+    @staticmethod
+    def _intent(
+        cid: int,
+        text: str = "Add logging",
+        *,
+        timestamp: str = "2024-01-15T10:00:00+00:00",
+        author: str = "alice",
+    ) -> RescopeIntent:
+        return RescopeIntent(
+            change_request=text,
+            comment_id=cid,
+            timestamp=timestamp,
+            author=author,
+        )
+
+    def test_asks_for_verdicts_envelope(self) -> None:
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        # Envelope keyword + explicit JSON shape directive.
+        assert '"verdicts"' in result
+        assert '{"verdicts": [...]}' in result
+
+    def test_includes_each_intent_with_author(self) -> None:
+        intents = [
+            self._intent(111, "Add logging", author="alice"),
+            self._intent(
+                222,
+                "Refactor tests",
+                timestamp="2024-01-15T10:01:00+00:00",
+                author="bob",
+            ),
+        ]
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=intents
+        )
+        assert "comment #111" in result
+        assert "by @alice" in result
+        assert "comment #222" in result
+        assert "by @bob" in result
+
+    def test_intents_rendered_chronologically(self) -> None:
+        intents = [
+            self._intent(333, "Newest", timestamp="2024-03-01T12:00:00+00:00"),
+            self._intent(111, "Oldest", timestamp="2024-01-15T10:00:00+00:00"),
+            self._intent(222, "Middle", timestamp="2024-02-15T11:00:00+00:00"),
+        ]
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=intents
+        )
+        oldest_pos = result.index("Oldest")
+        middle_pos = result.index("Middle")
+        newest_pos = result.index("Newest")
+        assert oldest_pos < middle_pos < newest_pos
+
+    def test_lists_intent_ids_in_schema_hint(self) -> None:
+        # The schema sample includes the actual batch's intent ids in
+        # the "must be one of" hint so Opus can't reference a
+        # made-up id.
+        intents = [self._intent(111), self._intent(222)]
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=intents
+        )
+        assert "must be one of: 111, 222" in result or "111, 222" in result
+
+    def test_outcome_enum_documented(self) -> None:
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        for name in ("honored", "reshaped", "superseded", "no_op"):
+            assert f'"{name}"' in result
+
+    def test_outcome_semantics_distinguish_reply_back(self) -> None:
+        # Prompt teaches Opus when reply-back fires so it can frame
+        # narrative appropriately.
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        # honored / no_op explicitly do NOT warrant reply-back
+        assert "no follow-up" in result
+        # reshaped / superseded are material → narrative required
+        assert "Narrative MUST be non-empty" in result
+
+    def test_supersedence_constraints_stated(self) -> None:
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        # by_intent_comment_id only on superseded
+        assert "only set when ``outcome == 'superseded'``" in result
+        # acyclic
+        assert "acyclic" in result
+
+    def test_joint_attribution_allowed(self) -> None:
+        # The 3+1 reviewer-pattern case — multiple verdicts can share
+        # an affected task id when all are honored together.
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        assert "affected_task_ids" in result
+        assert "may overlap" in result
+
+    def test_no_op_constraint_stated(self) -> None:
+        # Slice-1 boundary contract: no_op verdicts have empty ops + ids.
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        assert "no_op" in result
+        # Phrased as MUST be empty.
+        assert "MUST be empty" in result
+
+    def test_includes_op_schema_recap(self) -> None:
+        # Same op vocabulary as rescope_prompt, restated inline so
+        # Opus has full reference without recall.
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        for op_name in (
+            "keep",
+            "rewrite",
+            "rewrite_anchor",
+            "remove",
+            "merge",
+            "split",
+            "new",
+        ):
+            assert f'"op": "{op_name}"' in result
+
+    def test_current_task_list_included(self) -> None:
+        tasks = [
+            self._task("Do A", task_id="T1"),
+            self._task("Do B", task_id="T2"),
+        ]
+        result = Prompts("").rescope_prompt_verdicts(
+            tasks, "", intents=[self._intent(1)]
+        )
+        assert "Do A" in result
+        assert "Do B" in result
+
+    def test_active_context_rendered_when_issue_provided(self) -> None:
+        # Coverage: the ``issue is not None`` branch that pulls in
+        # render_active_context.  Matches rescope_prompt's behavior.
+        issue = ActiveIssue(number=7, title="Fix crash", body="It crashes.")
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)], issue=issue
+        )
+        assert "## Active issue" in result
+        assert "Fix crash" in result
+
+
+class TestRescopeVerdictsParseNudge:
+    def test_includes_errors(self) -> None:
+        result = Prompts("").rescope_verdicts_parse_nudge(
+            ["verdicts[0]: missing required field 'outcome'"],
+            attempts_remaining=2,
+        )
+        assert "missing required field 'outcome'" in result
+
+    def test_includes_attempt_budget(self) -> None:
+        result = Prompts("").rescope_verdicts_parse_nudge(["err"], attempts_remaining=2)
+        assert "2 attempt(s) remaining" in result
+
+    def test_final_attempt_message(self) -> None:
+        result = Prompts("").rescope_verdicts_parse_nudge(["err"], attempts_remaining=0)
+        assert "final attempt" in result
+        assert "dropped" in result
+
+    def test_verdict_schema_recap(self) -> None:
+        result = Prompts("").rescope_verdicts_parse_nudge(["err"], attempts_remaining=1)
+        assert "intent_comment_id" in result
+        assert "by_intent_comment_id" in result
+        assert "outcome" in result
+
+    def test_asks_for_verdicts_envelope_on_retry(self) -> None:
+        result = Prompts("").rescope_verdicts_parse_nudge(["err"], attempts_remaining=1)
+        assert '{"verdicts": [...]}' in result
 
 
 # ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
