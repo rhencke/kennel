@@ -828,6 +828,16 @@ class TestRescopePromptVerdicts:
         assert "Do A" in result
         assert "Do B" in result
 
+    def test_active_context_rendered_when_issue_provided(self) -> None:
+        # Coverage: the ``issue is not None`` branch that pulls in
+        # render_active_context.  Matches rescope_prompt's behavior.
+        issue = ActiveIssue(number=7, title="Fix crash", body="It crashes.")
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)], issue=issue
+        )
+        assert "## Active issue" in result
+        assert "Fix crash" in result
+
 
 class TestRescopeVerdictsParseNudge:
     def test_includes_errors(self) -> None:
