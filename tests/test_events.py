@@ -5875,138 +5875,181 @@ class TestBackfillMissedPrComments:
             "html_url": f"https://github.com/owner/repo/pull/1#issuecomment-{comment_id}",
         }
 
-    def test_creates_task_for_allowed_collaborator_comment(
+    def _gh_with_pr(self, comments: list[dict]) -> MagicMock:
+        """Default GH mock for backfill tests: get_issue_comments returns
+        the given list, get_pr returns a stub PR for Action context."""
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = comments
+        mock_gh.get_pr.return_value = {"title": "PR title", "body": "PR body"}
+        mock_gh.is_thread_resolved_for_comment.return_value = False
+        return mock_gh
+
+    def _registry(self) -> MagicMock:
+        return MagicMock()
+
+    def test_routes_allowed_collaborator_comment_through_synthesis(
         self, tmp_path: Path
     ) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [self._comment(100)]
-        mock_gh.is_thread_resolved_for_comment.return_value = False
+        # #1814 / INV-B slice 1: backfill calls reply_to_issue_comment
+        # (the live synthesis path), not events.create_task.  The
+        # Action's thread metadata carries the comment id + author.
+        mock_gh = self._gh_with_pr([self._comment(100)])
         cfg = self._cfg(tmp_path)
         repo_cfg = self._repo_cfg(tmp_path)
-        with patch("fido.events.create_task") as mock_create:
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             count = Dispatcher(cfg, repo_cfg, mock_gh).backfill_missed_pr_comments(
-                1, gh_user="fidocancode"
+                1, gh_user="fidocancode", registry=self._registry()
             )
         assert count == 1
-        mock_create.assert_called_once()
-        _, kwargs = mock_create.call_args
-        assert kwargs["thread"]["comment_id"] == 100
-        assert kwargs["thread"]["comment_type"] == "issues"
-        assert kwargs["thread"]["author"] == "rhencke"
+        mock_reply.assert_called_once()
+        action = mock_reply.call_args.args[0]
+        assert action.thread["comment_id"] == 100
+        assert action.thread["comment_type"] == "issues"
+        assert action.thread["author"] == "rhencke"
+
+    def test_does_not_call_legacy_create_task(self, tmp_path: Path) -> None:
+        # #1814 / INV-B slice 1 anti-regression: events.create_task is
+        # never invoked from backfill in the new path (still exists
+        # as a function; slice 2 removes it once we confirm zero
+        # callers).
+        mock_gh = self._gh_with_pr([self._comment(100)])
+        with (
+            patch("fido.events.create_task") as mock_create,
+            patch("fido.events.reply_to_issue_comment"),
+        ):
+            Dispatcher(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
+        mock_create.assert_not_called()
 
     def test_skips_fido_own_comments(self, tmp_path: Path) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            self._comment(100, user="fidocancode", body="my own reply")
-        ]
-        with patch("fido.events.create_task") as mock_create:
+        mock_gh = self._gh_with_pr(
+            [self._comment(100, user="fidocancode", body="my own reply")]
+        )
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="FidoCanCode")
-        mock_create.assert_not_called()
+            ).backfill_missed_pr_comments(
+                1, gh_user="FidoCanCode", registry=self._registry()
+            )
+        mock_reply.assert_not_called()
 
     def test_skips_by_gh_user_case_insensitive(self, tmp_path: Path) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            self._comment(100, user="Alice", body="mine")
-        ]
-        with patch("fido.events.create_task") as mock_create:
+        mock_gh = self._gh_with_pr([self._comment(100, user="Alice", body="mine")])
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="alice")
-        mock_create.assert_not_called()
+            ).backfill_missed_pr_comments(1, gh_user="alice", registry=self._registry())
+        mock_reply.assert_not_called()
 
     def test_skips_fido_literal_name_even_if_gh_user_mismatch(
         self, tmp_path: Path
     ) -> None:
         """Defense in depth: even if ``gh_user`` is misconfigured, comments
         from the literal fido account must never trigger a backfill task."""
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            self._comment(100, user="fido-can-code", body="my reply")
-        ]
-        with patch("fido.events.create_task") as mock_create:
+        mock_gh = self._gh_with_pr(
+            [self._comment(100, user="fido-can-code", body="my reply")]
+        )
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="mis-configured-bot")
-        mock_create.assert_not_called()
+            ).backfill_missed_pr_comments(
+                1, gh_user="mis-configured-bot", registry=self._registry()
+            )
+        mock_reply.assert_not_called()
 
     def test_skips_non_allowed_users(self, tmp_path: Path) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            self._comment(100, user="random-stranger")
-        ]
-        with patch("fido.events.create_task") as mock_create:
+        mock_gh = self._gh_with_pr([self._comment(100, user="random-stranger")])
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
-        mock_create.assert_not_called()
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
+        mock_reply.assert_not_called()
 
     def test_allows_configured_bots(self, tmp_path: Path) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            self._comment(100, user="dependabot[bot]", body="bump dep")
-        ]
-        with patch("fido.events.create_task") as mock_create:
+        mock_gh = self._gh_with_pr(
+            [self._comment(100, user="dependabot[bot]", body="bump dep")]
+        )
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
-        assert mock_create.call_count == 1
-        _, kwargs = mock_create.call_args
-        assert "bot" in kwargs["thread"]["author"]
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
+        assert mock_reply.call_count == 1
+        action = mock_reply.call_args.args[0]
+        assert "bot" in action.thread["author"]
 
     def test_prompt_marks_bot_vs_human(self, tmp_path: Path) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            self._comment(100, user="rhencke", body="human msg"),
-            self._comment(101, user="bot[bot]", body="bot msg"),
-        ]
-        with patch("fido.events.create_task") as mock_create:
+        mock_gh = self._gh_with_pr(
+            [
+                self._comment(100, user="rhencke", body="human msg"),
+                self._comment(101, user="bot[bot]", body="bot msg"),
+            ]
+        )
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
-        prompts = [c.args[0] for c in mock_create.call_args_list]
-        assert any("human/owner" in p for p in prompts)
-        assert any("(bot)" in p for p in prompts)
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
+        actions = [c.args[0] for c in mock_reply.call_args_list]
+        # Action.is_bot reflects the per-comment user marker; the
+        # prompt format remains stable for synthesis classification.
+        assert any(not a.is_bot for a in actions)
+        assert any(a.is_bot for a in actions)
 
     def test_skips_empty_login_and_missing_id(self, tmp_path: Path) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            {"id": 1, "user": {"login": ""}, "body": "x"},
-            {"id": None, "user": {"login": "rhencke"}, "body": "x"},
-            {"id": 2, "user": None, "body": "x"},
-        ]
-        with patch("fido.events.create_task") as mock_create:
+        mock_gh = self._gh_with_pr(
+            [
+                {"id": 1, "user": {"login": ""}, "body": "x"},
+                {"id": None, "user": {"login": "rhencke"}, "body": "x"},
+                {"id": 2, "user": None, "body": "x"},
+            ]
+        )
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
-        mock_create.assert_not_called()
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
+        mock_reply.assert_not_called()
 
     def test_empty_comment_list_is_noop(self, tmp_path: Path) -> None:
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = []
-        with patch("fido.events.create_task") as mock_create:
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             count = Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
         assert count == 0
-        mock_create.assert_not_called()
+        mock_reply.assert_not_called()
+        # Also: with zero comments, no need to fetch PR metadata.
+        mock_gh.get_pr.assert_not_called()
 
     def test_skips_already_claimed_comments(self, tmp_path: Path) -> None:
         """Comments with a durable SQLite claim are not re-queued on restart.
@@ -6014,29 +6057,55 @@ class TestBackfillMissedPrComments:
         reply_to_issue_comment completes comment ids in SQLite after posting;
         backfill must honour that durable claim and skip re-queueing.
         """
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = [
-            self._comment(100, body="already answered"),
-            self._comment(200, body="not yet handled"),
-        ]
-        mock_gh.is_thread_resolved_for_comment.return_value = False
+        mock_gh = self._gh_with_pr(
+            [
+                self._comment(100, body="already answered"),
+                self._comment(200, body="not yet handled"),
+            ]
+        )
         promise = FidoStore(tmp_path).prepare_reply(
             owner="webhook", comment_type="issues", anchor_comment_id=100
         )
         assert promise is not None
         FidoStore(tmp_path).ack_promise(promise.promise_id)
 
-        with patch("fido.events.create_task") as mock_create:
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
             Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
 
-        # Only comment 200 (unclaimed) should be queued.
-        assert mock_create.call_count == 1
-        _, kwargs = mock_create.call_args
-        assert kwargs["thread"]["comment_id"] == 200
+        # Only comment 200 (unclaimed) should be routed through synthesis.
+        assert mock_reply.call_count == 1
+        action = mock_reply.call_args.args[0]
+        assert action.thread["comment_id"] == 200
+
+    def test_synthesis_failure_per_comment_does_not_break_loop(
+        self, tmp_path: Path
+    ) -> None:
+        # #1814: per-comment exceptions are logged and the loop
+        # continues — one malformed comment shouldn't poison the
+        # whole backfill.
+        mock_gh = self._gh_with_pr(
+            [
+                self._comment(100, body="first"),
+                self._comment(200, body="second"),
+            ]
+        )
+        with patch("fido.events.reply_to_issue_comment") as mock_reply:
+            mock_reply.side_effect = [RuntimeError("synth failed"), ("ACT", [])]
+            count = Dispatcher(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+            ).backfill_missed_pr_comments(
+                1, gh_user="fidocancode", registry=self._registry()
+            )
+        assert count == 2
+        assert mock_reply.call_count == 2
 
 
 class TestLaunchSync:
@@ -7606,7 +7675,7 @@ class TestDispatcher:
         mock_gh.get_issue_comments.return_value = []
         repo_cfg = _repo_cfg(tmp_path)
         d = Dispatcher(cfg, repo_cfg, mock_gh)
-        count = d.backfill_missed_pr_comments(42, gh_user="fido")
+        count = d.backfill_missed_pr_comments(42, gh_user="fido", registry=MagicMock())
         mock_gh.get_issue_comments.assert_called_once_with(repo_cfg.name, 42)
         assert count == 0
 

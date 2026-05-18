@@ -1394,6 +1394,9 @@ class Dispatcher:
         pr_number: int,
         *,
         gh_user: str,
+        registry: ActivityReporter,
+        agent: ProviderAgent | None = None,
+        prompts: Prompts | None = None,
     ) -> int:
         """Replay ``issue_comment`` webhooks we may have missed while fido was
         down (fix for #794).  Returns the number of comments inspected.
@@ -1403,15 +1406,38 @@ class Dispatcher:
         iteration by ``Worker.handle_threads``, so the worker loop backfills
         those on its own — only issue-comments are invisible to the loop.
 
-        Idempotent: comments with a completed SQLite claim are skipped — Fido
-        already replied to them.  Comments handled with a task (ACT/DO) are
-        additionally deduped by :func:`create_task` via ``comment_id`` in
-        ``tasks.json``.  This method is intended to run **once per
-        WorkerThread lifetime** (at startup) — not every iteration.
+        Each missed comment is routed through the live synthesis path
+        (``reply_to_issue_comment``) — same as a fresh webhook delivery
+        — so synthesis emits a triage reply, classifies the comment,
+        and (when ``change_request`` is present) triggers rescope with
+        a :class:`RescopeIntent`.  Replaces the pre-#1814 path that
+        called :func:`events.create_task` to write a thread-type task
+        row directly to ``tasks.json``: under #1798's intent-as-
+        instruction model, tasks come into existence only via Opus ops
+        in a rescope apply, never from raw comment text.
+
+        Idempotent: comments with a completed SQLite claim are
+        skipped — Fido already replied to them.
+        ``reply_to_issue_comment`` itself claims the comment via
+        ``FidoStore.prepare_reply``, so re-entry is safe.  This method
+        is intended to run **once per WorkerThread lifetime** (at
+        startup) — not every iteration.
+
+        Synthesis failures per comment are logged and the loop
+        continues — one malformed comment shouldn't poison the whole
+        backfill.
         """
         repo_cfg = self._repo_cfg
         log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
         comments = self._gh.get_issue_comments(repo_cfg.name, pr_number)
+        if not comments:
+            log.info("backfill: PR #%s — inspected 0 comments", pr_number)
+            return 0
+        # Fetch PR metadata once for the Action context — every per-
+        # comment Action carries the same pr_title/pr_body.
+        pr_data = self._gh.get_pr(repo_cfg.name, pr_number)
+        pr_title = pr_data.get("title", "")
+        pr_body = pr_data.get("body", "") or ""
         for c in comments:
             user = (c.get("user") or {}).get("login", "")
             if not user:
@@ -1429,23 +1455,28 @@ class Dispatcher:
             if FidoStore(repo_cfg.work_dir).is_claimed_or_completed(int(comment_id)):
                 log.info("backfill: comment %s already claimed — skipping", comment_id)
                 continue
-            body = c.get("body", "") or ""
-            is_bot = user.endswith("[bot]")
-            thread = {
-                "repo": repo_cfg.name,
-                "pr": pr_number,
-                "comment_id": comment_id,
-                "url": c.get("html_url", ""),
-                "author": user,
-                "comment_type": "issues",
-            }
-            prompt = (
-                f"PR top-level comment on #{pr_number} by {user} "
-                f"({'bot' if is_bot else 'human/owner'}):\n\n{body}"
+            action = _build_issue_comment_action(
+                repo=repo_cfg.name,
+                pr_number=pr_number,
+                pr_title=pr_title,
+                pr_body=pr_body,
+                comment=c,
             )
-            create_task(
-                prompt, self._config, repo_cfg, self._gh, thread=thread, dispatcher=self
-            )
+            try:
+                reply_to_issue_comment(
+                    action,
+                    self._config,
+                    repo_cfg,
+                    self._gh,
+                    registry,
+                    agent=agent,
+                    prompts=prompts,
+                )
+            except Exception:
+                log.exception(
+                    "backfill: synthesis failed for comment %s — continuing",
+                    comment_id,
+                )
         log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
         return len(comments)
 

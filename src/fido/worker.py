@@ -4593,12 +4593,17 @@ class Worker:
             self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             if self._first_iteration and not pr_is_fresh:
                 # One-shot replay of missed issue_comment webhooks (fix #794).
-                # Runs only on the first iteration per WorkerThread lifetime so
-                # the steady-state loop stays fast; create_task dedups on
-                # comment_id so re-tasking already-handled comments is a no-op.
+                # Runs only on the first iteration per WorkerThread lifetime
+                # so the steady-state loop stays fast.  Post-#1814 the
+                # backfill routes each missed comment through the synthesis
+                # path; ``FidoStore.prepare_reply`` dedups on comment_id so
+                # re-entry on already-handled comments is a no-op.
                 self._dispatcher.backfill_missed_pr_comments(
                     pr_number,
                     gh_user=repo_ctx.gh_user,
+                    registry=self._registry,
+                    agent=self._provider_agent,
+                    prompts=self._get_prompts(),
                 )
                 self._first_iteration = False
             if pr_is_fresh:

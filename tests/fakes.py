@@ -50,8 +50,28 @@ class _FakeDispatcher:
             raise self._dispatch_side_effect
         return self._dispatch_return
 
-    def backfill_missed_pr_comments(self, pr_number: int, *, gh_user: str) -> int:
-        self.backfill_calls.append({"pr_number": pr_number, "gh_user": gh_user})
+    def backfill_missed_pr_comments(
+        self,
+        pr_number: int,
+        *,
+        gh_user: str,
+        registry: object = None,
+        agent: object = None,
+        prompts: object = None,
+    ) -> int:
+        # ``registry``/``agent``/``prompts`` arrived with #1814 so the
+        # backfill can route through the live synthesis path
+        # (``reply_to_issue_comment``).  This fake records them so
+        # tests asserting on call shape can verify the worker is
+        # passing the right collaborators.
+        del agent, prompts
+        self.backfill_calls.append(
+            {
+                "pr_number": pr_number,
+                "gh_user": gh_user,
+                "registry": registry,
+            }
+        )
         if callable(self._backfill_side_effect):
             return self._backfill_side_effect(pr_number, gh_user=gh_user)
         if isinstance(self._backfill_side_effect, BaseException):
