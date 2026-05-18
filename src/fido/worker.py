@@ -2628,17 +2628,11 @@ class Worker:
             except Exception:
                 store.mark_failed(promise.promise_id)
                 raise
-            events.queue_reply_tasks(
-                category,
-                titles,
-                config,
-                repo_cfg,
-                self.gh,
-                thread=action.reply_to,
-                is_bot=action.is_bot,
-                registry=self._registry,
-                dispatcher=self._dispatcher,
-            )
+            # #1816 / INV-B: no direct task creation from the
+            # ``(category, titles)`` return.  Synthesis emitted a
+            # RescopeIntent inside reply_to_comment; rescope handles
+            # any task mutations.
+            del category, titles
         log.info("threads done")
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
@@ -2748,19 +2742,10 @@ class Worker:
             category, titles = self._reply_to_queued_comment(
                 queued, action, config, repo_cfg
             )
-            events.queue_reply_tasks(
-                category,
-                titles,
-                config,
-                repo_cfg,
-                self.gh,
-                thread=action.reply_to
-                if queued.comment_type == "pulls"
-                else action.thread,
-                is_bot=action.is_bot,
-                registry=self._registry,
-                dispatcher=self._dispatcher,
-            )
+            # #1816 / INV-B: drop the direct-task path; rescope
+            # handles task mutations via the RescopeIntent that
+            # synthesis emitted inside _reply_to_queued_comment.
+            del category, titles
             store.ack_promise(promise.promise_id)
         except Exception as exc:
             if promise is not None:

@@ -33,10 +33,7 @@ from fido.events import (
     Action,
     Dispatcher,
     WebhookIngressOracle,
-    create_task,
     launch_worker,
-    queue_reply_tasks,
-    reply_outcome_creates_tasks,
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
@@ -372,7 +369,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_reply_to_comment = staticmethod(reply_to_comment)
     _fn_reply_to_review = staticmethod(reply_to_review)
     _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
-    _fn_create_task = staticmethod(create_task)
     _fn_launch_worker = staticmethod(launch_worker)
     _fn_spawn_bg = staticmethod(_spawn_bg)
     _fn_after_do_post = staticmethod(_noop_after_post)
@@ -808,18 +804,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
         try:
             handled = False
             category: str | None = None
-            titles: list[str] = []
-            queued_tasks = 0
 
             # Unblock any BLOCKED tasks BEFORE the handler triggers a
-            # background rescope (codex on #1738).  create_task() spawns
-            # _reorder_tasks_background, which snapshots the task list
-            # for validation; if the unblock ran AFTER create_task, a
-            # fast rescope could validate against the stale blocked
-            # state and reject a valid merge into what should now be a
-            # pending target.  Doing the unblock here, before any
-            # handler runs, makes the post-unblock state the snapshot
-            # the rescope sees.
+            # background rescope (codex on #1738).  The synthesis
+            # path's RescopeIntent emission spawns
+            # ``_reorder_tasks_background`` which snapshots the task
+            # list for validation; if the unblock ran AFTER the
+            # rescope trigger, a fast rescope could validate against
+            # the stale blocked state and reject a valid merge into
+            # what should now be a pending target.  Doing the
+            # unblock here, before any handler runs, makes the
+            # post-unblock state the snapshot the rescope sees.
             if action.reply_to or action.comment_body or action.thread:
                 Tasks(repo_cfg.work_dir).unblock_tasks()
 
@@ -864,7 +859,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 promise = self._prepare_reply(repo_cfg, action)
                 if promise is None:
                     handled = True
-                    category, titles = None, []
+                    category = None
                     # Dedup skip — another handler owns this comment.  Clean up
                     # the eyes reaction posted above so it doesn't linger.
                     if _eyes_comment_info is not None:
@@ -872,7 +867,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 else:
                     activity.set_description("triaging review comment")
                     try:
-                        category, titles = type(self)._fn_reply_to_comment(
+                        category, _ = type(self)._fn_reply_to_comment(
                             action, self.config, repo_cfg, gh, self.registry
                         )
                     except Exception:
@@ -880,32 +875,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         raise
                     self._ack_reply(repo_cfg, promise)
                     handled = True
-                # Create task based on triage result.
-                # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
-                # ACT, DO → add each task title to work queue.
-                if category is not None:
-                    if reply_outcome_creates_tasks(
-                        category,
-                        thread=action.reply_to,
-                        is_bot=action.is_bot,
-                    ):
-                        activity.set_description(
-                            "queuing review comment tasks"
-                            if len(titles or []) != 1
-                            else "queuing review comment task"
-                        )
-                    queued_tasks += queue_reply_tasks(
-                        category,
-                        titles or [],
-                        self.config,
-                        repo_cfg,
-                        gh,
-                        thread=action.reply_to,
-                        is_bot=action.is_bot,
-                        registry=self.registry,
-                        create_task_fn=type(self)._fn_create_task,
-                        dispatcher=self.dispatchers[repo_cfg.name],
-                    )
+                # #1816 / INV-B slice 2: PR comments no longer
+                # directly create tasks.  Synthesis emits a
+                # RescopeIntent (via SynthesisExecutor inside
+                # reply_to_comment); tasks come into existence only
+                # via Opus ops in the resulting rescope apply.  The
+                # ``(category, titles)`` return is retained on the
+                # reply method for now; a follow-up will remove it.
 
             if action.review_comments:
                 activity.set_description("replying to review thread")
@@ -916,14 +892,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if not handled and action.comment_body:
                 promise = self._prepare_reply(repo_cfg, action)
                 if promise is None:
-                    category, titles = None, []
+                    category = None
                     # Dedup skip — clean up the eyes reaction posted above.
                     if _eyes_comment_info is not None:
                         self._remove_eyes_best_effort(gh, _eyes_comment_info)
                 else:
                     activity.set_description("triaging PR comment")
                     try:
-                        category, titles = type(self)._fn_reply_to_issue_comment(
+                        category, _ = type(self)._fn_reply_to_issue_comment(
                             action, self.config, repo_cfg, gh, self.registry
                         )
                     except Exception:
@@ -931,35 +907,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         raise
                     self._ack_reply(repo_cfg, promise)
                 handled = True
-                # DEFER files a GitHub issue — no tasks.json entry.
-                if reply_outcome_creates_tasks(
-                    category or "",
-                    thread=action.thread,
-                    is_bot=action.is_bot,
-                ):
-                    activity.set_description(
-                        "queuing PR comment tasks"
-                        if len(titles) != 1
-                        else "queuing PR comment task"
-                    )
-                queued_tasks += queue_reply_tasks(
-                    category or "",
-                    titles,
-                    self.config,
-                    repo_cfg,
-                    gh,
-                    thread=action.thread,
-                    is_bot=action.is_bot,
-                    registry=self.registry,
-                    create_task_fn=type(self)._fn_create_task,
-                    dispatcher=self.dispatchers[repo_cfg.name],
-                )
+                # #1816 / INV-B slice 2: PR comments no longer
+                # directly create tasks (same reasoning as the
+                # reply_to block above).
 
             log.info(
-                "action outcome: handled=%s category=%s tasks=%d",
+                "action outcome: handled=%s category=%s",
                 handled,
                 category,
-                queued_tasks,
             )
             # Non-comment events just trigger fido worker — no task needed.
             # The unblock for comment events ran above, before handlers,

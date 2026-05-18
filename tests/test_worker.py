@@ -10019,7 +10019,11 @@ class TestHandleThreads:
             patch("fido.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_create_task.assert_called_once()
+        # #1816 / INV-B slice 2: handle_threads no longer queues tasks from
+        # reply outcomes — the intent path is authoritative for comment-driven
+        # task mutations.  reply_to_comment still fires (synthesis emits
+        # RescopeIntent), but no direct create_task call.
+        mock_create_task.assert_not_called()
 
     def test_requires_explicit_config_and_repo_cfg(self, tmp_path: Path) -> None:
         gh = MagicMock()
@@ -10350,7 +10354,9 @@ class TestHandleQueuedComments:
         args = mock_reply.call_args.args
         assert len(args) >= 5, "registry must be passed positionally (5th arg)"
         assert args[4] is worker._registry  # noqa: SLF001
-        mock_create_task.assert_called_once()
+        # #1816 / INV-B slice 2: handle_queued_comments no longer queues tasks
+        # from reply outcomes — the intent path is authoritative.
+        mock_create_task.assert_not_called()
         mock_sync.assert_called()
         store = FidoStore(tmp_path)
         assert store.pending_pr_comments(repo="owner/repo") == []
@@ -10411,7 +10417,8 @@ class TestHandleQueuedComments:
             )
 
         assert result is True
-        mock_create_task.assert_called_once()
+        # #1816 / INV-B slice 2: review-comment drain no longer queues tasks.
+        mock_create_task.assert_not_called()
         assert FidoStore(tmp_path).claim_state(401) == "completed"
 
     def test_review_followup_claim_covers_thread_lineage(self, tmp_path: Path) -> None:
@@ -10435,7 +10442,9 @@ class TestHandleQueuedComments:
         gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
 
         with (
-            patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
+            patch(
+                "fido.events.reply_to_comment", return_value=("ACT", ["do thing"])
+            ) as mock_reply,
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background"),
         ):
@@ -10443,9 +10452,14 @@ class TestHandleQueuedComments:
                 self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
             )
 
-        thread = mock_create_task.call_args.kwargs["thread"]
-        assert thread["lineage_key"] == "pulls:owner/repo:7:thread:401"
-        assert thread["lineage_comment_ids"] == [401, 402]
+        # #1816 / INV-B slice 2: drain no longer queues tasks from reply
+        # outcomes, and the lineage_key/lineage_comment_ids that were
+        # assembled inside queue_reply_tasks now live on the intent path
+        # rather than on the (removed) create_task call.  The surviving
+        # observable here is the per-comment claim closing out — both the
+        # follow-up (402) and its in_reply_to anchor (401) flip to completed.
+        del mock_reply
+        mock_create_task.assert_not_called()
         store = FidoStore(tmp_path)
         assert store.claim_state(401) == "completed"
         assert store.claim_state(402) == "completed"
