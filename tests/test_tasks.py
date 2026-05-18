@@ -1286,6 +1286,52 @@ class TestParseRescopeVerdicts:
         assert errors == []
         assert verdicts == []
 
+    def test_falsy_ops_field_not_silently_coerced(self) -> None:
+        # codex P2 on slice 2: ``"ops": {}`` is malformed (a bare
+        # mapping, not a sequence).  Earlier ``or ()`` would have
+        # collapsed to () and bypassed the ctor check — now the
+        # mapping reaches IntentVerdict's __post_init__ which
+        # rejects ``isinstance(ops, Mapping)``.
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"ops": {}}]}'
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("sequence of op mappings" in e for e in errors)
+
+    def test_falsy_affected_task_ids_bare_string_rejected(self) -> None:
+        # codex P2 on slice 2: ``"affected_task_ids": ""`` is a bare
+        # string; was silently collapsed to () before, now rejected.
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"affected_task_ids": ""}]}'
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("not a bare str" in e for e in errors)
+
+    def test_null_ops_captured_as_parse_error(self) -> None:
+        # JSON null reaches the ctor as None — ctor's tuple(None)
+        # raises TypeError, which we capture into errors rather than
+        # propagating.
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"ops": null}]}'
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert len(errors) > 0
+        # The exact message comes from the ctor's tuple() call —
+        # don't pin its phrasing, just verify the path is captured.
+        assert any("verdicts[0]" in e for e in errors)
+
+    def test_absent_ops_defaults_to_empty(self) -> None:
+        # Absent ``ops`` field is the documented "no ops" case —
+        # default ``()`` is the right value, not an error.
+        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert errors == []
+        assert verdicts[0].ops == ()
+        assert verdicts[0].affected_task_ids == ()
+
 
 class TestFindCrossOpErrors:
     def test_unknown_id_rejected(self) -> None:

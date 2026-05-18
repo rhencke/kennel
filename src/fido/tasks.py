@@ -1488,12 +1488,21 @@ def _parse_rescope_verdicts(  # pyright: ignore[reportUnusedFunction]
                 f"(expected one of {sorted(intent_ids)})"
             )
             continue
+        # codex P2 on slice 2: pass raw fields straight to the
+        # ctor — DO NOT collapse with ``or ()`` or pre-wrap with
+        # ``tuple(...)``.  Both would silently coerce malformed
+        # falsy inputs (``{}``, ``""``, ``None``, ``0``) into an
+        # empty tuple and bypass ``IntentVerdict.__post_init__``'s
+        # type rejection.  Absent fields get an empty-tuple default
+        # via ``dict.get``; present-with-malformed-value fields
+        # reach the ctor and raise a clean TypeError that we
+        # capture into ``errors``.
         try:
             verdict = IntentVerdict(
                 intent_comment_id=intent_id,
                 outcome=raw_v["outcome"],
-                ops=tuple(raw_v.get("ops") or ()),
-                affected_task_ids=tuple(raw_v.get("affected_task_ids") or ()),
+                ops=raw_v.get("ops", ()),
+                affected_task_ids=raw_v.get("affected_task_ids", ()),
                 by_intent_comment_id=by_id,
                 narrative=raw_v.get("narrative"),
             )
