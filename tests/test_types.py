@@ -390,3 +390,23 @@ class TestIntentVerdictTypeChecks:
             affected_task_ids=ids_gen(),  # type: ignore[arg-type]
         )
         assert v.affected_task_ids == ("T1", "T2")
+
+    def test_no_op_rejects_non_empty_ops(self) -> None:
+        # codex P2 round 5 on #1802: ``no_op`` means "produced no task
+        # changes".  A no_op verdict carrying ops is contradictory and
+        # would mislead INV-E (skip reply-back) while still claiming
+        # task attribution.
+        with pytest.raises(ValueError, match="no_op.*must have empty ops"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="no_op",
+                ops=({"op": "rewrite", "id": "T1"},),
+            )
+
+    def test_no_op_rejects_non_empty_affected_task_ids(self) -> None:
+        with pytest.raises(ValueError, match="no_op.*must have empty"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="no_op",
+                affected_task_ids=("T1",),
+            )

@@ -332,6 +332,20 @@ class IntentVerdict:
                 "narrative — reply-back posts narrative verbatim per "
                 "the voice-text-opus-not-templated convention"
             )
+        if self.outcome == "no_op" and (self.ops or self.affected_task_ids):
+            # codex P2 round 5 on #1802: ``no_op`` docstring promises
+            # "produced no task changes".  A ``no_op`` verdict
+            # carrying ops or affected_task_ids is contradictory —
+            # downstream INV-E would classify the intent as
+            # non-material (skipping reply-back) while the verdict
+            # still claims task-change attribution.  Reject at the
+            # boundary.
+            raise ValueError(
+                "IntentVerdict outcome='no_op' must have empty ops and "
+                "affected_task_ids — got "
+                f"ops={list(self.ops)!r}, "
+                f"affected_task_ids={list(self.affected_task_ids)!r}"
+            )
 
 
 @dataclass(frozen=True)
