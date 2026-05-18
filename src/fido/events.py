@@ -24,6 +24,7 @@ from fido.provider import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import reply_outbox_protocol as reply_outbox_oracle
+from fido.rocq import task_queue_rescope as oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq import webhook_command_translation as wct_oracle
 from fido.rocq import webhook_ingress_dedupe as ingress_fsm
@@ -42,11 +43,10 @@ from fido.synthesis_call import (
 )
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import (
-    IntentDisposition,
     Tasks,
     thread_comment_author_for_auto_resolve_oracle,
 )
-from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
+from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent, TaskType
 from fido.worker import ActivityReporter
 
 log = logging.getLogger(__name__)
@@ -2090,7 +2090,7 @@ def _get_commit_summary(work_dir: Path) -> str:
 
 def _notify_intent_outcome(
     intent: RescopeIntent,
-    disposition: IntentDisposition,
+    kind: oracle.NotifyKind,
     repo: str,
     pr: int,
     config: Config,
@@ -2098,46 +2098,34 @@ def _notify_intent_outcome(
     gh: GitHub,
     *,
     batch_intents: list[RescopeIntent],
-    batch_dispositions: dict[int, IntentDisposition],
+    affected_task_ids: list[str],
     result: list[dict[str, Any]],
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> None:
-    """Post a per-intent reply per the reply-back filter (#1724).
+    """Post a per-intent reply per the INV-F reply-back rule.
 
-    The reply-back filter epic (#1256) consumes the per-intent
-    classifier output (#1723).  Material and unhandled both emit a
-    notification — material describes the outcome of the rescope on
-    this ask; unhandled explains why no operation was attributed to
-    it (typically because a later sibling intent superseded it, or
-    Opus judged the ask already covered).  Aggregation (intent
-    absorbed without material change) stays silent.
+    The caller (``_build_on_rescope_apply``) consults the extracted oracle
+    :func:`oracle.reply_back_intents` to pick which intents warrant a
+    reply and passes the resulting :class:`oracle.NotifyKind` here.  This
+    function only handles prose generation + posting; it is never invoked
+    for intents the oracle filtered out.
 
-    The Opus instruction asks the model to TELL THE STORY of how the
-    rescope handled this commenter's ask, grounding the explanation
-    in:
+    * :class:`oracle.NotifyChanged` — a later cross-author op rewrote or
+      re-anchored a task this commenter contributed to.  Frame as "your
+      ask landed but was reshaped by a later commenter's input."
+    * :class:`oracle.NotifyDropped` — a later cross-author op closed a
+      task this commenter contributed to.  Frame as "your ask was
+      dropped in favour of a later commenter's redirection."
 
-    * For material: every co-contributing intent in the batch that
-      shaped any of the same affected tasks.  Opus can then say
-      "your ask was rewritten because @rhencke's later comment...".
-    * For unhandled: every sibling intent in the batch with its
-      disposition.  Opus can then say "we acted on @bob's later
-      comment instead / your ask was already covered by..."
-
-    Reply text is generated per-call by Opus (voice-text-not-
-    templated convention) and instructed never to imply the work is
-    done — the rescope only replanned.
+    Reply text is generated per-call by Opus (voice-text-not-templated
+    convention) and instructed never to imply the work is done — the
+    rescope only replanned.
     """
-    # Aggregation = pure absorption with no material effect — no
-    # narrative to tell, stay silent (acceptance criteria #1723).
-    if disposition.kind == "aggregation":
-        return
-
-    # Issue comments already received a triage reply from the
-    # webhook handler (same policy as _notify_thread_change).  A
-    # second top-level comment here would duplicate that reply
-    # without thread-nesting, so we skip — codex P2 on #1747 caught
-    # the original "always-review-thread" routing.
+    # Issue comments already received a triage reply from the webhook
+    # handler.  A second top-level comment here would duplicate that
+    # reply without thread-nesting, so we skip — codex P2 on #1747
+    # caught the original "always-review-thread" routing.
     if intent.comment_type != "pulls":
         log.info(
             "skipping intent notification for issue comment %s "
@@ -2159,7 +2147,7 @@ def _notify_intent_outcome(
     # (first task's contributors first), de-duplicated by comment_id.
     seen_cids: set[int] = set()
     co_contributing: list[RescopeIntent] = []
-    for task_id in disposition.affected_task_ids:
+    for task_id in affected_task_ids:
         task = tasks_by_id.get(task_id)
         if task is None:
             continue
@@ -2172,37 +2160,22 @@ def _notify_intent_outcome(
             seen_cids.add(other_cid)
             co_contributing.append(other)
 
-    # Sibling intents: every other intent in this batch with its
-    # disposition.  Used by the unhandled branch to explain why this
-    # commenter's ask was passed over (likely a later sibling
-    # superseded it, or it was already covered).
-    siblings: list[tuple[RescopeIntent, IntentDisposition]] = []
-    for other in batch_intents:
-        if other.comment_id == intent.comment_id:
-            continue
-        other_disposition = batch_dispositions.get(other.comment_id)
-        if other_disposition is not None:
-            siblings.append((other, other_disposition))
-
-    if disposition.kind == "material":
+    if isinstance(kind, oracle.NotifyDropped):
         framing = (
-            "A change request from a PR comment was rescoped — the work "
-            "has been REPLANNED, not completed.  Tell this commenter the "
-            "STORY of how their ask landed: which task(s) absorbed it, "
-            "what changed, and where other commenters' input shaped the "
-            "same task(s).  Be specific about which tasks were rewritten "
-            "/ merged / split / closed.  Do NOT say the work is done — "
-            "the rescope only restructured the plan."
+            "A change request from a PR comment was DROPPED by the rescope "
+            "because a later commenter's intent caused the task this "
+            "commenter contributed to be closed.  Tell this commenter the "
+            "STORY of which task was dropped and which later intent drove "
+            "the drop.  Do NOT say their work is done — it was dropped."
         )
-    else:  # unhandled
+    else:  # NotifyChanged
         framing = (
-            "A change request from a PR comment was NOT acted on this "
-            "rescope batch — Opus attributed no operation to it.  Tell "
-            "this commenter the STORY of why their ask is sitting in "
-            "this round: did a later sibling intent supersede it?  Was "
-            "the ask already covered by an existing pending task?  Use "
-            "the sibling intents below to ground the explanation; don't "
-            "apologize, just narrate what happened."
+            "A change request from a PR comment was REPLANNED by the "
+            "rescope because a later commenter's intent caused the task "
+            "this commenter contributed to be rewritten or re-anchored.  "
+            "Tell this commenter the STORY of how their ask was reshaped "
+            "and which later intent drove the rewrite.  Do NOT say the "
+            "work is done — the rescope only restructured the plan."
         )
 
     instruction_parts = [
@@ -2210,31 +2183,17 @@ def _notify_intent_outcome(
         "",
         f"This commenter's change request: {intent.change_request}",
         f"Their comment id: {intent.comment_id} ({intent.timestamp})",
-        f"Disposition: {disposition.kind}",
-        f"What changed: {disposition.reason}",
-        f"Affected task id(s): {', '.join(disposition.affected_task_ids) or '(none)'}",
+        f"Affected task id(s): {', '.join(affected_task_ids) or '(none)'}",
     ]
     if co_contributing:
         instruction_parts.append("")
         instruction_parts.append(
-            "Other commenters who contributed to the SAME affected task(s) "
+            "Later commenters whose intents shaped the SAME affected task(s) "
             "(chronological):"
         )
         for other in co_contributing:
             instruction_parts.append(
                 f"- comment #{other.comment_id} ({other.timestamp}): "
-                f"{other.change_request}"
-            )
-    if siblings and disposition.kind == "unhandled":
-        instruction_parts.append("")
-        instruction_parts.append(
-            "Other intents processed in this same rescope batch "
-            "(chronological, with their dispositions):"
-        )
-        for other, other_disposition in siblings:
-            instruction_parts.append(
-                f"- comment #{other.comment_id} "
-                f"({other.timestamp}, {other_disposition.kind}): "
                 f"{other.change_request}"
             )
     instruction_parts.append("")
@@ -2252,9 +2211,9 @@ def _notify_intent_outcome(
     try:
         gh.reply_to_review_comment(repo, pr, body, intent.comment_id)
         log.info(
-            "notified intent comment %s (%s rescope)",
+            "notified intent comment %s (%s)",
             intent.comment_id,
-            disposition.kind,
+            type(kind).__name__,
         )
     except Exception:
         log.exception("failed to notify intent comment %s", intent.comment_id)
@@ -2460,7 +2419,7 @@ def _make_reorder_kwargs(
     # ``_reorder_tasks_background``'s run_loop (see usage there) and
     # injected over this kwargs entry.  We wire the no-op default
     # here so kwargs is shape-stable for callers that don't override.
-    kwargs["_on_intent_dispositions"] = _build_on_intent_dispositions(
+    kwargs["_on_rescope_apply"] = _build_on_rescope_apply(
         intents=[],
         repo=repo_cfg.name,
         pr_ctx=pr_ctx,
@@ -2473,7 +2432,84 @@ def _make_reorder_kwargs(
     return kwargs
 
 
-def _build_on_intent_dispositions(
+def _intent_author_ids(intents: list[RescopeIntent]) -> dict[int, int]:
+    """Map each intent's ``comment_id`` to a positive author id.
+
+    Distinct positive ids per author-string mean two intents from the
+    same login compare equal in
+    :func:`oracle.intent_later_and_cross_author`.  Unauthored intents
+    each get a unique sentinel so they never accidentally collide.
+    """
+    by_login: dict[str, int] = {}
+    out: dict[int, int] = {}
+    next_id = 1
+    for intent in intents:
+        if intent.author:
+            if intent.author not in by_login:
+                by_login[intent.author] = next_id
+                next_id += 1
+            out[intent.comment_id] = by_login[intent.author]
+        else:
+            out[intent.comment_id] = next_id
+            next_id += 1
+    return out
+
+
+def _intent_arrival_indices(intents: list[RescopeIntent]) -> dict[int, int]:
+    """Map each intent's ``comment_id`` to its arrival index (0-based).
+
+    Sorting by timestamp matches the canonical batch ordering Opus and
+    the oracle both consume.
+    """
+    ordered = sorted(intents, key=lambda i: i.timestamp)
+    return {intent.comment_id: idx for idx, intent in enumerate(ordered)}
+
+
+def _rocq_intent_rows(
+    intents: list[RescopeIntent],
+) -> list[oracle.IntentRow]:
+    authors = _intent_author_ids(intents)
+    indices = _intent_arrival_indices(intents)
+    return [
+        oracle.IntentRow(
+            intent_comment_id=intent.comment_id,
+            intent_author=authors[intent.comment_id],
+            intent_index=indices[intent.comment_id],
+        )
+        for intent in sorted(intents, key=lambda i: i.timestamp)
+    ]
+
+
+def _build_task_with_intents(
+    result: list[dict[str, Any]],
+    task_id_to_positive: dict[str, int],
+) -> list[oracle.TaskWithIntents]:
+    """Adapter glue: result task list → oracle ``TaskWithIntents``.
+
+    ``twi_row`` is unused by ``reply_back_intents_for`` (only the id
+    and contributing-intents list are consulted), so we plug a
+    placeholder rather than threading full row shape through.
+    """
+    placeholder = oracle.TaskRow(
+        title="",
+        description="",
+        kind=oracle.TaskSpec(),
+        status=oracle.StatusPending(),
+        source_comment=None,
+        lineage_comments=[],
+    )
+    return [
+        oracle.TaskWithIntents(
+            twi_id=task_id_to_positive[task["id"]],
+            twi_row=placeholder,
+            twi_contributing=list(task.get("contributing_intents") or []),
+        )
+        for task in result
+        if task["id"] in task_id_to_positive
+    ]
+
+
+def _build_on_rescope_apply(
     intents: list[RescopeIntent],
     repo: str,
     pr_ctx: ActivePR | None,
@@ -2482,91 +2518,71 @@ def _build_on_intent_dispositions(
     gh: GitHub,
     agent: ProviderAgent | None,
     prompts: Prompts | None,
-) -> Callable[[dict[int, IntentDisposition], list[dict[str, Any]]], None]:
-    """Build the per-iteration intent-dispositions callback (#1724).
+) -> Callable[
+    [
+        list[dict[str, Any]],
+        list[oracle.OpInput],
+        dict[str, int],
+        list[IntentVerdict],
+    ],
+    None,
+]:
+    """Build the per-iteration post-apply rescope notifier (INV-F).
 
-    Each rescope iteration may carry a different ``current_intents``
-    list (the coalescing loop in ``_reorder_tasks_background`` swaps
-    the pending entry each iteration); this factory closes over the
-    intents for THIS iteration so the notifier posts to the right
-    commenters in the right order.
+    The reply-back rule — fire a reply to each intent whose contributing
+    task was destructively affected by a strictly-later cross-author
+    op (``EffectChange`` or ``EffectDrop``; ``EffectReorganize`` doesn't
+    count because the work still gets done) — lives entirely in the
+    extracted oracle :func:`oracle.reply_back_intents_for`.  This
+    factory adapts only the Python intent / result shapes into the
+    oracle's record types; the op→effect classification and the
+    merge/split reorganize override are inside the model.
 
     Returns a no-op when ``pr_ctx`` is None — intent-driven rescope
     only happens against an active PR.
+
+    The verdict list is accepted for forward compatibility (Opus emits
+    it alongside the op envelope) but is not currently consumed.
     """
     intents_by_cid = {i.comment_id: i for i in intents}
 
-    def on_intent_dispositions(
-        dispositions: dict[int, IntentDisposition],
+    def on_rescope_apply(
         result: list[dict[str, Any]],
+        op_inputs: list[oracle.OpInput],
+        task_id_to_positive: dict[str, int],
+        verdicts: list[IntentVerdict],
     ) -> None:
+        del verdicts  # reserved; not consumed by the current rule
         if pr_ctx is None:
             return
-        # Dispositions dict iteration order is intent-timestamp
-        # ascending (the classifier sorts) — we fire notifications in
-        # the same order so the chronological story reads top to
-        # bottom on the reviewer's thread.  Aggregation is silent;
-        # material always notifies; unhandled only notifies when an
-        # EARLIER-timestamp sibling was attributed (Rob's #1747
-        # directive — "if later say nothing because there is nothing
-        # to tell them, their original ask still honored").
-        for cid, disposition in dispositions.items():
-            intent = intents_by_cid.get(cid)
-            if intent is None or disposition.kind == "aggregation":
-                continue
-            if disposition.kind == "unhandled" and not _has_earlier_attributed_sibling(
-                intent, intents, dispositions
-            ):
-                # Either no other intents touched anything, or every
-                # attributed sibling is strictly newer than this one.
-                # In both cases the original "got it" reply remains
-                # accurate — silent.
-                continue
+        intent_rows = _rocq_intent_rows(intents)
+        task_records = _build_task_with_intents(result, task_id_to_positive)
+        entries = oracle.reply_back_intents_for(intent_rows, task_records, op_inputs)
+        positive_to_task_id = {pos: tid for tid, pos in task_id_to_positive.items()}
+        for cid, kind in entries:
+            intent = intents_by_cid[cid]
+            affected_positives = oracle.intent_contributing_tasks(cid, task_records)
+            affected_task_ids = [
+                positive_to_task_id[p]
+                for p in affected_positives
+                if p in positive_to_task_id
+            ]
             _notify_intent_outcome(
                 intent,
-                disposition,
+                kind,
                 repo=repo,
                 pr=pr_ctx.number,
                 config=config,
                 repo_cfg=repo_cfg,
                 gh=gh,
                 batch_intents=intents,
-                batch_dispositions=dispositions,
+                affected_task_ids=affected_task_ids,
                 result=result,
                 agent=agent,
                 prompts=prompts,
             )
 
-    return on_intent_dispositions
-
-
-def _has_earlier_attributed_sibling(
-    intent: RescopeIntent,
-    batch_intents: list[RescopeIntent],
-    dispositions: dict[int, IntentDisposition],
-) -> bool:
-    """True iff some other intent in the batch is older AND was acted on.
-
-    "Acted on" = its disposition is material or aggregation (i.e.,
-    Opus attributed at least one op to it).  Used to decide whether
-    an *unhandled* disposition is worth telling the commenter about
-    (Rob on #1747): if their ask was dropped because an EARLIER
-    intent already covered it, they should hear "your ask is covered
-    by that earlier task" — but if every acted-on sibling is NEWER
-    than them, the work continues under the later cover and the
-    original triage reply still stands, so we say nothing.
-    """
-    for other in batch_intents:
-        if other.comment_id == intent.comment_id:
-            continue
-        # Classifier produces a disposition for every batch intent —
-        # missing key here would be a bug; let it AttributeError loudly.
-        other_disposition = dispositions[other.comment_id]
-        if other_disposition.kind == "unhandled":
-            continue
-        if other.timestamp < intent.timestamp:
-            return True
-    return False
+    return on_rescope_apply
 
 
 def _reorder_tasks_background(
@@ -2680,12 +2696,12 @@ def _reorder_tasks_background(
             while True:
                 iteration += 1
                 log.info("rescope BG: iteration %d starting", iteration)
-                # #1724: rebuild the on_intent_dispositions callback
-                # each iteration so it closes over THIS iteration's
+                # INV-F: rebuild the on_rescope_apply callback each
+                # iteration so it closes over THIS iteration's
                 # current_intents (coalesced batches accumulate).
                 # pr_ctx and other context are immutable across
                 # iterations so re-extracting from kw is safe.
-                kw["_on_intent_dispositions"] = _build_on_intent_dispositions(
+                kw["_on_rescope_apply"] = _build_on_rescope_apply(
                     intents=current_intents,
                     repo=repo_cfg.name,
                     pr_ctx=kw.get("pr"),
