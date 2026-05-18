@@ -443,10 +443,22 @@ class Prompts:
             # list passed in here; the prompt should always show them
             # chronologically so the "newer overrides older on
             # conflict" rule below has a stable referent.
+            #
+            # Per-intent author identity is rendered alongside the text
+            # (#1801 / INV-C) so Opus can apply the supersedence rule:
+            # when two intents conflict and BOTH are from the same
+            # author, the newer is a self-correction and no rescope
+            # reply-back is owed to the older (the commenter knows they
+            # overrode themselves).  Cross-author supersedence DOES
+            # warrant a reply-back to the older commenter — they need
+            # to know their ask was overridden by someone else.
             ordered_intents = sorted(intents, key=lambda i: i.timestamp)
             lines = [
-                f"- comment #{intent.comment_id} ({intent.timestamp}): "
-                f"{intent.change_request}"
+                (
+                    f"- comment #{intent.comment_id} "
+                    f"({intent.timestamp}, by @{intent.author or '?'}): "
+                    f"{intent.change_request}"
+                )
                 for intent in ordered_intents
             ]
             intents_block = (
@@ -457,6 +469,12 @@ class Prompts:
                 "via the appropriate operation on the existing task id.  "
                 "Intents that don't conflict stay independent and each get "
                 "their own operation.\n\n"
+                "Self-correction note: when an intent is superseded by another "
+                "from the *same* author, that's a self-correction — the "
+                "commenter already knows they overrode themselves.  Cross-"
+                "author supersedence is the case where a different commenter "
+                "overrides; only that case warrants a follow-up reply-back at "
+                "rescope time (the executor handles that downstream).\n\n"
             )
 
         return (

@@ -40,6 +40,11 @@ class CommentTarget:
     pr: int
     comment_id: int
     comment_type: str
+    author: str = ""
+    """GitHub login of the commenter (per #1801 / INV-C).  Forwarded
+    into the ``RescopeIntent`` so the rescope prompt can render
+    per-author attribution.  Empty when the caller didn't populate it
+    (legacy / synthetic test fixtures)."""
 
 
 class ReplyPoster(Protocol):
@@ -243,6 +248,7 @@ class SynthesisExecutor:
                 comment_id=target.comment_id,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 comment_type=target.comment_type,
+                author=target.author,
             )
             log.info(
                 "triggering rescope for comment %d: %s",

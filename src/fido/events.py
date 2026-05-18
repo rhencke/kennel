@@ -1577,6 +1577,7 @@ def reply_to_comment(
             pr=int(info.get("pr", 0)),
             comment_id=int(info["comment_id"]),
             comment_type="pulls",
+            author=str(info.get("author", "")),
         )
 
     log.info(
@@ -1876,11 +1877,19 @@ def reply_to_issue_comment(
     )
     issue_target: CommentTarget | None = None
     if _cid and repo_full:
+        # action.thread carries the comment author (per
+        # ``_build_issue_comment_action``); fall back to "" when the
+        # call path didn't populate a thread dict (legacy synthetic
+        # paths).
+        issue_author = ""
+        if isinstance(action.thread, dict):
+            issue_author = str(action.thread.get("author", ""))
         issue_target = CommentTarget(
             repo=repo_full,
             pr=int(number) if number else 0,
             comment_id=int(_cid),
             comment_type="issues",
+            author=issue_author,
         )
 
     log.info("synthesis: calling for issue comment on PR #%s", number)

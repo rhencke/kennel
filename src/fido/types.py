@@ -144,6 +144,14 @@ class RescopeIntent:
     ``"issues"`` for top-level PR/issue comments where the webhook
     handler already posted a triage reply (rescope notifier silently
     skips per #1724 codex P2 — same policy as ``_notify_thread_change``)."""
+    author: str = ""
+    """GitHub login of the commenter.  Rendered alongside the change
+    request in the rescope prompt so Opus can apply per-author
+    supersedence semantics (later #1803 / INV-E: suppress reply-back
+    when an intent was superseded by another from the same author —
+    the commenter already knows they overrode themselves).  Empty
+    string when the source path didn't populate it (legacy / synthetic
+    test fixtures pre-INV-C)."""
 
 
 @dataclass(frozen=True)

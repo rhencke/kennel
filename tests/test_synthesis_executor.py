@@ -46,9 +46,14 @@ def _make_target(
     pr: int = 42,
     comment_id: int = 100,
     comment_type: str = "pulls",
+    author: str = "alice",
 ) -> CommentTarget:
     return CommentTarget(
-        repo=repo, pr=pr, comment_id=comment_id, comment_type=comment_type
+        repo=repo,
+        pr=pr,
+        comment_id=comment_id,
+        comment_type=comment_type,
+        author=author,
     )
 
 
@@ -173,6 +178,39 @@ class TestExecutorRescope:
         assert intent.change_request == "Add logging"
         assert intent.comment_id == 100  # from _make_target()
         assert intent.timestamp  # non-empty ISO timestamp
+
+    def test_rescope_intent_carries_author_from_target(self) -> None:
+        # #1801 / INV-C: author identity flows from the comment source
+        # through CommentTarget into RescopeIntent so the rescope
+        # prompt can render per-author attribution.
+        gh = _make_gh()
+        rescope = _make_rescope()
+        executor = SynthesisExecutor(gh, rescope=rescope)
+        target = _make_target(author="bob")
+
+        executor.execute(_make_response(change_request="Add tests"), target)
+
+        intent = rescope.trigger_rescope.call_args[0][0]
+        assert intent.author == "bob"
+
+    def test_rescope_intent_author_defaults_to_empty_when_unset(self) -> None:
+        # Backward-compat: a CommentTarget without ``author`` (legacy
+        # synthetic test fixtures) produces an intent with empty
+        # author rather than crashing.
+        gh = _make_gh()
+        rescope = _make_rescope()
+        executor = SynthesisExecutor(gh, rescope=rescope)
+        target = CommentTarget(
+            repo="owner/repo",
+            pr=1,
+            comment_id=42,
+            comment_type="pulls",
+        )
+
+        executor.execute(_make_response(change_request="Add tests"), target)
+
+        intent = rescope.trigger_rescope.call_args[0][0]
+        assert intent.author == ""
 
     def test_rescope_intent_comment_id_matches_target(self) -> None:
         gh = _make_gh()

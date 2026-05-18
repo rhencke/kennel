@@ -581,6 +581,50 @@ class TestRescopePrompt:
         # by a "newer wins" reading).
         assert "don't conflict" in result
 
+    def test_intents_block_renders_author_when_present(self) -> None:
+        # #1801 / INV-C: per-intent author identity is part of the
+        # input contract.  Opus needs it to apply the self-supersedence
+        # rule (#1803 / INV-E) — suppress reply-back when an intent
+        # was overridden by another from the same author.
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent(
+                change_request="Add logging",
+                comment_id=111,
+                timestamp="2024-01-15T10:00:00+00:00",
+                author="alice",
+            ),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "by @alice" in result
+
+    def test_intents_block_renders_unknown_author_marker_when_blank(self) -> None:
+        # Backward-compat: pre-#1801 intents have author="".  Render a
+        # ``?`` marker so Opus can tell "unknown author" from "real
+        # author" rather than seeing a silently-empty ``by @``.
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent("Add logging", 111, "2024-01-15T10:00:00+00:00"),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "by @?" in result
+
+    def test_intents_block_states_self_supersedence_rule(self) -> None:
+        # #1801 / INV-C: prompt must spell out that self-supersedence
+        # is a self-correction (no reply-back) while cross-author
+        # supersedence warrants follow-up.  This is the contract the
+        # downstream INV-E executor relies on Opus understanding.
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent("X", 111, "2024-01-15T10:00:00+00:00", author="alice"),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "Self-correction" in result
+        # "*same* author" — Markdown emphasis on "same" inside the
+        # prompt body — so we match the keyword fragments separately.
+        assert "same" in result and "author" in result
+        assert "Cross-author" in result
+
     def test_intents_block_header_announces_ordering(self) -> None:
         # The header line tells Opus the list is chronological so the
         # ordering itself is a signal, not just visual sugar.
