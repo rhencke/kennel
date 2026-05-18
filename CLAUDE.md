@@ -372,37 +372,50 @@ clean model while races remain in the glue.
 
 ### When to write Rocq vs. plain Python
 
-The Rocq-oracle pattern earns its keep when existing Python coordination code
-has accumulated rules that need to be proved consistent — porting an entangled
-tower into a model lets the proof carry the rules and the extracted Python
-replaces the tower in one change.  It does **not** earn its keep when written
-in parallel with brand-new Python for a brand-new feature: both layers are
-fresh, both can be buggy, there is no pre-existing runtime to check against,
-and you have written the feature twice.
+All NEW coordination logic exists first and only in Rocq.  The extracted
+Python is the implementation; the Python adapter is data-shape glue
+(strings ↔ positives, dicts ↔ lists), not a parallel reimplementation.
+Logic that classifies, decides, or routes — including helper functions
+that distinguish op kinds, detect merge/split sequences, or apply
+precedence rules — belongs in the model, not in the adapter.
 
-Use Rocq when:
+Existing oracles (where Python was tracked against a model via runtime
+divergence checks) have long proven equivalent.  The handwritten Python
+in those pairs should be removed; the extracted code is now the sole
+implementation.  An oracle whose Python sibling never gets deleted is
+half-done work.
 
-- The Python rule set has been bitten by edge cases more than once (review
-  comments, codex catches, bug-mined invariants — see
-  `models/BUG_MINED_INVARIANTS.md`).
-- The invariant is a *property* (acyclicity, termination, totality, exhaustive
-  case coverage) that's awkward to express as tests but natural in a model.
-- You're folding a Python if/elif tower into a single modeled transition and
-  ripping the tower out in the same change.
+New oracles are a code smell **unless** they are being used to replace
+existing Python in the same change (or a tightly-scoped follow-up that
+deletes the Python).  They should not be long-lived as "model + parallel
+handwritten Python" pairs — that doubles the surface area, lets the two
+layers drift, and provides no oracle check that catches the drift.
 
-Default to plain Python when:
+Use Rocq for:
 
-- The feature is net-new and has no Python predecessor to port.  Writing the
-  model and the Python in parallel is just writing the same logic twice with
-  no oracle check available — both can drift, both can have bugs, and you've
-  doubled the surface area.
-- The rule is simple enough that a few tests fully cover it.
+- Net-new coordination logic that has nontrivial structure (precedence
+  rules, multi-step decisions, ordering invariants).  Write it in the
+  model first; the extracted Python is what production calls.
+- Replacing existing Python rule sets — the model owns the rule, the
+  Python tower is deleted in the same change.
+- Properties (acyclicity, termination, totality, exhaustive case
+  coverage) that are natural in a model but awkward as tests.
 
-**Reviewer signal:** a PR that introduces a brand-new Rocq model *and* its
-brand-new Python implementation in the same diff for a brand-new feature is
-almost always wrong — the model has nothing to oracle against.  Either port
-existing Python into the model and delete the old Python, or just write the
-Python.
+Default to plain Python only when:
+
+- The work is pure data-shape adapter (string ↔ int mapping, dict ↔
+  list reshape, parsing/serialisation) with no rule logic.
+- The rule is one or two lines and has no foreseeable extension surface.
+
+**Reviewer signals:**
+
+- A PR that adds a brand-new Rocq model **and** keeps the handwritten
+  Python parallel to it (no deletion) — the oracle is half-done, the
+  Python should go.
+- A Python helper that classifies ops, decides outcomes, or applies
+  precedence — that's logic; it belongs in the model, not the adapter.
+- An existing oracle whose Python sibling hasn't been deleted long after
+  the runtime divergence check stopped firing — schedule the removal.
 
 ### FidoState is a SCADA display snapshot — not a data source
 
