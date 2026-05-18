@@ -239,6 +239,18 @@ ignore = ["E501"]
 "unittest.mock.patch.object" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch object attributes from outside."}
 "unittest.mock.patch.dict" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch dict entries from outside."}
 
+# #1816 / INV-B (#1800 / epic #1798): comment-driven task creation must go
+# through the intent path — synthesis emits ``RescopeIntent`` → rescope produces
+# tasks via Opus ops in a verdict envelope.  These helpers were the legacy
+# direct-task path from comments; they have no remaining production callers
+# (server.py wiring was removed in PR #1816).  The function bodies are kept
+# only for the existing test suite which has not been migrated.  Adding a NEW
+# production caller is forbidden — comments do not directly task.
+"fido.events.create_task" = {msg = "Comments must follow the intent path (synthesis → RescopeIntent → rescope). Do not directly create tasks from comment handlers (#1816 / INV-B). Initial PR tasking uses Tasks.add directly in worker._apply_setup_outcome."}
+"fido.events.queue_reply_tasks" = {msg = "Comments must follow the intent path (synthesis → RescopeIntent → rescope). Do not queue tasks from reply outcomes (#1816 / INV-B)."}
+"fido.events._apply_reply_result" = {msg = "Reply outcomes no longer produce direct task side effects; the synthesis path emits RescopeIntent and rescope handles tasks (#1816 / INV-B)."}
+"fido.events.reply_outcome_creates_tasks" = {msg = "Comment categories no longer drive direct task creation; the intent path is authoritative (#1816 / INV-B)."}
+
 [tool.ruff.lint.per-file-ignores]
 # Generated Rocq extraction output is format-checked by CI, but lint has
 # intentional noise: reusable runtime imports, type aliases Rocq erases, and

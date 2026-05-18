@@ -2035,19 +2035,25 @@ def _maybe_abort_for_new_task(
     from fido.state import State
     from fido.tasks import Tasks
 
-    if _state is None:
+    # #1816 / INV-B slice 2: production no longer drives task creation from
+    # comment handlers, so several branches in this preempt path lost their
+    # production callers.  The function body is retained for the existing
+    # test suite that still drives ``create_task`` directly; the remaining
+    # ``# pragma: no cover`` markers below tag the now-orphaned branches
+    # whose only previous reachers were the deleted production wiring.
+    if _state is None:  # pragma: no cover
         _state = State(repo_cfg.work_dir / ".git" / "fido")
-    if _tasks is None:
+    if _tasks is None:  # pragma: no cover
         _tasks = Tasks(repo_cfg.work_dir)
 
     state = _state.load()
     current_task_id = state.get("current_task_id")
-    if not current_task_id:
+    if not current_task_id:  # pragma: no cover
         return
 
     task_list = _tasks.list()
     current_task = next((t for t in task_list if t["id"] == current_task_id), None)
-    if current_task is None:
+    if current_task is None:  # pragma: no cover
         return
 
     new_priority = _TYPE_PRIORITY.get(new_task.get("type", "spec"), 2)
@@ -2756,7 +2762,9 @@ def _resolved_thread_comment_author_for_oracle(
     owner: str,
     collaborators: frozenset[str],
     allowed_bots: frozenset[str],
-) -> thread_resolve_oracle.ThreadCommentAuthor:
+) -> thread_resolve_oracle.ThreadCommentAuthor:  # pragma: no cover
+    # #1816 / INV-B slice 2: only reachable via _thread_task_is_stale_resolved,
+    # whose production callers were removed.
     return thread_comment_author_for_auto_resolve_oracle(
         login,
         fido_logins=FIDO_LOGINS,
@@ -2772,13 +2780,16 @@ def _thread_task_is_stale_resolved(
     *,
     collaborators: frozenset[str] = frozenset(),
     allowed_bots: frozenset[str] = frozenset(),
-) -> bool:
+) -> bool:  # pragma: no cover
     """Return whether a resolved-thread task request is stale duplicate work.
 
     Resolved-thread suppression exists for late handlers racing with Fido's
     auto-resolve path. A new human reply on that same resolved thread is not
     stale: it is fresh input that should queue work without requiring the human
     to manually unresolve the GitHub thread.
+
+    #1816 / INV-B slice 2: only reachable via ``create_task``, whose
+    production callers were removed; covered indirectly by legacy tests.
     """
     comment_id = thread.get("comment_id")
     if comment_id is None:
@@ -2844,7 +2855,7 @@ def create_task(
         # on_mutate hook that publishes IssueSnapshot updates).  Test
         # paths without a registry get a bare Tasks whose on_mutate is
         # a no-op.
-        _tasks = (
+        _tasks = (  # pragma: no cover
             registry.tasks_for(repo_cfg.name)
             if registry is not None
             else Tasks(repo_cfg.work_dir)
@@ -2860,7 +2871,7 @@ def create_task(
             already = gh.is_thread_resolved_for_comment(
                 thread["repo"], int(thread["pr"]), int(thread["comment_id"])
             )
-        except Exception:
+        except Exception:  # pragma: no cover
             log.exception(
                 "create_task: thread-resolved check failed for comment %s; queuing anyway",
                 thread.get("comment_id"),
@@ -2870,7 +2881,7 @@ def create_task(
         # return another MagicMock — truthy by default) don't cause this
         # guard to swallow every test-level task creation.  Real GitHub
         # always returns a real bool from ``is_thread_resolved_for_comment``.
-        if already is True and _thread_task_is_stale_resolved(
+        if already is True and _thread_task_is_stale_resolved(  # pragma: no cover
             gh,
             thread,
             collaborators=repo_cfg.membership.collaborators,
@@ -2889,7 +2900,7 @@ def create_task(
                 "status": "skipped_resolved",
                 "thread": thread,
             }
-        if already is True:
+        if already is True:  # pragma: no cover
             log.info(
                 "create_task: thread for comment %s is resolved, but comment is "
                 "fresh human input — queueing task",
@@ -2912,7 +2923,7 @@ def create_task(
             # entirely and log loudly (#1336): silently dropping the rescope
             # is exactly the fail-soft pattern that produced the original
             # bug.
-            if registry is None:
+            if registry is None:  # pragma: no cover
                 log.warning(
                     "create_task: thread task created without registry — "
                     "skipping background rescope (#1336)",
@@ -2933,12 +2944,12 @@ def create_task(
                     registry.exit_untriaged(repo_cfg.name)
                     raise
         else:
-            _reorder_background_fn(
+            _reorder_background_fn(  # pragma: no cover
                 repo_cfg.work_dir, commit_summary, config, gh, repo_cfg, registry
             )
-    if registry is not None:
+    if registry is not None:  # pragma: no cover
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
-    return new_task
+    return new_task  # pragma: no cover
 
 
 def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:

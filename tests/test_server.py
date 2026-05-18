@@ -199,7 +199,6 @@ def _restore_handler_fns() -> object:
         "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
-        "_fn_create_task": WebhookHandler._fn_create_task,
         "_fn_launch_worker": WebhookHandler._fn_launch_worker,
         "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
@@ -1104,14 +1103,7 @@ class TestProcessAction:
             )
             return "ACT", ["do it"]
 
-        def create_task(*args: object, **kwargs: object) -> None:
-            del args, kwargs
-            phases.append(
-                handler.registry.get_webhook_activities("owner/repo")[0].description
-            )
-
         WebhookHandler._fn_reply_to_issue_comment = reply_to_issue_comment
-        WebhookHandler._fn_create_task = create_task
         WebhookHandler._fn_launch_worker = MagicMock()
         action = Action(
             prompt="test",
@@ -1128,7 +1120,10 @@ class TestProcessAction:
 
         handler._process_action(action, cfg.repos["owner/repo"])
 
-        assert phases == ["triaging PR comment", "queuing PR comment task"]
+        # #1816 / INV-B slice 2: PR comments no longer directly queue tasks;
+        # only the triaging phase remains here.  The intent path produces task
+        # mutations later via rescope.
+        assert phases == ["triaging PR comment"]
         assert handler.registry.get_webhook_activities("owner/repo") == []
 
     def test_dispatch_error_returns_500(self, server: tuple) -> None:
