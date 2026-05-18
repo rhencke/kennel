@@ -1349,10 +1349,7 @@ class TestParseRescopeVerdicts:
         # parser boundary so the upstream coalescer bug is visible.
         raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
         _, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(1)])
-        assert any(
-            "duplicate comment_id" in e and "[1]" in e
-            for e in errors
-        )
+        assert any("duplicate comment_id" in e and "[1]" in e for e in errors)
 
     def test_multiple_duplicate_intent_ids_all_reported(self) -> None:
         raw = '{"verdicts": []}'
@@ -1363,8 +1360,7 @@ class TestParseRescopeVerdicts:
         # Single error line lists ALL duplicates so the coalescer
         # bug is debuggable on sight.
         assert any(
-            "duplicate comment_id" in e and "1" in e and "2" in e
-            for e in errors
+            "duplicate comment_id" in e and "1" in e and "2" in e for e in errors
         )
 
 
