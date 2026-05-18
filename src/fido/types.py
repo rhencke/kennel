@@ -1,7 +1,8 @@
 """Shared type definitions for fido."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any, Literal
 
 
 class TaskType(StrEnum):
@@ -113,6 +114,87 @@ class TaskSnapshot:
     type: str
     status: str
     description: str = ""
+
+
+IntentOutcome = Literal["honored", "reshaped", "superseded", "no_op"]
+"""Per-intent verdict outcome (per #1798 / INV-D).
+
+  * ``honored`` — Opus produced ops that fulfill the intent as asked.
+  * ``reshaped`` — ops fulfill *part* of the intent; the original
+    framing changed (e.g. user asked for a feature, Opus split it
+    into prereq + feature).  Material change — INV-E (#1803) emits a
+    reply-back unless self-supersedence applies.
+  * ``superseded`` — another intent in the same batch overrode this
+    one (in whole or in part).  ``by_intent_comment_id`` names the
+    superseding intent.  Material when authors differ; self-
+    correction (no reply) when authors match.
+  * ``no_op`` — intent was acknowledged but produced no task changes
+    (e.g. commenter chatter, ack, or request already satisfied by an
+    existing pending task with no edits needed).
+"""
+
+
+@dataclass(frozen=True)
+class IntentVerdict:
+    """Per-intent verdict in a rescope batch result (#1798 / INV-D).
+
+    Replaces the older ``IntentDisposition`` material/aggregation
+    classifier.  Each :class:`RescopeIntent` in a rescope batch maps
+    to exactly one :class:`IntentVerdict`; the batch's full verdict
+    list is Opus's structured answer for "what did I do with each
+    ask?".
+
+    INV-E (#1803) downstream rule: post a reply-back for ``V`` iff
+    ``V.outcome`` materially changes the original ask (``reshaped``
+    or cross-author ``superseded``) AND not self-supersedence
+    (``V.by_intent_comment_id``'s intent has the same author as
+    ``V``).  ``honored`` and ``no_op`` never warrant reply-back —
+    they're either "got it as asked" or "nothing to do" and the
+    triage reply already covered the user-facing acknowledgement.
+
+    Attributes
+    ----------
+    intent_comment_id:
+        :attr:`RescopeIntent.comment_id` this verdict pertains to.
+        Each intent in the batch produces exactly one verdict.
+    outcome:
+        See :data:`IntentOutcome` for the four allowed values and
+        their reply-back implications.
+    ops:
+        Op records this intent contributed to the batch.  May be
+        empty when ``outcome`` is ``superseded`` (fully superseded —
+        the winning intent owns the resulting ops) or ``no_op``.
+        Two verdicts in the same batch MAY both name the same task
+        id in :attr:`affected_task_ids` when they're jointly honored
+        by the same task (the canonical 3+1 reviewer-pattern case:
+        three review comments asking the same fix plus a fourth
+        "just fix all of these" all attribute to one consolidated
+        task).
+    affected_task_ids:
+        Task ids this verdict touched, in result-list order.  MAY
+        overlap with other verdicts' :attr:`affected_task_ids` under
+        joint-honoring.
+    by_intent_comment_id:
+        When set, names another intent in the same batch that
+        (partially or fully) superseded this one.  Must reference a
+        :attr:`RescopeIntent.comment_id` from the same batch.
+        Required to be acyclic across the batch (INV-F / #1804 will
+        prove this in Rocq; runtime asserts here).
+    narrative:
+        Opus's prose explanation of what happened.  Verbatim source
+        for the optional reply-back posted by INV-E (#1803) —
+        per the project memory ``voice_text_opus_not_templated``,
+        Fido-voice text is per-call Opus prose, not templated.
+        Required when ``outcome`` is ``reshaped`` or ``superseded``
+        (reply-back needs prose); optional otherwise.
+    """
+
+    intent_comment_id: int
+    outcome: IntentOutcome
+    ops: list[dict[str, Any]] = field(default_factory=list)
+    affected_task_ids: list[str] = field(default_factory=list)
+    by_intent_comment_id: int | None = None
+    narrative: str | None = None
 
 
 @dataclass(frozen=True)
