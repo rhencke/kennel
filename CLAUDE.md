@@ -370,6 +370,40 @@ extracted reducer enforcing it.
 calling the scheduler/reducer transition, the proof is only covering the
 clean model while races remain in the glue.
 
+### When to write Rocq vs. plain Python
+
+The Rocq-oracle pattern earns its keep when existing Python coordination code
+has accumulated rules that need to be proved consistent — porting an entangled
+tower into a model lets the proof carry the rules and the extracted Python
+replaces the tower in one change.  It does **not** earn its keep when written
+in parallel with brand-new Python for a brand-new feature: both layers are
+fresh, both can be buggy, there is no pre-existing runtime to check against,
+and you have written the feature twice.
+
+Use Rocq when:
+
+- The Python rule set has been bitten by edge cases more than once (review
+  comments, codex catches, bug-mined invariants — see
+  `models/BUG_MINED_INVARIANTS.md`).
+- The invariant is a *property* (acyclicity, termination, totality, exhaustive
+  case coverage) that's awkward to express as tests but natural in a model.
+- You're folding a Python if/elif tower into a single modeled transition and
+  ripping the tower out in the same change.
+
+Default to plain Python when:
+
+- The feature is net-new and has no Python predecessor to port.  Writing the
+  model and the Python in parallel is just writing the same logic twice with
+  no oracle check available — both can drift, both can have bugs, and you've
+  doubled the surface area.
+- The rule is simple enough that a few tests fully cover it.
+
+**Reviewer signal:** a PR that introduces a brand-new Rocq model *and* its
+brand-new Python implementation in the same diff for a brand-new feature is
+almost always wrong — the model has nothing to oracle against.  Either port
+existing Python into the model and delete the old Python, or just write the
+Python.
+
 ### FidoState is a SCADA display snapshot — not a data source
 
 `FidoState` and its `AtomicReader` face are exclusively for the status
