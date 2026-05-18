@@ -1385,7 +1385,7 @@ def _parse_rescope_operations(
     return operations, []
 
 
-def _parse_rescope_verdicts(
+def _parse_rescope_verdicts(  # pyright: ignore[reportUnusedFunction]
     raw: str,
     intents: list[RescopeIntent],
 ) -> tuple[list[IntentVerdict], list[str]]:
