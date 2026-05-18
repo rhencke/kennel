@@ -109,6 +109,42 @@ class TestIntentVerdictShape:
         assert isinstance(v.ops, tuple)
         assert isinstance(v.affected_task_ids, tuple)
 
+    def test_ops_list_input_coerced_to_tuple(self) -> None:
+        # codex P1 on #1802 (round 2): the tuple annotation isn't
+        # enforced at runtime.  Callers can pass a plain list; the
+        # post-init coerces.  Mutating the original list after
+        # construction MUST NOT bleed into the verdict.
+        original_ops = [{"op": "rewrite", "id": "T1"}]
+        v = IntentVerdict(
+            intent_comment_id=1,
+            outcome="reshaped",
+            ops=original_ops,  # type: ignore[arg-type]
+            affected_task_ids=["T1"],  # type: ignore[arg-type]
+            narrative="x",
+        )
+        original_ops.append({"op": "remove", "id": "T2"})
+        assert isinstance(v.ops, tuple)
+        assert len(v.ops) == 1
+        assert isinstance(v.affected_task_ids, tuple)
+
+    def test_op_payload_dicts_are_frozen(self) -> None:
+        # codex P2 on #1802: even with tuple ops, each ``dict`` was
+        # still mutable.  Deep-freeze coerces to frozendict so
+        # ``v.ops[0]["op"] = "x"`` raises at the boundary.
+        v = IntentVerdict(
+            intent_comment_id=1,
+            outcome="reshaped",
+            ops=({"op": "rewrite", "id": "T1"},),
+            affected_task_ids=("T1",),
+            narrative="x",
+        )
+        from collections.abc import Mapping
+
+        assert isinstance(v.ops[0], Mapping)
+        # frozendict raises TypeError on item assignment.
+        with pytest.raises((TypeError, AttributeError)):
+            v.ops[0]["op"] = "remove"  # type: ignore[index]
+
     def test_default_collections_are_singleton_empty_tuples(self) -> None:
         # Tuples are immutable so two verdicts sharing the default
         # empty tuple is safe (no foot-gun like a shared default
@@ -184,3 +220,33 @@ class TestIntentVerdictValidation:
         # no_op same as honored — never warrants reply-back.
         v = IntentVerdict(intent_comment_id=10, outcome="no_op")
         assert v.narrative is None
+
+    def test_by_intent_comment_id_rejected_on_honored(self) -> None:
+        # codex P2 round 2 on #1802: only ``superseded`` carries a
+        # supersedence pointer.  ``honored`` + ``by_intent_comment_id``
+        # is contradictory metadata; reject at boundary.
+        with pytest.raises(ValueError, match="by_intent_comment_id"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                by_intent_comment_id=2,
+            )
+
+    def test_by_intent_comment_id_rejected_on_reshaped(self) -> None:
+        # ``reshaped`` is Opus's reframing of a single intent — no
+        # other intent is involved, so the pointer is contradictory.
+        with pytest.raises(ValueError, match="by_intent_comment_id"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="reshaped",
+                by_intent_comment_id=2,
+                narrative="x",
+            )
+
+    def test_by_intent_comment_id_rejected_on_no_op(self) -> None:
+        with pytest.raises(ValueError, match="by_intent_comment_id"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="no_op",
+                by_intent_comment_id=2,
+            )

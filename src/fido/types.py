@@ -1,5 +1,6 @@
 """Shared type definitions for fido."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
@@ -191,16 +192,38 @@ class IntentVerdict:
 
     intent_comment_id: int
     outcome: IntentOutcome
-    ops: tuple[dict[str, Any], ...] = ()
+    ops: tuple[Mapping[str, Any], ...] = ()
+    """Op records this intent contributed.  Coerced to a tuple of
+    :class:`~frozendict.frozendict` mappings in ``__post_init__`` so
+    both the outer sequence and each per-op mapping are deeply
+    immutable — callers cannot mutate ``verdict.ops`` or
+    ``verdict.ops[0]['op']`` after construction (codex P1 / P2 on
+    #1802)."""
     affected_task_ids: tuple[str, ...] = ()
     by_intent_comment_id: int | None = None
     narrative: str | None = None
 
     def __post_init__(self) -> None:
-        # codex P1 follow-up on #1802: enforce supersedence + outcome
-        # invariants at construction so a malformed verdict crashes at
-        # the boundary instead of leaking into the reply-back
-        # classifier (INV-E #1803) or future graph traversals.
+        # codex P1 / P2 on #1802: deep-freeze the payload collections
+        # so the "frozen snapshot" promise holds at the value level,
+        # not just the attribute level.  Callers (tests, the parser
+        # layer when it lands) can pass plain lists / dicts —
+        # ``deep_freeze`` coerces to ``tuple`` + ``frozendict``.
+        # Done before the validations below so a malformed verdict
+        # still gets the boundary error path.
+        from fido.frozen import deep_freeze
+
+        object.__setattr__(self, "ops", deep_freeze(list(self.ops)))
+        object.__setattr__(
+            self,
+            "affected_task_ids",
+            tuple(str(t) for t in self.affected_task_ids),
+        )
+
+        # codex P2 on #1802: enforce supersedence + outcome invariants
+        # at construction so a malformed verdict crashes at the
+        # boundary instead of leaking into the reply-back classifier
+        # (INV-E #1803) or future graph traversals.
         if self.by_intent_comment_id == self.intent_comment_id:
             raise ValueError(
                 f"IntentVerdict.by_intent_comment_id ({self.by_intent_comment_id}) "
@@ -212,6 +235,13 @@ class IntentVerdict:
                 "IntentVerdict outcome='superseded' requires by_intent_comment_id "
                 "to name the superseding intent (INV-E #1803 cannot determine "
                 "self-vs-cross-author supersedence without it)"
+            )
+        if self.outcome != "superseded" and self.by_intent_comment_id is not None:
+            raise ValueError(
+                f"IntentVerdict outcome={self.outcome!r} must not carry "
+                "by_intent_comment_id — only 'superseded' verdicts carry a "
+                "supersedence pointer (codex P2 on #1802: reject contradictory "
+                "metadata at the boundary)"
             )
         if (
             self.outcome in ("reshaped", "superseded")
