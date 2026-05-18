@@ -4728,6 +4728,127 @@ class TestFlattenVerdictsToOps:
         assert flat[1]["contributing_intents"] == [2]
         assert flat[2]["contributing_intents"] == [2]
 
+    def test_malformed_int_contributing_intents_passed_through(self) -> None:
+        # codex P1 on PR #1813: ``contributing_intents: 42`` (bare int)
+        # would have crashed ``{*existing, ...}`` with TypeError.  Pass
+        # through untouched so the op parser raises a clean schema
+        # error.
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="honored",
+            ops=(
+                {
+                    "op": "keep",
+                    "id": "T1",
+                    "contributing_intents": 42,  # malformed: int not list
+                },
+            ),
+            affected_task_ids=("T1",),
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        # Malformed value passed through; verdict id NOT injected.
+        assert flat[0]["contributing_intents"] == 42
+
+    def test_malformed_string_contributing_intents_passed_through(self) -> None:
+        # codex P2 on PR #1813: ``""`` was previously collapsed to []
+        # via ``or []``; now passed through.
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="honored",
+            ops=({"op": "keep", "id": "T1", "contributing_intents": ""},),
+            affected_task_ids=("T1",),
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        assert flat[0]["contributing_intents"] == ""
+
+    def test_malformed_dict_contributing_intents_passed_through(self) -> None:
+        # codex P2 on PR #1813: ``{10: "x"}`` was previously coerced
+        # to ``[10, 5]`` via set-union over dict keys.
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="honored",
+            ops=(
+                {
+                    "op": "keep",
+                    "id": "T1",
+                    "contributing_intents": {"10": "x"},
+                },
+            ),
+            affected_task_ids=("T1",),
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        assert flat[0]["contributing_intents"] == {"10": "x"}
+
+    def test_mixed_type_list_contributing_intents_passed_through(self) -> None:
+        # codex P1 on PR #1813: ``[10, "bad"]`` would have raised in
+        # ``sorted({...})`` because mixed types aren't orderable.  Pass
+        # through.
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="honored",
+            ops=(
+                {
+                    "op": "keep",
+                    "id": "T1",
+                    "contributing_intents": [10, "bad"],
+                },
+            ),
+            affected_task_ids=("T1",),
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        # After IntentVerdict's deep_freeze, the list became a tuple.
+        # Pass-through preserves it as-is.
+        assert flat[0]["contributing_intents"] == (10, "bad")
+
+    def test_bool_in_list_contributing_intents_passed_through(self) -> None:
+        # ``bool`` is an ``int`` subclass; reject explicitly so
+        # ``True``/``False`` can't slip in as attribution.
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="honored",
+            ops=(
+                {
+                    "op": "keep",
+                    "id": "T1",
+                    "contributing_intents": [True, 10],
+                },
+            ),
+            affected_task_ids=("T1",),
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        # After deep_freeze, list → tuple; bool-containing → passed through.
+        assert flat[0]["contributing_intents"] == (True, 10)
+
+    def test_falsy_zero_contributing_intents_passed_through(self) -> None:
+        # ``0`` is falsy AND not a list; the old ``or []`` would have
+        # collapsed it.  Passed through now.
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="honored",
+            ops=({"op": "keep", "id": "T1", "contributing_intents": 0},),
+            affected_task_ids=("T1",),
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        assert flat[0]["contributing_intents"] == 0
+
 
 # ── _compute_thread_changes ───────────────────────────────────────────────────
 

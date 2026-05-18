@@ -1591,10 +1591,24 @@ def _flatten_verdicts_to_ops(
 
     Each emitted op inherits its originating verdict's
     ``intent_comment_id`` via the ``contributing_intents`` field (the
-    #1722 attribution convention; any pre-existing
+    #1722 attribution convention; any pre-existing well-formed
     ``contributing_intents`` on the op is unioned with the verdict's
     own id so explicit per-op attribution from Opus is preserved
     alongside the verdict-level one).
+
+    Malformed ``contributing_intents`` shapes are **passed through
+    untouched** so :func:`_parse_rescope_operations` raises the
+    schema error on the next step rather than this helper silently
+    coercing (codex P1/P2 on PR #1813: ``or []`` + set-union would
+    turn ``42`` / ``""`` / ``{...}`` / ``(...)`` / mixed lists into
+    a "valid" sorted int list, bypassing the fail-closed parse
+    boundary).  Only two shapes are touched here:
+
+    * field absent → set to ``[verdict.intent_comment_id]``
+    * existing list of int (rejecting ``bool``, an ``int`` subclass)
+      → union with verdict id, sorted
+
+    Anything else stays as-is for the op parser to reject.
 
     Used by :func:`reorder_tasks` when ``intents`` is non-empty so the
     verdict-shaped parser output can flow through the existing op
@@ -1605,9 +1619,26 @@ def _flatten_verdicts_to_ops(
     for verdict in verdicts:
         for op_mapping in verdict.ops:
             op = dict(op_mapping)
-            existing_attrib = op.get("contributing_intents") or []
-            merged_attrib = sorted({*existing_attrib, verdict.intent_comment_id})
-            op["contributing_intents"] = merged_attrib
+            if "contributing_intents" not in op:
+                op["contributing_intents"] = [verdict.intent_comment_id]
+            else:
+                existing = op["contributing_intents"]
+                # ``IntentVerdict.__post_init__`` ran ``deep_freeze``
+                # which turned any list inside ``ops`` into a tuple,
+                # so the well-formed shape we see here is
+                # ``tuple[int, ...]`` (not ``list[int]``).  Accept
+                # both for resilience; reject ``bool`` explicitly
+                # (it's an ``int`` subclass and would otherwise sneak
+                # through as attribution).
+                if isinstance(existing, (list, tuple)) and all(
+                    isinstance(x, int) and not isinstance(x, bool)
+                    for x in existing  # pyright: ignore[reportUnknownVariableType]
+                ):
+                    op["contributing_intents"] = sorted(
+                        {*existing, verdict.intent_comment_id}
+                    )
+                # Else: leave malformed value untouched so
+                # _parse_rescope_operations rejects it at the next step.
             flat.append(op)
     return flat
 
