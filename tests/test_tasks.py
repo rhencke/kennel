@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -3409,6 +3410,13 @@ class TestReorderTasks:
         # #1723: when intents are provided, the on_intent_dispositions
         # callback fires with the per-intent material/aggregation/
         # unhandled classification so #1724 can route notifications.
+        #
+        # #1812 (INV-D wiring): with intents present, the agent now
+        # receives the verdict-shaped prompt and must respond with a
+        # verdict envelope.  The verdict's ops are flattened to the
+        # flat op list the apply path consumes (with
+        # ``contributing_intents`` derived from the verdict's
+        # ``intent_comment_id``).
         t1 = self._add(tmp_path, "Original")
         intents = [
             RescopeIntent(
@@ -3417,16 +3425,22 @@ class TestReorderTasks:
                 timestamp="2024-01-15T10:00:00+00:00",
             )
         ]
-        # Op rewrites the task and attributes it to the intent.
         raw = json.dumps(
             {
-                "operations": [
+                "verdicts": [
                     {
-                        "op": "rewrite",
-                        "id": t1["id"],
-                        "title": "Renamed",
-                        "description": "",
-                        "contributing_intents": [101],
+                        "intent_comment_id": 101,
+                        "outcome": "reshaped",
+                        "ops": [
+                            {
+                                "op": "rewrite",
+                                "id": t1["id"],
+                                "title": "Renamed",
+                                "description": "",
+                            }
+                        ],
+                        "affected_task_ids": [t1["id"]],
+                        "narrative": "renamed per ask",
                     }
                 ]
             }
@@ -4342,6 +4356,377 @@ class TestReorderTasks:
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         mock_prompts.rescope_duplicate_nudge.assert_not_called()
         assert client.run_turn.call_count == 1
+
+
+class TestReorderTasksVerdictWiring:
+    """INV-D #1812: reorder_tasks uses the verdict envelope when intents present."""
+
+    def _add(self, tmp_path: Path, title: str) -> dict[str, Any]:
+        return Tasks(tmp_path).add(title=title, task_type=TaskType.SPEC)
+
+    def test_uses_verdict_prompt_when_intents_present(self, tmp_path: Path) -> None:
+        self._add(tmp_path, "A")
+        intents = [
+            RescopeIntent(
+                change_request="add B",
+                comment_id=101,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        raw = json.dumps({"verdicts": [{"intent_comment_id": 101, "outcome": "no_op"}]})
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt_verdicts.return_value = "VERDICT PROMPT"
+        # legacy ops prompt MUST NOT be invoked
+        mock_prompts.rescope_prompt = MagicMock()
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            prompts=mock_prompts,
+            intents=intents,
+        )
+        mock_prompts.rescope_prompt_verdicts.assert_called_once()
+        mock_prompts.rescope_prompt.assert_not_called()
+
+    def test_uses_ops_prompt_when_no_intents(self, tmp_path: Path) -> None:
+        self._add(tmp_path, "A")
+        raw = json.dumps({"operations": []})
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt.return_value = "OPS PROMPT"
+        mock_prompts.rescope_prompt_verdicts = MagicMock()
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw), prompts=mock_prompts)
+        mock_prompts.rescope_prompt.assert_called_once()
+        mock_prompts.rescope_prompt_verdicts.assert_not_called()
+
+    def test_verdict_ops_flattened_and_applied(self, tmp_path: Path) -> None:
+        # The op inside the verdict reaches the apply path and the
+        # task gets renamed.
+        t1 = self._add(tmp_path, "Original")
+        intents = [
+            RescopeIntent(
+                change_request="rename",
+                comment_id=101,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        raw = json.dumps(
+            {
+                "verdicts": [
+                    {
+                        "intent_comment_id": 101,
+                        "outcome": "reshaped",
+                        "ops": [
+                            {
+                                "op": "rewrite",
+                                "id": t1["id"],
+                                "title": "Renamed",
+                                "description": "",
+                            }
+                        ],
+                        "affected_task_ids": [t1["id"]],
+                        "narrative": "renamed",
+                    }
+                ]
+            }
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw), intents=intents)
+        result = Tasks(tmp_path).list()
+        assert any(t["id"] == t1["id"] and t["title"] == "Renamed" for t in result)
+
+    def test_verdict_parse_error_nudges_with_verdict_nudge(
+        self, tmp_path: Path
+    ) -> None:
+        # When the response isn't a valid verdict envelope, the
+        # verdict-shaped parse nudge fires (not the ops-shape nudge).
+        self._add(tmp_path, "A")
+        intents = [
+            RescopeIntent(
+                change_request="x",
+                comment_id=101,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        bad_raw = '{"operations": []}'  # ops envelope, not verdicts
+        valid_raw = json.dumps(
+            {"verdicts": [{"intent_comment_id": 101, "outcome": "no_op"}]}
+        )
+        agent = _client()
+        agent.run_turn.side_effect = [bad_raw, valid_raw]
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt_verdicts.return_value = "VERDICT PROMPT"
+        mock_prompts.rescope_verdicts_parse_nudge.return_value = "VERDICT NUDGE"
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=agent,
+            prompts=mock_prompts,
+            intents=intents,
+        )
+        mock_prompts.rescope_verdicts_parse_nudge.assert_called_once()
+        # ops-shape nudge MUST NOT be invoked in verdict mode.
+        assert (
+            not mock_prompts.rescope_parse_nudge.called
+            if hasattr(mock_prompts, "rescope_parse_nudge")
+            else True
+        )
+
+    def test_contributing_intents_attributed_from_verdict(self, tmp_path: Path) -> None:
+        # The flattened op carries ``contributing_intents`` derived
+        # from the verdict's ``intent_comment_id`` so downstream
+        # IntentDisposition classification has correct attribution.
+        t1 = self._add(tmp_path, "Original")
+        intents = [
+            RescopeIntent(
+                change_request="rename",
+                comment_id=42,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        raw = json.dumps(
+            {
+                "verdicts": [
+                    {
+                        "intent_comment_id": 42,
+                        "outcome": "reshaped",
+                        "ops": [
+                            {
+                                "op": "rewrite",
+                                "id": t1["id"],
+                                "title": "Renamed",
+                                "description": "",
+                            }
+                        ],
+                        "affected_task_ids": [t1["id"]],
+                        "narrative": "x",
+                    }
+                ]
+            }
+        )
+        captured: list[tuple[dict, list[dict]]] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            intents=intents,
+            _on_intent_dispositions=lambda d, r: captured.append((d, r)),
+        )
+        # Disposition for intent 42 should be material (rewrite is a
+        # material change per the classifier).
+        assert len(captured) == 1
+        dispositions, _ = captured[0]
+        assert 42 in dispositions
+        assert dispositions[42].kind == "material"
+
+    def test_explicit_op_attribution_unioned_with_verdict_attribution(
+        self, tmp_path: Path
+    ) -> None:
+        # Per-op ``contributing_intents`` provided by Opus is preserved
+        # alongside the verdict's own ``intent_comment_id`` (union, not
+        # replacement) so a hand-attributed op doesn't lose its
+        # verdict-level provenance.
+        t1 = self._add(tmp_path, "Original")
+        intents = [
+            RescopeIntent(
+                change_request="x",
+                comment_id=10,
+                timestamp="2024-01-15T10:00:00+00:00",
+            ),
+            RescopeIntent(
+                change_request="y",
+                comment_id=20,
+                timestamp="2024-01-15T10:01:00+00:00",
+            ),
+        ]
+        # Opus attributes the rewrite to intent 20 explicitly, and
+        # the verdict pertains to intent 10 (joint-honor case).
+        raw = json.dumps(
+            {
+                "verdicts": [
+                    {
+                        "intent_comment_id": 10,
+                        "outcome": "reshaped",
+                        "ops": [
+                            {
+                                "op": "rewrite",
+                                "id": t1["id"],
+                                "title": "Renamed",
+                                "description": "",
+                                "contributing_intents": [20],
+                            }
+                        ],
+                        "affected_task_ids": [t1["id"]],
+                        "narrative": "joint-honored",
+                    },
+                    {
+                        "intent_comment_id": 20,
+                        "outcome": "honored",
+                        "affected_task_ids": [t1["id"]],
+                    },
+                ]
+            }
+        )
+        captured: list[tuple[dict, list[dict]]] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            intents=intents,
+            _on_intent_dispositions=lambda d, r: captured.append((d, r)),
+        )
+        dispositions, _ = captured[0]
+        # Both intents attributed to the rewrite via the union.
+        assert dispositions[10].kind == "material"
+        assert dispositions[20].kind == "material"
+
+    def test_verdict_mode_skips_duplicate_title_nudge(self, tmp_path: Path) -> None:
+        # In verdict mode, the duplicate-title nudge loop is skipped
+        # entirely (its nudge text would shift Opus mid-conversation
+        # from the verdict envelope back to ops).  Verify by mocking
+        # rescope_duplicate_nudge and asserting it's never invoked,
+        # even when the verdict produces a duplicate title in the
+        # batch.
+        intents = [
+            RescopeIntent(
+                change_request="x",
+                comment_id=101,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        raw = json.dumps(
+            {
+                "verdicts": [
+                    {
+                        "intent_comment_id": 101,
+                        "outcome": "honored",
+                        "ops": [
+                            {
+                                "op": "new",
+                                "title": "Same",
+                                "description": "first",
+                                "type": "spec",
+                            },
+                            {
+                                "op": "new",
+                                "title": "Same",
+                                "description": "second",
+                                "type": "spec",
+                            },
+                        ],
+                        "affected_task_ids": [],
+                    }
+                ]
+            }
+        )
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt_verdicts.return_value = "VERDICT PROMPT"
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            prompts=mock_prompts,
+            intents=intents,
+        )
+        # The duplicate-title nudge MUST NOT have been invoked —
+        # that's the invariant for verdict mode regardless of what
+        # ``_make_new_tasks_from_opus`` decides downstream.
+        mock_prompts.rescope_duplicate_nudge.assert_not_called()
+
+
+class TestFlattenVerdictsToOps:
+    """Pure helper used by reorder_tasks's verdict path (#1812 INV-D)."""
+
+    def test_empty_verdicts_yields_empty_list(self) -> None:
+        from fido.tasks import _flatten_verdicts_to_ops
+
+        assert _flatten_verdicts_to_ops([]) == []
+
+    def test_single_verdict_op_inherits_intent_attribution(self) -> None:
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="reshaped",
+            ops=({"op": "rewrite", "id": "T1", "title": "x"},),
+            affected_task_ids=("T1",),
+            narrative="x",
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        assert len(flat) == 1
+        assert flat[0]["contributing_intents"] == [5]
+        assert flat[0]["op"] == "rewrite"
+
+    def test_explicit_attribution_unioned_with_verdict_id(self) -> None:
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="reshaped",
+            ops=(
+                {
+                    "op": "rewrite",
+                    "id": "T1",
+                    "title": "x",
+                    "contributing_intents": [9, 11],
+                },
+            ),
+            affected_task_ids=("T1",),
+            narrative="x",
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        assert flat[0]["contributing_intents"] == [5, 9, 11]
+
+    def test_duplicate_attribution_deduped(self) -> None:
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        v = IntentVerdict(
+            intent_comment_id=5,
+            outcome="reshaped",
+            ops=(
+                {
+                    "op": "rewrite",
+                    "id": "T1",
+                    "title": "x",
+                    "contributing_intents": [5],
+                },
+            ),
+            affected_task_ids=("T1",),
+            narrative="x",
+        )
+        flat = _flatten_verdicts_to_ops([v])
+        # Verdict id 5 already in explicit attribution; result has it
+        # once, not twice.
+        assert flat[0]["contributing_intents"] == [5]
+
+    def test_multiple_verdicts_flatten_in_order(self) -> None:
+        from fido.tasks import _flatten_verdicts_to_ops
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                ops=({"op": "keep", "id": "A"},),
+                affected_task_ids=("A",),
+            ),
+            IntentVerdict(
+                intent_comment_id=2,
+                outcome="honored",
+                ops=(
+                    {"op": "rewrite", "id": "B", "title": "x"},
+                    {"op": "remove", "id": "C"},
+                ),
+                affected_task_ids=("B", "C"),
+            ),
+        ]
+        flat = _flatten_verdicts_to_ops(verdicts)
+        # Three ops total, in verdict order then op order.
+        assert [op["op"] for op in flat] == ["keep", "rewrite", "remove"]
+        assert flat[0]["contributing_intents"] == [1]
+        assert flat[1]["contributing_intents"] == [2]
+        assert flat[2]["contributing_intents"] == [2]
 
 
 # ── _compute_thread_changes ───────────────────────────────────────────────────
