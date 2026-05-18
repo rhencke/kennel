@@ -250,3 +250,69 @@ class TestIntentVerdictValidation:
                 outcome="no_op",
                 by_intent_comment_id=2,
             )
+
+
+class TestIntentVerdictTypeChecks:
+    def test_outcome_typo_rejected(self) -> None:
+        # codex P2 round 3 on #1802: Literal annotation isn't
+        # enforced at runtime — a parser typo like "supersede" must
+        # crash at the boundary.
+        with pytest.raises(ValueError, match="outcome must be one of"):
+            IntentVerdict(intent_comment_id=1, outcome="supersede")  # type: ignore[arg-type]
+
+    def test_intent_comment_id_must_be_int(self) -> None:
+        with pytest.raises(TypeError, match="intent_comment_id must be int"):
+            IntentVerdict(intent_comment_id="123", outcome="honored")  # type: ignore[arg-type]
+
+    def test_intent_comment_id_bool_rejected(self) -> None:
+        # ``bool`` is an ``int`` subclass in Python; reject it
+        # explicitly so ``True`` / ``False`` can't slip through as
+        # comment ids.
+        with pytest.raises(TypeError, match="intent_comment_id must be int"):
+            IntentVerdict(intent_comment_id=True, outcome="honored")  # type: ignore[arg-type]
+
+    def test_by_intent_comment_id_must_be_int_or_none(self) -> None:
+        with pytest.raises(TypeError, match="by_intent_comment_id must be int"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="superseded",
+                by_intent_comment_id="2",  # type: ignore[arg-type]
+                narrative="x",
+            )
+
+    def test_ops_single_mapping_input_rejected(self) -> None:
+        # codex P2 round 3 on #1802: a bare dict ``ops={"op":"keep"}``
+        # would iterate as its keys and produce a tuple of strings
+        # via ``deep_freeze(list(...))``.  Reject before coercion.
+        with pytest.raises(TypeError, match="sequence of op mappings"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                ops={"op": "keep", "id": "T1"},  # type: ignore[arg-type]
+            )
+
+    def test_ops_entry_must_be_mapping(self) -> None:
+        with pytest.raises(TypeError, match="ops entries must be Mapping"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                ops=("not a dict",),  # type: ignore[arg-type]
+            )
+
+    def test_affected_task_ids_entry_must_be_str(self) -> None:
+        with pytest.raises(TypeError, match="affected_task_ids entries must be str"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                affected_task_ids=(42,),  # type: ignore[arg-type]
+            )
+
+    def test_affected_task_ids_rejects_none_entry(self) -> None:
+        # Don't silently coerce ``None`` to ``"None"`` — that hides
+        # parser bugs.
+        with pytest.raises(TypeError, match="affected_task_ids entries must be str"):
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="honored",
+                affected_task_ids=(None,),  # type: ignore[arg-type]
+            )
