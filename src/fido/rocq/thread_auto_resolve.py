@@ -132,44 +132,6 @@ class DismissStaleResolvedThread(ResolvedThreadQueueDecision):
 ResolvedThreadQueueDecisionT = QueueThreadTask | DismissStaleResolvedThread
 
 
-class BotFeedbackOutcome:
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class BotFeedbackDo(BotFeedbackOutcome):
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class BotFeedbackDump(BotFeedbackOutcome):
-    pass
-
-
-BotFeedbackOutcomeT = BotFeedbackDo | BotFeedbackDump
-
-
-class BotFeedbackDecision:
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class TakeBotSuggestion(BotFeedbackDecision):
-    pass
-
-
-@final
-@dataclass(frozen=True)
-class DumpBotSuggestionAndClose(BotFeedbackDecision):
-    pass
-
-
-BotFeedbackDecisionT = TakeBotSuggestion | DumpBotSuggestionAndClose
-
-
 def thread_comment_ids(comments: list[ThreadComment]) -> list[int]:
     __list = comments
     if __list == []:
@@ -268,7 +230,7 @@ def thread_has_actionable_comment(comments: list[ThreadComment]) -> bool:
             case CommentByActionable():
                 return True
             case CommentByBot():
-                continue
+                return True
             case CommentIgnored():
                 continue
             case __impossible:
@@ -333,13 +295,3 @@ def resolved_thread_queue_decision(
     if latest == incoming_comment:
         return QueueThreadTask()
     return DismissStaleResolvedThread()
-
-
-def bot_feedback_decision(outcome: BotFeedbackOutcome) -> BotFeedbackDecision:
-    match outcome:
-        case BotFeedbackDo():
-            return TakeBotSuggestion()
-        case BotFeedbackDump():
-            return DumpBotSuggestionAndClose()
-        case __impossible:
-            assert_never(__impossible)

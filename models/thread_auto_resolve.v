@@ -78,21 +78,6 @@ Inductive ResolvedThreadQueueDecision : Type :=
 | QueueThreadTask
 | DismissStaleResolvedThread.
 
-(** [BotFeedbackOutcome] is the triage result for recognized bot comments.
-    Bots do not share the owner/collaborator review model: DO means Fido
-    accepts the suggestion with a reply and queues work, while DUMP means Fido
-    replies with the reason for declining and treats that feedback as closed. *)
-Inductive BotFeedbackOutcome : Type :=
-| BotFeedbackDo
-| BotFeedbackDump.
-
-(** [BotFeedbackDecision] is the D13 projection of bot triage onto task and
-    thread side effects.  Python still writes the visible reply; the oracle
-    states the durable task and close-thread obligations. *)
-Inductive BotFeedbackDecision : Type :=
-| TakeBotSuggestion
-| DumpBotSuggestionAndClose.
-
 Fixpoint thread_comment_ids (comments : list ThreadComment) : list positive :=
   match comments with
   | [] => []
@@ -157,20 +142,31 @@ Definition latest_comment_is_fido (thread : ReviewThread) : bool :=
   | _ => false
   end.
 
-(** [thread_has_actionable_comment] is true when the thread contains at least
-    one [CommentByActionable] (owner / collaborator) comment.  A thread that
-    only contains [CommentByBot] / [CommentByFido] / [CommentIgnored]
-    interactions has no human in the conversation, and a human must mark such
-    a thread done — Fido does not auto-resolve it.  Bot feedback is
-    informational; closing it silently throws away signal a human should
-    weigh in on (#1663). *)
+(** [thread_has_actionable_comment] is true when the thread contains at
+    least one comment Fido is expected to act on — either an owner /
+    collaborator ([CommentByActionable]) or a bot ([CommentByBot]).
+
+    Bots and humans are treated symmetrically here because Fido's reply
+    path treats them symmetrically: every bot comment becomes a DO
+    (file intent → derived task → completion closes thread via
+    [followup_done]) or a DUMP (reject → reply only).  In either case
+    Fido has demonstrably acted on the comment by the time the resolve
+    gate is checked, so leaving the thread open just makes the human
+    close it manually (#1856).
+
+    Earlier policy under #1663 was to keep bot-only threads open so a
+    human could weigh in before the bot's signal disappeared.  That
+    placed the closure burden on the human and produced a steady drip
+    of stale open threads; humans can re-engage by commenting on a
+    closed thread if they disagree with Fido's handling, so the
+    closure default is now "Fido handled it, close it".  *)
 Fixpoint thread_has_actionable_comment
     (comments : list ThreadComment) : bool :=
   match comments with
   | [] => false
   | comment :: rest =>
       match thread_comment_author comment with
-      | CommentByActionable => true
+      | CommentByActionable | CommentByBot => true
       | _ => thread_has_actionable_comment rest
       end
   end.
@@ -232,29 +228,8 @@ Definition resolved_thread_queue_decision
     | None => DismissStaleResolvedThread
     end.
 
-Definition bot_feedback_decision
-    (outcome : BotFeedbackOutcome) : BotFeedbackDecision :=
-  match outcome with
-  | BotFeedbackDo => TakeBotSuggestion
-  | BotFeedbackDump => DumpBotSuggestionAndClose
-  end.
-
-Definition bot_feedback_creates_task
-    (outcome : BotFeedbackOutcome) : bool :=
-  match bot_feedback_decision outcome with
-  | TakeBotSuggestion => true
-  | DumpBotSuggestionAndClose => false
-  end.
-
-Definition bot_feedback_resolves_thread
-    (outcome : BotFeedbackOutcome) : bool :=
-  match bot_feedback_decision outcome with
-  | TakeBotSuggestion => false
-  | DumpBotSuggestionAndClose => true
-  end.
-
 Python File Extraction thread_auto_resolve
-  "thread_comment_ids modeled_thread_comment_ids last_modeled_author_from last_modeled_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido thread_has_actionable_comment should_resolve_thread resolution_decision latest_queueable_comment resolved_thread_queue_decision bot_feedback_decision".
+  "thread_comment_ids modeled_thread_comment_ids last_modeled_author_from last_modeled_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido thread_has_actionable_comment should_resolve_thread resolution_decision latest_queueable_comment resolved_thread_queue_decision".
 
 (** * Proved invariants *)
 
@@ -352,6 +327,14 @@ Definition sample_completed_task : ThreadTask := {|
   thread_task_status := StatusCompleted
 |}.
 
+(** A pending task whose comment id matches [sample_bot_comment] (id 5),
+    so [has_pending_thread_task] blocks resolution of a bot-only thread
+    that contains this comment. *)
+Definition sample_pending_task_for_bot : ThreadTask := {|
+  thread_task_comment := 5;
+  thread_task_status := StatusPending
+|}.
+
 (** [resolve_requires_fido_last_comment]: a human re-comment racing after
     Fido's reply keeps the thread open, even when no pending task remains. *)
 Lemma resolve_requires_fido_last_comment :
@@ -376,30 +359,39 @@ Proof.
   reflexivity.
 Qed.
 
-(** [bot_only_thread_does_not_resolve]: a thread with only bot+fido comments
-    has no [CommentByActionable] in the chain.  Even when Fido posted last
-    and no follow-up tasks remain, resolution is blocked — bot feedback is
-    informational and a real human must mark the thread done.  This is the
-    fix for #1663: previously such threads auto-resolved, silently dropping
-    the bot's input from the open-thread list before any human reviewed it. *)
+(** [bot_only_thread_resolves_when_no_pending]: a thread with only bot+fido
+    comments resolves once Fido is the latest commenter and no pending
+    same-thread task remains.  This is the #1856 reversal of the #1663
+    behavior: bot feedback used to block resolution to preserve signal,
+    but in practice Fido always classifies bot comments as DO (file intent)
+    or DUMP (reject), so by the time the resolve gate is checked Fido has
+    demonstrably acted on the comment.  Humans can re-engage by commenting
+    on a closed thread if they disagree with Fido's handling. *)
 Definition sample_thread_bot_only : ReviewThread := {|
   review_thread_resolved := false;
   review_thread_comments := [sample_bot_comment; sample_fido_comment]
 |}.
 
-Lemma bot_only_thread_does_not_resolve :
-  resolution_decision sample_thread_bot_only [] = KeepReviewThreadOpen.
+Lemma bot_only_thread_resolves_when_no_pending :
+  resolution_decision sample_thread_bot_only [] = ResolveReviewThread.
 Proof.
   reflexivity.
 Qed.
 
-(** [bot_only_thread_stays_open_after_completed_task]: same invariant after
-    the ACT-path follow-up task completes.  Without an actionable comment in
-    the chain, the thread stays open even when Fido implemented the bot's
-    suggestion and the work landed.  Bot threads always need a human to mark
-    them resolved (#1663). *)
-Lemma bot_only_thread_stays_open_after_completed_task :
+(** [bot_only_thread_resolves_after_completed_task]: same invariant after
+    the ACT-path follow-up task completes — bot DO that finished. *)
+Lemma bot_only_thread_resolves_after_completed_task :
   resolution_decision sample_thread_bot_only [sample_completed_task] =
+    ResolveReviewThread.
+Proof.
+  reflexivity.
+Qed.
+
+(** [bot_only_thread_blocked_by_pending_task]: a bot DO whose derived task
+    is still pending must NOT resolve — followup_done gates the close
+    just as it does for human-driven threads. *)
+Lemma bot_only_thread_blocked_by_pending_task :
+  resolution_decision sample_thread_bot_only [sample_pending_task_for_bot] =
     KeepReviewThreadOpen.
 Proof.
   reflexivity.
@@ -460,22 +452,8 @@ Proof.
   reflexivity.
 Qed.
 
-(** [bot_do_takes_suggestion]: DO feedback from a bot queues work and leaves
-    the thread open until that work is completed. *)
-Lemma bot_do_takes_suggestion :
-  bot_feedback_decision BotFeedbackDo = TakeBotSuggestion /\
-  bot_feedback_creates_task BotFeedbackDo = true /\
-  bot_feedback_resolves_thread BotFeedbackDo = false.
-Proof.
-  repeat split; reflexivity.
-Qed.
-
-(** [bot_dump_closes_feedback]: DUMP feedback from a bot does not queue work;
-    Fido's reply explains why and the feedback can be considered closed. *)
-Lemma bot_dump_closes_feedback :
-  bot_feedback_decision BotFeedbackDump = DumpBotSuggestionAndClose /\
-  bot_feedback_creates_task BotFeedbackDump = false /\
-  bot_feedback_resolves_thread BotFeedbackDump = true.
-Proof.
-  repeat split; reflexivity.
-Qed.
+(** #1856: the bot DO and DUMP outcomes that previously had their own enum
+    are now subsumed by the regular resolve gates.  DO produces a thread
+    task that blocks resolution via [has_pending_thread_task] until it
+    completes; DUMP produces no task at all, so the resolve gate fires
+    on the next sweep after Fido's reply. *)

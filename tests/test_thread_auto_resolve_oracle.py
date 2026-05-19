@@ -226,17 +226,63 @@ def test_resolved_thread_latest_bot_comment_queues_work() -> None:
     )
 
 
-def test_bot_do_feedback_takes_suggestion() -> None:
+def test_bot_only_thread_resolves_when_no_pending() -> None:
+    # #1856: a bot-only thread (bot → fido) resolves once Fido is last
+    # and no pending task references the thread.  Bots are treated as
+    # actionable for resolution purposes — every bot comment becomes a
+    # DO or DUMP that Fido has already acted on by the time the resolve
+    # sweep runs.
+    thread = _thread(
+        [
+            _comment(5, oracle.CommentByBot()),
+            _comment(6, oracle.CommentByFido()),
+        ],
+    )
+
     assert isinstance(
-        oracle.bot_feedback_decision(oracle.BotFeedbackDo()),
-        oracle.TakeBotSuggestion,
+        oracle.resolution_decision(thread, []),
+        oracle.ResolveReviewThread,
     )
 
 
-def test_bot_dump_feedback_closes_without_task() -> None:
+def test_bot_only_thread_blocked_by_pending_task() -> None:
+    # The DO half of #1856: while the derived task is still pending,
+    # the thread stays open — followup_done gates the close just as it
+    # does for human-driven threads.
+    thread = _thread(
+        [
+            _comment(5, oracle.CommentByBot()),
+            _comment(6, oracle.CommentByFido()),
+        ],
+    )
+    pending = oracle.ThreadTask(
+        thread_task_comment=5,
+        thread_task_status=oracle.StatusPending(),
+    )
+
     assert isinstance(
-        oracle.bot_feedback_decision(oracle.BotFeedbackDump()),
-        oracle.DumpBotSuggestionAndClose,
+        oracle.resolution_decision(thread, [pending]),
+        oracle.KeepReviewThreadOpen,
+    )
+
+
+def test_bot_only_thread_resolves_after_completed_task() -> None:
+    # The DO-completed half of #1856: once the derived task completes,
+    # the thread resolves.
+    thread = _thread(
+        [
+            _comment(5, oracle.CommentByBot()),
+            _comment(6, oracle.CommentByFido()),
+        ],
+    )
+    completed = oracle.ThreadTask(
+        thread_task_comment=5,
+        thread_task_status=oracle.StatusCompleted(),
+    )
+
+    assert isinstance(
+        oracle.resolution_decision(thread, [completed]),
+        oracle.ResolveReviewThread,
     )
 
 
