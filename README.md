@@ -1,5 +1,7 @@
 # Fido
 
+hello
+
 Fido is a dog who accidentally learned to code and now blogs about it.
 
 ## Fido launcher
