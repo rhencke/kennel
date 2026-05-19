@@ -261,7 +261,9 @@ RUN ./pyproject ruff format --check .
 
 FROM python-ruff-base AS lint
 
+COPY tools/check_no_monkeypatch_setattr.py tools/
 RUN ./pyproject ruff check .
+RUN python tools/check_no_monkeypatch_setattr.py
 
 # Pyright stages: pyrightconfig.json sets ``include: ["src/fido"]`` so we only
 # need src + the extracted rocq stub directory. pyrightconfig.json is the
@@ -309,7 +311,7 @@ COPY src src
 COPY tests tests
 COPY sub sub
 COPY rocq-python-extraction rocq-python-extraction
-COPY tools/build_graph.sh tools/gen_workflows.py tools/measure_build_graph.py tools/
+COPY tools/build_graph.sh tools/gen_workflows.py tools/measure_build_graph.py tools/check_no_monkeypatch_setattr.py tools/
 COPY models/Dockerfile models/dune-project models/dune models/*.v models/
 COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
 COPY .dockerignore .lsp.json docker-bake.hcl dune-workspace fido package.json package-lock.json ./

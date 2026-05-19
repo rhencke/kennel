@@ -109,6 +109,7 @@ rocq-python-extraction/dune-project
 rocq-python-extraction/rocq-python-extraction.opam
 src
 tests
+tools/check_no_monkeypatch_setattr.py
 tools/compose_pyproject.py
 tools/gen_workflows.py
 tools/measure_build_graph.py
@@ -174,6 +175,7 @@ src
 sub
 tests
 tools/build_graph.sh
+tools/check_no_monkeypatch_setattr.py
 tools/compose_pyproject.py
 tools/gen_workflows.py
 tools/measure_build_graph.py
