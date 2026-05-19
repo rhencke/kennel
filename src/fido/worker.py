@@ -30,7 +30,7 @@ from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
-from fido.harness_commit import HarnessCommitter
+from fido.harness_commit import HarnessCommitter, RealCommitOracle, RealDecisionOracle
 from fido.infra import RealProcessRunner
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
@@ -3735,7 +3735,12 @@ class Worker:
                 "task no longer current after webhook turn admission — restarting loop"
             )
             return True
-        harness_committer = HarnessCommitter(self.work_dir, RealProcessRunner())
+        harness_committer = HarnessCommitter(
+            self.work_dir,
+            RealProcessRunner(),
+            decision_oracle=RealDecisionOracle(),
+            commit_oracle=RealCommitOracle(),
+        )
         run_outcome = provider_run(
             fido_dir,
             agent=self._provider_agent,

@@ -15,9 +15,9 @@ Type definitions live in Rocq-extracted modules — importers should get
 
 import logging
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Protocol
 
 from fido.infra import ProcessRunner
 from fido.rocq import harness_commit_decision as _hcd_mod
@@ -41,8 +41,43 @@ from fido.types import GitIdentity
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "CommitOracle",
+    "DecisionOracle",
     "HarnessCommitter",
+    "RealCommitOracle",
+    "RealDecisionOracle",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Oracle protocols and real implementations
+# ---------------------------------------------------------------------------
+
+
+class DecisionOracle(Protocol):
+    """Checks the Rocq-proven harness_commit_decision result matches Python."""
+
+    def decide(self, outcome: TurnOutcome, env: _hcd_mod.MkGitEnv) -> CommitResult: ...
+
+
+class CommitOracle(Protocol):
+    """Checks the Rocq-proven outcome_is_commit result matches Python dispatch."""
+
+    def is_commit(self, outcome: TurnOutcome) -> bool: ...
+
+
+class RealDecisionOracle:
+    """Real :class:`DecisionOracle` that delegates to the extracted Rocq function."""
+
+    def decide(self, outcome: TurnOutcome, env: _hcd_mod.MkGitEnv) -> CommitResult:
+        return _hcd_mod.harness_commit_decision(outcome, env)
+
+
+class RealCommitOracle:
+    """Real :class:`CommitOracle` that delegates to the extracted Rocq function."""
+
+    def is_commit(self, outcome: TurnOutcome) -> bool:
+        return _to_mod.outcome_is_commit(outcome)
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +92,9 @@ class HarnessCommitter:
     a fake :class:`~fido.infra.ProcessRunner` without patching
     :mod:`subprocess`.
 
-    *_decision_oracle* and *_commit_oracle* override the default Rocq oracle
-    functions; used by tests to exercise divergence-detection paths without
-    patching module symbols.
+    *decision_oracle* and *commit_oracle* are required collaborators;
+    production code passes :class:`RealDecisionOracle` and
+    :class:`RealCommitOracle`; tests pass typed fakes directly.
     """
 
     def __init__(
@@ -67,19 +102,13 @@ class HarnessCommitter:
         work_dir: Path,
         runner: ProcessRunner,
         *,
-        _decision_oracle: Callable[..., Any] | None = None,
-        _commit_oracle: Callable[[TurnOutcome], bool] | None = None,
+        decision_oracle: DecisionOracle,
+        commit_oracle: CommitOracle,
     ) -> None:
         self._work_dir = work_dir
         self._runner = runner
-        self._decision_oracle = (
-            _decision_oracle
-            if _decision_oracle is not None
-            else _hcd_mod.harness_commit_decision
-        )
-        self._commit_oracle = (
-            _commit_oracle if _commit_oracle is not None else _to_mod.outcome_is_commit
-        )
+        self._decision_oracle = decision_oracle
+        self._commit_oracle = commit_oracle
 
     def _git(
         self,
@@ -139,7 +168,7 @@ class HarnessCommitter:
             commit_sha=commit_sha,
             commit_output=commit_output,
         )
-        oracle = self._decision_oracle(outcome, env)
+        oracle = self._decision_oracle.decide(outcome, env)
         if result != oracle:
             raise AssertionError(
                 f"harness_commit_decision oracle mismatch: "
@@ -150,7 +179,7 @@ class HarnessCommitter:
         self, outcome: TurnOutcome, *, dispatched_to_commit: bool
     ) -> None:
         """Assert that the Rocq-proven outcome_is_commit agrees with our dispatch."""
-        oracle = self._commit_oracle(outcome)
+        oracle = self._commit_oracle.is_commit(outcome)
         if oracle != dispatched_to_commit:
             raise AssertionError(
                 f"outcome_is_commit oracle mismatch: "
