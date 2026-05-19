@@ -234,10 +234,16 @@ ignore = ["E501"]
 # to swap names from outside, creating invisible coupling and making it impossible
 # to inject collaborators through the constructor.
 # Use constructor-DI instead: production code accepts collaborators via __init__;
-# tests construct the object with a MagicMock or hand-rolled fake at call time.
+# tests construct the object with a hand-rolled fake or typed collaborator.
 "unittest.mock.patch" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch module-level names from outside."}
 "unittest.mock.patch.object" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch object attributes from outside."}
 "unittest.mock.patch.dict" = {msg = "Use constructor-DI: accept collaborators via __init__ and pass fakes at construction time. Do not patch dict entries from outside."}
+# unittest.mock.MagicMock is a generic dynamic mock — it hides ownership and
+# makes constructor-DI migrations look complete while tests still depend on
+# untyped behavior. Use hand-rolled mock classes, fakes, or typed collaborators
+# instead; accept collaborators via __init__ and pass fakes at construction time.
+# See CLAUDE.md 'OO + constructor-DI architecture' and #1773.
+"unittest.mock.MagicMock" = {msg = "MagicMock is a generic dynamic mock — it hides ownership and makes constructor-DI look complete while tests still depend on untyped behavior. Use hand-rolled mock classes, fakes, spies, stubs, or typed collaborators instead (see #1773)."}
 
 # #1816 / INV-B (#1800 / epic #1798): comment-driven task creation must go
 # through the intent path — synthesis emits ``RescopeIntent`` → rescope produces
@@ -261,21 +267,40 @@ ignore = ["E501"]
   "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204", "ANN206", "ANN401",
   "E741", "F401", "F403", "F405", "F541", "F811", "F821", "F841", "I001",
 ]
-# Temporary TID251 exemptions — existing mock.patch sites pending constructor-DI
-# migration under #1773. Do not add new files here; fix the root cause instead.
+# Temporary TID251 exemptions — existing mock.patch and MagicMock sites pending
+# constructor-DI migration under #1773. Do not add new files here; fix the root
+# cause instead.
 "tests/test___main__.py" = ["TID251"]
 "tests/test_claude.py" = ["TID251"]
+"tests/test_claude_hold_for_handler.py" = ["TID251"]
+"tests/test_claude_stream_fsm_oracle.py" = ["TID251"]
+"tests/test_cli.py" = ["TID251"]
+"tests/test_codex.py" = ["TID251"]
 "tests/test_color.py" = ["TID251"]
+"tests/test_copilotcli.py" = ["TID251"]
 "tests/test_coverage_fills.py" = ["TID251"]
 "tests/test_events.py" = ["TID251"]
 "tests/test_github.py" = ["TID251"]
 "tests/test_harness_commit.py" = ["TID251"]
 "tests/test_infra.py" = ["TID251"]
+"tests/test_live_provider_stats.py" = ["TID251"]
 "tests/test_main.py" = ["TID251"]
+"tests/test_provider.py" = ["TID251"]
+"tests/test_provider_factory.py" = ["TID251"]
+"tests/test_provider_pressure.py" = ["TID251"]
+"tests/test_rate_limit.py" = ["TID251"]
+"tests/test_registry.py" = ["TID251"]
 "tests/test_server.py" = ["TID251"]
+"tests/test_session_agent.py" = ["TID251"]
 "tests/test_status.py" = ["TID251"]
 "tests/test_sync_tasks_cli.py" = ["TID251"]
+"tests/test_synthesis_call.py" = ["TID251"]
+"tests/test_synthesis_executor.py" = ["TID251"]
+"tests/test_task_queue_rescope.py" = ["TID251"]
 "tests/test_tasks.py" = ["TID251"]
 "tests/test_tests_main.py" = ["TID251"]
 "tests/test_turn_outcome.py" = ["TID251"]
+"tests/test_watchdog.py" = ["TID251"]
+"tests/test_watchdog_fsm_oracle.py" = ["TID251"]
 "tests/test_worker.py" = ["TID251"]
+"tests/test_worker_persist_session_id.py" = ["TID251"]
