@@ -78,6 +78,7 @@ class _BackgroundRescopeTrigger:
         registry: ActivityReporter,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
+        _reorder_fn: Callable[..., None] | None = None,
     ) -> None:
         self._work_dir = work_dir
         self._config = config
@@ -86,6 +87,7 @@ class _BackgroundRescopeTrigger:
         self._registry = registry
         self._agent = agent
         self._prompts = prompts
+        self._reorder_fn = _reorder_fn
 
     def trigger_rescope(self, intent: RescopeIntent) -> None:
         """Trigger :func:`_reorder_tasks_background` with the given rescope intent.
@@ -101,7 +103,12 @@ class _BackgroundRescopeTrigger:
             intent.comment_id,
             intent.change_request[:80],
         )
-        _reorder_tasks_background(
+        reorder = (
+            self._reorder_fn
+            if self._reorder_fn is not None
+            else _reorder_tasks_background
+        )
+        reorder(
             self._work_dir,
             intent.change_request,
             self._config,
@@ -299,10 +306,18 @@ class WebhookIngressOracle:
         return new_state
 
 
-def _configured_agent(config: Config, repo_cfg: RepoConfig) -> ProviderAgent:
-    return DefaultProviderFactory(
-        session_system_file=config.sub_dir / "persona.md"
-    ).create_agent(
+def _configured_agent(
+    config: Config,
+    repo_cfg: RepoConfig,
+    *,
+    _factory: DefaultProviderFactory | None = None,
+) -> ProviderAgent:
+    factory = (
+        _factory
+        if _factory is not None
+        else DefaultProviderFactory(session_system_file=config.sub_dir / "persona.md")
+    )
+    return factory.create_agent(
         repo_cfg,
         work_dir=repo_cfg.work_dir,
         repo_name=repo_cfg.name,
@@ -886,6 +901,8 @@ def _apply_reply_result(
     thread: dict[str, Any] | None,
     registry: ActivityReporter,
     dispatcher: "Dispatcher",
+    *,
+    _create_task_fn: Callable[..., Any] | None = None,
 ) -> None:
     """Apply task side effects from a recovered reply."""
     queue_reply_tasks(
@@ -897,6 +914,7 @@ def _apply_reply_result(
         thread=thread,
         registry=registry,
         dispatcher=dispatcher,
+        create_task_fn=_create_task_fn,
     )
 
 
@@ -923,6 +941,10 @@ def recover_reply_promises(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _call_synthesis_fn: Callable[..., Any] | None = None,
+    _reply_to_issue_comment_fn: Callable[..., Any] | None = None,
+    _reply_to_comment_fn: Callable[..., Any] | None = None,
+    _create_task_fn: Callable[..., Any] | None = None,
 ) -> bool:
     """Recover queued webhook replies for the current PR from SQLite promises."""
     store = FidoStore(repo_cfg.work_dir)
@@ -1008,7 +1030,12 @@ def recover_reply_promises(
             "reply_promise_ids": [promise_id for promise_id, _ in group],
         }
         try:
-            category, titles = reply_to_issue_comment(
+            _issue_fn = (
+                _reply_to_issue_comment_fn
+                if _reply_to_issue_comment_fn is not None
+                else reply_to_issue_comment
+            )
+            category, titles = _issue_fn(
                 action,
                 config,
                 repo_cfg,
@@ -1016,6 +1043,7 @@ def recover_reply_promises(
                 agent=agent,
                 prompts=prompts,
                 registry=registry,
+                _call_synthesis_fn=_call_synthesis_fn,
             )
         except Exception:
             _mark_promises_failed(store, (promise_id for promise_id, _ in group))
@@ -1029,6 +1057,7 @@ def recover_reply_promises(
             action.thread,
             registry,
             dispatcher,
+            _create_task_fn=_create_task_fn,
         )
         _ack_promises(store, (promise_id for promise_id, _ in group))
         processed_any = True
@@ -1075,7 +1104,12 @@ def recover_reply_promises(
             "reply_promise_ids": [group_promise_id for group_promise_id, _ in group],
         }
         try:
-            category, titles = reply_to_comment(
+            _pull_fn = (
+                _reply_to_comment_fn
+                if _reply_to_comment_fn is not None
+                else reply_to_comment
+            )
+            category, titles = _pull_fn(
                 action,
                 config,
                 repo_cfg,
@@ -1083,6 +1117,7 @@ def recover_reply_promises(
                 agent=agent,
                 prompts=prompts,
                 registry=registry,
+                _call_synthesis_fn=_call_synthesis_fn,
             )
         except Exception:
             _mark_promises_failed(
@@ -1098,6 +1133,7 @@ def recover_reply_promises(
             thread=action.reply_to,
             registry=registry,
             dispatcher=dispatcher,
+            _create_task_fn=_create_task_fn,
         )
         _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         processed_any = True
@@ -1397,6 +1433,7 @@ class Dispatcher:
         registry: ActivityReporter,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
+        _reply_fn: Callable[..., Any] | None = None,
     ) -> int:
         """Replay ``issue_comment`` webhooks we may have missed while fido was
         down (fix for #794).  Returns the number of comments inspected.
@@ -1463,7 +1500,10 @@ class Dispatcher:
                 comment=c,
             )
             try:
-                reply_to_issue_comment(
+                _reply_fn_to_use = (
+                    _reply_fn if _reply_fn is not None else reply_to_issue_comment
+                )
+                _reply_fn_to_use(
                     action,
                     self._config,
                     repo_cfg,
@@ -1480,11 +1520,12 @@ class Dispatcher:
         log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
         return len(comments)
 
-    def launch_sync(self) -> None:
+    def launch_sync(self, *, _sync_fn: Callable[..., None] | None = None) -> None:
         """Sync tasks.json → PR body in a background thread."""
         from fido.tasks import sync_tasks_background
 
-        sync_tasks_background(self._repo_cfg.work_dir, self._gh)
+        sync_fn = _sync_fn if _sync_fn is not None else sync_tasks_background
+        sync_fn(self._repo_cfg.work_dir, self._gh)
         log.info("sync-tasks launched")
 
 
@@ -1505,6 +1546,10 @@ def reply_to_comment(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _factory: "DefaultProviderFactory | None" = None,
+    _call_synthesis_fn: Callable[..., Any] | None = None,
+    _call_failure_explanation_fn: Callable[..., Any] | None = None,
+    _executor: "SynthesisExecutor | None" = None,
 ) -> tuple[str, list[str]]:
     """Handle a review comment via the synthesis LLM call, post reply.
 
@@ -1518,9 +1563,17 @@ def reply_to_comment(
     Raises on reply-post failure so callers fail closed.
     """
     if agent is None:
-        agent = _configured_agent(config, repo_cfg)
+        agent = _configured_agent(config, repo_cfg, _factory=_factory)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
+    _synthesis_fn = (
+        _call_synthesis_fn if _call_synthesis_fn is not None else call_synthesis
+    )
+    _failure_fn = (
+        _call_failure_explanation_fn
+        if _call_failure_explanation_fn is not None
+        else call_failure_explanation
+    )
     info = action.reply_to
     if not info or not action.comment_body:
         return ("ACT", [action.comment_body or action.prompt])
@@ -1595,11 +1648,15 @@ def reply_to_comment(
         agent=agent,
         prompts=prompts,
     )
-    executor = SynthesisExecutor(
-        gh,
-        rescope=rescope_trigger,
-        insight_filer=_GitHubInsightFiler(gh),
-        fido_logins=FIDO_LOGINS,
+    executor = (
+        _executor
+        if _executor is not None
+        else SynthesisExecutor(
+            gh,
+            rescope=rescope_trigger,
+            insight_filer=_GitHubInsightFiler(gh),
+            fido_logins=FIDO_LOGINS,
+        )
     )
     target: CommentTarget | None = None
     if isinstance(info.get("comment_id"), int):
@@ -1617,7 +1674,7 @@ def reply_to_comment(
         info["comment_id"],
     )
     try:
-        synthesis_response = call_synthesis(
+        synthesis_response = _synthesis_fn(
             comment,
             is_bot=action.is_bot,
             context=context or None,
@@ -1633,9 +1690,7 @@ def reply_to_comment(
             info.get("comment_id"),
         )
         try:
-            synthesis_response = call_failure_explanation(
-                comment, agent=agent, prompts=prompts
-            )
+            synthesis_response = _failure_fn(comment, agent=agent, prompts=prompts)
         except SynthesisExhaustedError:
             # Even the fallback explanation exhausted retries.  Best-effort
             # clear the eyes reaction so it does not sit forever as a false
@@ -1823,6 +1878,10 @@ def reply_to_issue_comment(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _factory: "DefaultProviderFactory | None" = None,
+    _call_synthesis_fn: Callable[..., Any] | None = None,
+    _call_failure_explanation_fn: Callable[..., Any] | None = None,
+    _executor: "SynthesisExecutor | None" = None,
 ) -> tuple[str, list[str]]:
     """Handle a top-level PR comment via the synthesis LLM call, post reply.
 
@@ -1833,9 +1892,17 @@ def reply_to_issue_comment(
     Raises on reply-post failure so callers fail closed.
     """
     if agent is None:
-        agent = _configured_agent(config, repo_cfg)
+        agent = _configured_agent(config, repo_cfg, _factory=_factory)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
+    _synthesis_fn = (
+        _call_synthesis_fn if _call_synthesis_fn is not None else call_synthesis
+    )
+    _failure_fn = (
+        _call_failure_explanation_fn
+        if _call_failure_explanation_fn is not None
+        else call_failure_explanation
+    )
     comment = action.comment_body or ""
     context = dict(action.context) if action.context else {}
     direct_promise = None
@@ -1900,11 +1967,15 @@ def reply_to_issue_comment(
         agent=agent,
         prompts=prompts,
     )
-    executor = SynthesisExecutor(
-        gh,
-        rescope=rescope_trigger,
-        insight_filer=_GitHubInsightFiler(gh),
-        fido_logins=FIDO_LOGINS,
+    executor = (
+        _executor
+        if _executor is not None
+        else SynthesisExecutor(
+            gh,
+            rescope=rescope_trigger,
+            insight_filer=_GitHubInsightFiler(gh),
+            fido_logins=FIDO_LOGINS,
+        )
     )
     issue_target: CommentTarget | None = None
     if _cid and repo_full:
@@ -1925,7 +1996,7 @@ def reply_to_issue_comment(
 
     log.info("synthesis: calling for issue comment on PR #%s", number)
     try:
-        synthesis_response = call_synthesis(
+        synthesis_response = _synthesis_fn(
             comment,
             is_bot=action.is_bot,
             context=context or None,
@@ -1942,9 +2013,7 @@ def reply_to_issue_comment(
             number,
         )
         try:
-            synthesis_response = call_failure_explanation(
-                comment, agent=agent, prompts=prompts
-            )
+            synthesis_response = _failure_fn(comment, agent=agent, prompts=prompts)
         except SynthesisExhaustedError:
             # Even the fallback explanation exhausted retries.  Best-effort
             # clear the eyes reaction so it does not sit forever as a false
@@ -2069,7 +2138,11 @@ def _maybe_abort_for_new_task(
         registry.abort_task(repo_cfg.name, task_id=current_task_id)
 
 
-def _get_commit_summary(work_dir: Path) -> str:
+def _get_commit_summary(
+    work_dir: Path,
+    *,
+    _run: Callable[..., Any] | None = None,
+) -> str:
     """Return a short ``git log --oneline`` summary of recent commits.
 
     Used to give Opus context about what has already been implemented when it
@@ -2077,7 +2150,8 @@ def _get_commit_summary(work_dir: Path) -> str:
     exit so callers see real failures rather than silently receiving an empty
     string.
     """
-    result = subprocess.run(
+    run = _run if _run is not None else subprocess.run
+    result = run(
         ["git", "log", "--oneline", "-20"],
         cwd=work_dir,
         capture_output=True,
@@ -2102,6 +2176,7 @@ def _notify_intent_outcome(
     result: list[dict[str, Any]],
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _factory: "DefaultProviderFactory | None" = None,
 ) -> None:
     """Post a per-intent reply per the INV-F reply-back rule.
 
@@ -2135,7 +2210,7 @@ def _notify_intent_outcome(
         return
 
     if agent is None:
-        agent = _configured_agent(config, repo_cfg)
+        agent = _configured_agent(config, repo_cfg, _factory=_factory)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
 
@@ -2236,6 +2311,7 @@ def _rewrite_pr_description(
     _state: State | None = None,
     _tasks: Tasks | None = None,
     _max_retries: int = 3,
+    _write_fn: Callable[..., None] | None = None,
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
 
@@ -2251,9 +2327,12 @@ def _rewrite_pr_description(
     the state of the task list at the moment Opus returned.  The PR body is
     re-fetched on each retry so the work-queue section stays current.
     """
-    from fido.worker import (
-        _write_pr_description,  # pyright: ignore[reportPrivateUsage]
-    )
+    if _write_fn is None:
+        from fido.worker import (
+            _write_pr_description,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        _write_fn = _write_pr_description
 
     if _state is None or _tasks is None:
         from fido.state import State as StateStore
@@ -2285,7 +2364,7 @@ def _rewrite_pr_description(
         snapshot_before = _task_snapshot(task_list)
 
         body = gh.get_pr_body(repo, pr_number)
-        _write_pr_description(
+        _write_fn(
             work_dir,
             gh,
             repo,
@@ -2363,16 +2442,21 @@ def _make_reorder_kwargs(
     prompts: Prompts,
     rewrite_fn: Callable[..., None],
     sync_fn: Callable[[Path, Any], None] | None = None,
+    sync_tasks_fn: Callable[[Path, Any], None] | None = None,
 ) -> dict[str, Any]:
     """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
+    from fido.tasks import sync_tasks as _real_sync_tasks
+
+    _effective_sync: Callable[[Path, Any], None]
+    if sync_fn is not None:
+        _effective_sync = sync_fn
+    else:
+        _effective_sync = (
+            sync_tasks_fn if sync_tasks_fn is not None else _real_sync_tasks
+        )
 
     def on_done() -> None:
-        if sync_fn is None:
-            from fido.tasks import sync_tasks
-
-            sync_tasks(work_dir, gh)
-        else:
-            sync_fn(work_dir, gh)
+        _effective_sync(work_dir, gh)
         rewrite_fn(
             work_dir,
             gh,
@@ -2600,6 +2684,7 @@ def _reorder_tasks_background(
     _rewrite_fn: Callable[..., None] | None = None,
     _reorder_fn: Callable[..., None] | None = None,
     _sync_fn: Callable[[Path, Any], None] | None = None,
+    _sync_tasks_fn: Callable[[Path, Any], None] | None = None,
     _coalesce_state: dict[str, Any] | None = None,
     _release_untriaged_on_finish: bool = False,
 ) -> None:
@@ -2642,7 +2727,16 @@ def _reorder_tasks_background(
 
     key = str(work_dir)
     kwargs = _make_reorder_kwargs(
-        work_dir, config, repo_cfg, registry, gh, agent, prompts, rewrite_fn, _sync_fn
+        work_dir,
+        config,
+        repo_cfg,
+        registry,
+        gh,
+        agent,
+        prompts,
+        rewrite_fn,
+        _sync_fn,
+        _sync_tasks_fn,
     )
 
     with _reorder_coalesce_lock:
