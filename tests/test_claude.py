@@ -5,7 +5,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import requests
@@ -680,18 +680,51 @@ def _make_session_proc(
     return proc
 
 
+class _SpyCall:
+    """One recorded call to a spy method on :class:`_SpyClaudeSession`."""
+
+    def __init__(self, kwargs: dict[str, object]) -> None:
+        self.kwargs = kwargs
+
+
+class _SpyClaudeSession(ClaudeSession):
+    """Test double for :class:`ClaudeSession`.
+
+    Overrides :meth:`recover` and :meth:`_respawn` to record calls instead of
+    performing real subprocess operations.  Tests that need :meth:`_respawn` to
+    raise set ``_respawn_side_effect`` to the desired exception instance before
+    triggering the call.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.recover_calls: list[_SpyCall] = []
+        self.respawn_calls: list[_SpyCall] = []
+        self._respawn_side_effect: BaseException | None = None
+
+    def recover(self) -> None:
+        self.recover_calls.append(_SpyCall({}))
+
+    def _respawn(self, *, clear_session_id: bool, reason: str) -> None:
+        self.respawn_calls.append(
+            _SpyCall({"clear_session_id": clear_session_id, "reason": reason})
+        )
+        if self._respawn_side_effect is not None:
+            raise self._respawn_side_effect
+
+
 def _make_session(
     tmp_path: Path,
     proc: MagicMock,
     *,
     idle_timeout: float = 1800.0,
-) -> ClaudeSession:
-    """Construct a ClaudeSession injecting *proc* as the subprocess."""
+) -> _SpyClaudeSession:
+    """Construct a :class:`_SpyClaudeSession` injecting *proc* as the subprocess."""
     system_file = tmp_path / "system.md"
     system_file.write_text("you are fido")
     fake_popen = MagicMock(return_value=proc)
     fake_selector = MagicMock(return_value=([proc.stdout], [], []))
-    return ClaudeSession(
+    return _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
         idle_timeout=idle_timeout,
@@ -1118,9 +1151,8 @@ class TestClaudeSessionDrainToBoundary:
         session._stream_state = stream_fsm.Sending()
         # No pending data, process stays alive → loop just times out
         session._selector = MagicMock(return_value=([], [], []))
-        with patch.object(session, "recover") as mock_recover:
-            session._drain_to_boundary(deadline=0.01)
-        mock_recover.assert_called_once()
+        session._drain_to_boundary(deadline=0.01)
+        assert len(session.recover_calls) == 1
         assert isinstance(session._stream_state, stream_fsm.Idle)
 
     def test_returns_early_on_cancel_set(self, tmp_path: Path) -> None:
@@ -1136,14 +1168,13 @@ class TestClaudeSessionDrainToBoundary:
         session._selector = MagicMock(return_value=([], [], []))
         # Set cancel immediately — simulates preempt arriving during drain
         session._cancel.set()
-        with patch.object(session, "recover") as mock_recover:
-            session._drain_to_boundary(deadline=5.0)
+        session._drain_to_boundary(deadline=5.0)
         # CancelFire fires unconditionally before the drain loop, so the
         # FSM is now in Draining; the cancel-set check then aborts before
         # the boundary arrives.
         assert isinstance(session._stream_state, stream_fsm.Draining)
         # recover was NOT called — we exited early, not via timeout
-        mock_recover.assert_not_called()
+        assert len(session.recover_calls) == 0
 
     def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
         import json as _json
@@ -1766,9 +1797,8 @@ class TestClaudeSessionSwitchModel:
         """When the target matches the current model, no respawn happens."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)  # default model claude-opus-4-6
-        with patch.object(session, "_respawn") as mock_respawn:
-            session.switch_model("claude-opus-4-6")
-        mock_respawn.assert_not_called()
+        session.switch_model("claude-opus-4-6")
+        assert len(session.respawn_calls) == 0
         assert session._proc is proc
 
     def test_different_model_respawns_preserving_session_id(
@@ -1779,22 +1809,20 @@ class TestClaudeSessionSwitchModel:
         conversation context across the new boot."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with patch.object(session, "_respawn") as mock_respawn:
-            session.switch_model("claude-sonnet-4-6")
+        session.switch_model("claude-sonnet-4-6")
         assert session._model == "claude-sonnet-4-6"
-        mock_respawn.assert_called_once()
-        kwargs = mock_respawn.call_args.kwargs
+        assert len(session.respawn_calls) == 1
+        kwargs = session.respawn_calls[0].kwargs
         assert kwargs["clear_session_id"] is False
-        assert "claude-sonnet-4-6" in kwargs["reason"]
+        assert "claude-sonnet-4-6" in str(kwargs["reason"])
 
     def test_switch_propagates_respawn_error(self, tmp_path: Path) -> None:
         """Errors raised by ``_respawn`` (e.g. kill timeout) propagate."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        boom = OSError("kill failed")
-        with patch.object(session, "_respawn", side_effect=boom):
-            with pytest.raises(OSError, match="kill failed"):
-                session.switch_model("claude-sonnet-4-6")
+        session._respawn_side_effect = OSError("kill failed")
+        with pytest.raises(OSError, match="kill failed"):
+            session.switch_model("claude-sonnet-4-6")
 
 
 class TestClaudeSessionSwitchTools:
@@ -1809,9 +1837,8 @@ class TestClaudeSessionSwitchTools:
         """When tools already match, no respawn happens."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)  # default _tools=None
-        with patch.object(session, "_respawn") as mock_respawn:
-            session.switch_tools(None)
-        mock_respawn.assert_not_called()
+        session.switch_tools(None)
+        assert len(session.respawn_calls) == 0
 
     def test_restrict_to_triage_respawns_preserving_session_id(
         self, tmp_path: Path
@@ -1821,12 +1848,10 @@ class TestClaudeSessionSwitchTools:
         keeps conversation context (continued session, not fresh)."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with patch.object(session, "_respawn") as mock_respawn:
-            session.switch_tools(READ_ONLY_ALLOWED_TOOLS)
+        session.switch_tools(READ_ONLY_ALLOWED_TOOLS)
         assert session._tools == READ_ONLY_ALLOWED_TOOLS
-        mock_respawn.assert_called_once()
-        kwargs = mock_respawn.call_args.kwargs
-        assert kwargs["clear_session_id"] is False
+        assert len(session.respawn_calls) == 1
+        assert session.respawn_calls[0].kwargs["clear_session_id"] is False
 
     def test_restore_unrestricted_tools_respawns_preserving_session_id(
         self, tmp_path: Path
@@ -1835,21 +1860,18 @@ class TestClaudeSessionSwitchTools:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         session._tools = READ_ONLY_ALLOWED_TOOLS  # pretend handler mode
-        with patch.object(session, "_respawn") as mock_respawn:
-            session.switch_tools(None)
+        session.switch_tools(None)
         assert session._tools is None
-        mock_respawn.assert_called_once()
-        kwargs = mock_respawn.call_args.kwargs
-        assert kwargs["clear_session_id"] is False
+        assert len(session.respawn_calls) == 1
+        assert session.respawn_calls[0].kwargs["clear_session_id"] is False
 
     def test_switch_propagates_respawn_error(self, tmp_path: Path) -> None:
         """Errors raised by ``_respawn`` (e.g. kill timeout) propagate."""
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        boom = OSError("kill failed")
-        with patch.object(session, "_respawn", side_effect=boom):
-            with pytest.raises(OSError, match="kill failed"):
-                session.switch_tools(READ_ONLY_ALLOWED_TOOLS)
+        session._respawn_side_effect = OSError("kill failed")
+        with pytest.raises(OSError, match="kill failed"):
+            session.switch_tools(READ_ONLY_ALLOWED_TOOLS)
 
 
 class TestClaudeSessionSpawnTools:
@@ -1929,10 +1951,9 @@ class TestClaudeSessionConsumeUntilResult:
         lines = [_json.dumps({"type": "error", "error": "something broke"}) + "\n"]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        with patch.object(session, "recover") as mock_recover:
-            with pytest.raises(ClaudeProviderError, match="something broke"):
-                session.consume_until_result()
-        mock_recover.assert_called_once_with()
+        with pytest.raises(ClaudeProviderError, match="something broke"):
+            session.consume_until_result()
+        assert len(session.recover_calls) == 1
 
     def test_raises_on_provider_error_result(self, tmp_path: Path) -> None:
         import json as _json
@@ -1948,10 +1969,9 @@ class TestClaudeSessionConsumeUntilResult:
         ]
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
-        with patch.object(session, "recover") as mock_recover:
-            with pytest.raises(ClaudeProviderError, match="500"):
-                session.consume_until_result()
-        mock_recover.assert_called_once_with()
+        with pytest.raises(ClaudeProviderError, match="500"):
+            session.consume_until_result()
+        assert len(session.recover_calls) == 1
 
     def test_returns_empty_when_result_field_not_a_string(self, tmp_path: Path) -> None:
         import json as _json
@@ -2165,12 +2185,7 @@ class TestClaudeSessionLock:
         session = _make_session(tmp_path, proc)
         provider.set_thread_kind(ThreadKind.WEBHOOK)
         try:
-            with (
-                patch(
-                    "fido.provider.try_preempt_worker", return_value=(False, "webhook")
-                ),
-                session.hold_for_handler(),
-            ):
+            with session.hold_for_handler():
                 assert isinstance(session._fsm_state, OwnedByHandler)
         finally:
             provider.set_thread_kind(None)

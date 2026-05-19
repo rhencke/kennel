@@ -15,6 +15,64 @@ from fido.github import (
 )
 
 
+class _RawCall:
+    """One recorded call to :meth:`_FakeTimeoutSession._raw_request`."""
+
+    def __init__(
+        self,
+        method: str | bytes,
+        url: str | bytes,
+        kwargs: dict[str, object],
+    ) -> None:
+        self.method = method
+        self.url = url
+        self.kwargs = kwargs
+
+
+class _FakeTimeoutSession(_TimeoutSession):
+    """Test double for :class:`_TimeoutSession`: replaces network calls.
+
+    Pass a single response object to return the same response on every call,
+    or a list to dequeue one response per call.
+    """
+
+    def __init__(self, responses: list[object] | object) -> None:
+        super().__init__()
+        if isinstance(responses, list):
+            self._response_queue: list[object] = list(responses)
+            self._constant: object = None
+            self._queue_mode = True
+        else:
+            self._response_queue = []
+            self._constant = responses
+            self._queue_mode = False
+        self._raw_calls: list[_RawCall] = []
+
+    def _raw_request(  # type: ignore[override]
+        self,
+        method: str | bytes,
+        url: str | bytes,
+        *_args: object,
+        **kwargs: object,
+    ) -> object:
+        self._raw_calls.append(_RawCall(method, url, kwargs))
+        if self._queue_mode:
+            return self._response_queue.pop(0)
+        return self._constant
+
+    @property
+    def call_count(self) -> int:
+        return len(self._raw_calls)
+
+    @property
+    def call_args(self) -> _RawCall | None:
+        return self._raw_calls[-1] if self._raw_calls else None
+
+    @property
+    def call_args_list(self) -> list[_RawCall]:
+        return self._raw_calls
+
+
 def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(
         args=[], returncode=returncode, stdout=stdout, stderr=""
@@ -148,22 +206,22 @@ class TestPrStateStr:
 
 class TestTimeoutSession:
     def test_injects_default_timeout(self) -> None:
-        from unittest.mock import patch
-
-        with patch("requests.Session.request") as mock_req:
-            mock_req.return_value = MagicMock()
-            s = _TimeoutSession()
-            s.request("GET", "https://example.com")
-        assert mock_req.call_args.kwargs.get("timeout") == _HTTP_TIMEOUT
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+        s = _FakeTimeoutSession(resp)
+        s.request("GET", "https://example.com")
+        assert s.call_args is not None
+        assert s.call_args.kwargs.get("timeout") == _HTTP_TIMEOUT
 
     def test_does_not_override_caller_timeout(self) -> None:
-        from unittest.mock import patch
-
-        with patch("requests.Session.request") as mock_req:
-            mock_req.return_value = MagicMock()
-            s = _TimeoutSession()
-            s.request("GET", "https://example.com", timeout=5)
-        assert mock_req.call_args.kwargs.get("timeout") == 5
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+        s = _FakeTimeoutSession(resp)
+        s.request("GET", "https://example.com", timeout=5)
+        assert s.call_args is not None
+        assert s.call_args.kwargs.get("timeout") == 5
 
     def test_uses_timeout_session_when_no_session_injected(self) -> None:
         gh = GitHub("tok")
@@ -172,8 +230,6 @@ class TestTimeoutSession:
     def test_get_caches_response_then_replays_on_304(self) -> None:
         """GET response with ETag is cached; second GET that gets a 304
         returns a synthesized 200 carrying the original body."""
-        from unittest.mock import patch
-
         first = MagicMock()
         first.status_code = 200
         first.headers = {"ETag": 'W/"abc"', "Content-Type": "application/json"}
@@ -185,23 +241,18 @@ class TestTimeoutSession:
         second.url = "https://api.github.com/repos/o/r/issues/1/comments"
         second.request = None
 
-        with patch("requests.Session.request") as mock_req:
-            mock_req.side_effect = [first, second]
-            s = _TimeoutSession()
-            r1 = s.request("GET", "https://api.github.com/repos/o/r/issues/1/comments")
-            assert r1.status_code == 200
-            r2 = s.request("GET", "https://api.github.com/repos/o/r/issues/1/comments")
+        s = _FakeTimeoutSession([first, second])
+        r1 = s.request("GET", "https://api.github.com/repos/o/r/issues/1/comments")
+        assert r1.status_code == 200
+        r2 = s.request("GET", "https://api.github.com/repos/o/r/issues/1/comments")
         assert r2.status_code == 200
         assert r2.content == b'{"hello": "world"}'
         # If-None-Match must have been sent on the second call.
-        second_call_kwargs = mock_req.call_args_list[1].kwargs
-        assert second_call_kwargs["headers"]["If-None-Match"] == 'W/"abc"'
+        assert s.call_args_list[1].kwargs["headers"]["If-None-Match"] == 'W/"abc"'
 
     def test_get_caches_last_modified_when_no_etag(self) -> None:
         """Responses with only Last-Modified still get cached and the
         next GET sends If-Modified-Since."""
-        from unittest.mock import patch
-
         first = MagicMock()
         first.status_code = 200
         first.headers = {"Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT"}
@@ -211,19 +262,15 @@ class TestTimeoutSession:
         second.headers = {}
         second.url = "https://api.github.com/repos/o/r/issues/2"
         second.request = None
-        with patch("requests.Session.request") as mock_req:
-            mock_req.side_effect = [first, second]
-            s = _TimeoutSession()
-            s.request("GET", "https://api.github.com/repos/o/r/issues/2")
-            s.request("GET", "https://api.github.com/repos/o/r/issues/2")
+        s = _FakeTimeoutSession([first, second])
+        s.request("GET", "https://api.github.com/repos/o/r/issues/2")
+        s.request("GET", "https://api.github.com/repos/o/r/issues/2")
         assert (
-            mock_req.call_args_list[1].kwargs["headers"]["If-Modified-Since"]
+            s.call_args_list[1].kwargs["headers"]["If-Modified-Since"]
             == "Wed, 21 Oct 2026 07:28:00 GMT"
         )
 
     def test_get_without_etag_or_last_modified_is_not_cached(self) -> None:
-        from unittest.mock import patch
-
         first = MagicMock()
         first.status_code = 200
         first.headers = {"Content-Type": "text/plain"}
@@ -232,47 +279,35 @@ class TestTimeoutSession:
         second.status_code = 200
         second.headers = {}
         second.content = b"hi2"
-        with patch("requests.Session.request") as mock_req:
-            mock_req.side_effect = [first, second]
-            s = _TimeoutSession()
-            s.request("GET", "https://api.github.com/repos/o/r/x")
-            r2 = s.request("GET", "https://api.github.com/repos/o/r/x")
+        s = _FakeTimeoutSession([first, second])
+        s.request("GET", "https://api.github.com/repos/o/r/x")
+        r2 = s.request("GET", "https://api.github.com/repos/o/r/x")
         # No cache hit — second body returned as-is, no If-None-Match sent.
         assert r2.content == b"hi2"
-        second_headers = mock_req.call_args_list[1].kwargs.get("headers") or {}
+        second_headers = s.call_args_list[1].kwargs.get("headers") or {}
         assert "If-None-Match" not in second_headers
 
     def test_non_get_methods_bypass_cache(self) -> None:
-        from unittest.mock import patch
-
         resp = MagicMock()
         resp.status_code = 201
         resp.headers = {}
-        with patch("requests.Session.request") as mock_req:
-            mock_req.return_value = resp
-            s = _TimeoutSession()
-            s.request("POST", "https://api.github.com/repos/o/r/issues")
-            s.request("POST", "https://api.github.com/repos/o/r/issues")
+        s = _FakeTimeoutSession(resp)
+        s.request("POST", "https://api.github.com/repos/o/r/issues")
+        s.request("POST", "https://api.github.com/repos/o/r/issues")
         # POSTs always reach the underlying session; never cached.
-        assert mock_req.call_count == 2
-        for call in mock_req.call_args_list:
+        assert s.call_count == 2
+        for call in s.call_args_list:
             assert "If-None-Match" not in (call.kwargs.get("headers") or {})
 
     def test_bytes_method_and_url_are_accepted(self) -> None:
-        from unittest.mock import patch
-
         resp = MagicMock()
         resp.status_code = 200
         resp.headers = {}
-        with patch("requests.Session.request") as mock_req:
-            mock_req.return_value = resp
-            s = _TimeoutSession()
-            s.request(b"GET", b"https://api.github.com/repos/o/r/x")
-        assert mock_req.call_count == 1
+        s = _FakeTimeoutSession(resp)
+        s.request(b"GET", b"https://api.github.com/repos/o/r/x")
+        assert s.call_count == 1
 
     def test_clear_repo_cache_drops_only_that_repos_entries(self) -> None:
-        from unittest.mock import patch
-
         def mk(etag: str, body: bytes) -> MagicMock:
             r = MagicMock()
             r.status_code = 200
@@ -280,24 +315,19 @@ class TestTimeoutSession:
             r.content = body
             return r
 
-        with patch("requests.Session.request") as mock_req:
-            mock_req.side_effect = [
-                mk('W/"a"', b"A"),
-                mk('W/"b"', b"B"),
-            ]
-            s = _TimeoutSession()
-            s.request("GET", "https://api.github.com/repos/owner/foo/issues/1")
-            s.request("GET", "https://api.github.com/repos/owner/bar/issues/1")
-            dropped = s.clear_repo_cache("owner/foo")
-        assert dropped == 1
-        # The bar entry survives — verify by sending a 304 and getting B back.
         not_modified = MagicMock()
         not_modified.status_code = 304
         not_modified.headers = {}
         not_modified.url = "https://api.github.com/repos/owner/bar/issues/1"
         not_modified.request = None
-        with patch("requests.Session.request", return_value=not_modified):
-            r = s.request("GET", "https://api.github.com/repos/owner/bar/issues/1")
+
+        s = _FakeTimeoutSession([mk('W/"a"', b"A"), mk('W/"b"', b"B"), not_modified])
+        s.request("GET", "https://api.github.com/repos/owner/foo/issues/1")
+        s.request("GET", "https://api.github.com/repos/owner/bar/issues/1")
+        dropped = s.clear_repo_cache("owner/foo")
+        assert dropped == 1
+        # The bar entry survives — verify by sending a 304 and getting B back.
+        r = s.request("GET", "https://api.github.com/repos/owner/bar/issues/1")
         assert r.content == b"B"
 
     def test_github_clear_repo_cache_delegates_to_session(self) -> None:
@@ -316,21 +346,18 @@ class TestTimeoutSession:
         outside any per-repo lifecycle hook — caching them would grow
         unbounded.  These URLs must bypass the cache entirely; even
         on a fresh ``200`` with ``ETag``, the entry is not stored."""
-        from unittest.mock import patch
-
         resp = MagicMock()
         resp.status_code = 200
         resp.headers = {"ETag": 'W/"u"'}
         resp.content = b'{"login": "fido"}'
-        with patch("requests.Session.request", return_value=resp):
-            s = _TimeoutSession()
-            for url in (
-                "https://api.github.com/user",
-                "https://api.github.com/users/rhencke",
-                "https://api.github.com/search/issues?q=foo",
-                "https://api.github.com/rate_limit",
-            ):
-                s.request("GET", url)
+        s = _FakeTimeoutSession(resp)
+        for url in (
+            "https://api.github.com/user",
+            "https://api.github.com/users/rhencke",
+            "https://api.github.com/search/issues?q=foo",
+            "https://api.github.com/rate_limit",
+        ):
+            s.request("GET", url)
         # Nothing should have landed in the cache.
         assert len(s._cache) == 0  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
@@ -338,15 +365,12 @@ class TestTimeoutSession:
         """Even if a non-repo URL were sneakily cached, the request
         path must never inject ``If-None-Match`` for non-cacheable
         URLs — guards against bypassing the bypass."""
-        from unittest.mock import patch
-
         resp = MagicMock()
         resp.status_code = 200
         resp.headers = {}
-        with patch("requests.Session.request", return_value=resp) as mock_req:
-            s = _TimeoutSession()
-            s.request("GET", "https://api.github.com/user")
-        headers = mock_req.call_args.kwargs.get("headers") or {}
+        s = _FakeTimeoutSession(resp)
+        s.request("GET", "https://api.github.com/user")
+        headers = s.call_args.kwargs.get("headers") or {}  # type: ignore[union-attr]
         assert "If-None-Match" not in headers
         assert "If-Modified-Since" not in headers
 
@@ -354,17 +378,15 @@ class TestTimeoutSession:
         """Without this, an attacker (or stale gh-auth state) could
         replay a body validated under the previous token via a 304 on
         the next ``/user`` read and bypass the #1207 identity guard."""
-        from unittest.mock import patch
-
         first = MagicMock()
         first.status_code = 200
         first.headers = {"ETag": 'W/"a"'}
         first.content = b"under old token"
-        with patch("requests.Session.request", return_value=first):
-            gh = GitHub("tok-old", token_fetcher=lambda: "tok-old")
-            gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                "GET", "https://api.github.com/repos/o/r/issues/1"
-            )
+        s = _FakeTimeoutSession(first)
+        gh = GitHub("tok-old", session=s, token_fetcher=lambda: "tok-old")
+        gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            "GET", "https://api.github.com/repos/o/r/issues/1"
+        )
         assert (
             "https://api.github.com/repos/o/r/issues/1" in gh._s._cache  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         )
@@ -377,17 +399,15 @@ class TestTimeoutSession:
         """No-op token refresh must not invalidate the cache —
         ``refresh_token`` runs at every assertion boundary, so wiping
         on every call would destroy the ETag win."""
-        from unittest.mock import patch
-
         first = MagicMock()
         first.status_code = 200
         first.headers = {"ETag": 'W/"a"'}
         first.content = b"stable"
-        with patch("requests.Session.request", return_value=first):
-            gh = GitHub("tok", token_fetcher=lambda: "tok")
-            gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                "GET", "https://api.github.com/repos/o/r/issues/1"
-            )
+        s = _FakeTimeoutSession(first)
+        gh = GitHub("tok", session=s, token_fetcher=lambda: "tok")
+        gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            "GET", "https://api.github.com/repos/o/r/issues/1"
+        )
         assert len(gh._s._cache) == 1  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         assert gh.refresh_token() is False
         assert len(gh._s._cache) == 1  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]

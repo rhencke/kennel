@@ -968,6 +968,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
             comment_id=comment_id,
             comment_type=comment_type,
         )
+        self._call_remove_eyes(gh, target)
+
+    def _call_remove_eyes(self, gh: GitHub, target: CommentTarget) -> None:
+        """Remove Fido's eyes reaction via :class:`SynthesisExecutor`.
+
+        Extracted from :meth:`_remove_eyes_best_effort` so tests can override
+        this single method in a subclass instead of patching the
+        :class:`SynthesisExecutor` class.
+        """
         SynthesisExecutor(gh, fido_logins=FIDO_LOGINS).remove_eyes_reaction(target)
 
     def _signal_action_error(self, action: Action) -> None:
