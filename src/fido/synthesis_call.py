@@ -66,7 +66,9 @@ _DERIVE_CHANGE_REQUEST_PROMPT: str = (
 
 
 def _check_and_promote(
-    response: CommentResponse, agent: ProviderAgent
+    response: CommentResponse,
+    agent: ProviderAgent,
+    system_prompt: str,
 ) -> CommentResponse:
     """Run a verification turn to detect unrecorded change requests.
 
@@ -87,6 +89,13 @@ def _check_and_promote(
 
     This enforces the invariant: prose promises must correspond to queued
     tasks (fixes #1218).
+
+    *system_prompt* anchors both follow-up turns in synthesis-reply mode
+    (#1850).  Without it, the bare Yes/No prompt arrives in the worker's
+    persistent session against whatever task framing the prior turn left
+    behind — the agent reads it as task continuation and goes off running
+    unrelated tools.  Passing the same system prompt the initial synthesis
+    turn used keeps every turn under one framing.
     """
     if response.change_request is not None:
         return response
@@ -95,6 +104,7 @@ def _check_and_promote(
         verify_raw = agent.run_turn(
             _VERIFY_CHANGE_REQUEST_PROMPT,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=system_prompt,
             retry_on_preempt=True,
         )
         if not (verify_raw or "").strip().lower().startswith("no"):
@@ -107,6 +117,7 @@ def _check_and_promote(
         derived_raw = agent.run_turn(
             _DERIVE_CHANGE_REQUEST_PROMPT,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=system_prompt,
             retry_on_preempt=True,
         )
         derived = (derived_raw or "").strip()
@@ -338,7 +349,7 @@ def call_synthesis(
 
         if attempt > 0:
             log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
-        return _check_and_promote(response, agent)
+        return _check_and_promote(response, agent, system_prompt=system_prompt)
 
     raise SynthesisExhaustedError(
         f"synthesis exhausted {MAX_RETRIES} retries without a valid CommentResponse "

@@ -728,6 +728,34 @@ class TestCallSynthesisVerificationTurn:
         _, kwargs = agent.run_turn.call_args_list[2]
         assert kwargs.get("allowed_tools") == READ_ONLY_ALLOWED_TOOLS
 
+    def test_verify_turn_carries_synthesis_system_prompt(self) -> None:
+        """#1850: the verify turn must pass the same ``system_prompt`` the
+        initial synthesis turn used.  The worker's persistent ClaudeSession
+        has no anchor across turns — a bare Yes/No prompt against task
+        framing is read as task continuation, and the agent goes off
+        running unrelated tools (observed on PR #1842, 84-second turn
+        before the reply landed)."""
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "Yes"])
+        prompts = _make_prompts(system="SYNTHESIS_SYS")
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        _, verify_kwargs = agent.run_turn.call_args_list[1]
+        assert verify_kwargs.get("system_prompt") == "SYNTHESIS_SYS"
+
+    def test_derive_turn_carries_synthesis_system_prompt(self) -> None:
+        """#1850: the derive turn (after a No verify) must also carry the
+        synthesis ``system_prompt`` so the agent stays in reply mode."""
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "No", "Add missing tests"])
+        prompts = _make_prompts(system="SYNTHESIS_SYS")
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        _, derive_kwargs = agent.run_turn.call_args_list[2]
+        assert derive_kwargs.get("system_prompt") == "SYNTHESIS_SYS"
+
     def test_verify_turn_exception_returns_original_response(self) -> None:
         """A transport error in the verify turn must not discard the synthesis result."""
         raw = _make_raw(reply_text="Original reply.", change_request=None)
