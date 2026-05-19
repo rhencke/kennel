@@ -270,7 +270,6 @@ ignore = ["E501"]
 # Temporary TID251 exemptions — existing mock.patch and MagicMock sites pending
 # constructor-DI migration under #1773. Do not add new files here; fix the root
 # cause instead.
-"tests/fakes.py" = ["TID251"]
 "tests/test___main__.py" = ["TID251"]
 "tests/test_claude.py" = ["TID251"]
 "tests/test_claude_hold_for_handler.py" = ["TID251"]
