@@ -259,12 +259,13 @@ the pending task list based on dependency analysis.
   `unittest.mock.patch` does. Use constructor-DI and typed collaborators
   instead (see #1773). The 14 existing dirty files carry temporary exemptions
   and should be migrated over time.
-- **No `MagicMock`** — banned and CI-enforced (`tools/check_no_magicmock.py`).
-  `MagicMock` is a generic dynamic mock — it hides ownership and makes
-  constructor-DI migrations look complete while tests still depend on untyped
-  behavior. Use hand-rolled mock classes, fakes, spies, stubs, or typed
-  collaborators instead (see #1773). The 29 existing dirty files carry
-  temporary exemptions and should be migrated over time.
+- **No `MagicMock`** — banned and CI-enforced via ruff TID251
+  (`pyproject.ruff.toml`). `MagicMock` is a generic dynamic mock — it hides
+  ownership and makes constructor-DI migrations look complete while tests still
+  depend on untyped behavior. Use hand-rolled mock classes, fakes, spies,
+  stubs, or typed collaborators instead (see #1773). The 29 existing dirty
+  files carry temporary `TID251` per-file-ignores and should be migrated over
+  time.
 
 ## OO + constructor-DI architecture
 
