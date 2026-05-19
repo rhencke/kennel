@@ -2697,6 +2697,58 @@ class TestMakeNewTasksFromOpus:
         assert len(result) == 1
         assert result[0]["title"] == "Genuinely new spec"
 
+    def test_thread_anchor_derived_from_contributing_intent(self) -> None:
+        # #1843: a brand-new task spawned by rescope carries the
+        # originating intent's PR-context as its ``thread`` anchor so
+        # reply-back can route follow-ups back to the source comment.
+        from fido.tasks import _make_new_tasks_from_opus
+
+        intent = RescopeIntent(
+            change_request="add hello",
+            comment_id=4489194431,
+            timestamp="2026-05-19T15:13:00+00:00",
+            repo="FidoCanCode/home",
+            pr_number=1842,
+        )
+        ordered = [
+            {
+                "title": "Add 'hello' to the readme",
+                "description": "exercise",
+                "type": "spec",
+                "contributing_intents": [4489194431],
+            }
+        ]
+        result = _make_new_tasks_from_opus(ordered, frozenset(), intents=[intent])
+        assert len(result) == 1
+        assert result[0]["thread"] == {
+            "repo": "FidoCanCode/home",
+            "pr": 1842,
+            "comment_id": 4489194431,
+        }
+
+    def test_thread_anchor_absent_when_intent_lacks_pr_context(self) -> None:
+        # Legacy intents (pre-#1843) don't carry repo/pr_number — the
+        # task gets created without a thread anchor.  Better than a
+        # half-populated thread that breaks downstream lookups.
+        from fido.tasks import _make_new_tasks_from_opus
+
+        intent = RescopeIntent(
+            change_request="orphan",
+            comment_id=99,
+            timestamp="2026-05-19T15:13:00+00:00",
+        )
+        ordered = [
+            {
+                "title": "Orphan task",
+                "description": "no pr context",
+                "type": "spec",
+                "contributing_intents": [99],
+            }
+        ]
+        result = _make_new_tasks_from_opus(ordered, frozenset(), intents=[intent])
+        assert len(result) == 1
+        assert "thread" not in result[0]
+
 
 # ── _find_duplicate_titles ────────────────────────────────────────────────────
 

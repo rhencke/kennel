@@ -249,6 +249,8 @@ class SynthesisExecutor:
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 comment_type=target.comment_type,
                 author=target.author,
+                repo=target.repo,
+                pr_number=target.pr,
             )
             log.info(
                 "triggering rescope for comment %d: %s",

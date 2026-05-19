@@ -2133,6 +2133,34 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
     return items
 
 
+def _derive_thread_from_intents(
+    op_intent_ids: list[int],
+    intents: list[RescopeIntent] | None,
+) -> dict[str, Any] | None:
+    """Build a ``thread`` anchor for a rescope-spawned new task (#1843).
+
+    Picks the first intent in *op_intent_ids* that resolves to a
+    :class:`RescopeIntent` carrying ``repo`` + ``pr_number`` + ``comment_id``
+    and returns ``{"repo", "pr", "comment_id"}``.  Returns ``None`` when no
+    intent has the full context populated — synthetic test fixtures and
+    legacy intents pre-#1843 may lack ``repo``/``pr_number`` and the
+    caller leaves the task unanchored in that case.
+    """
+    if not op_intent_ids or not intents:
+        return None
+    by_cid = {i.comment_id: i for i in intents}
+    for cid in op_intent_ids:
+        intent = by_cid.get(cid)
+        if intent is None or not intent.repo or intent.pr_number <= 0:
+            continue
+        return {
+            "repo": intent.repo,
+            "pr": intent.pr_number,
+            "comment_id": intent.comment_id,
+        }
+    return None
+
+
 def _make_new_tasks_from_opus(
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
@@ -2204,6 +2232,16 @@ def _make_new_tasks_from_opus(
         op_intents = item.get("contributing_intents") or []
         if op_intents:
             task["contributing_intents"] = list(op_intents)
+        # #1843: derive the thread anchor from the first contributing
+        # intent that has repo + pr_number + comment_id populated.
+        # Pre-INV-B the old ``events.create_task`` set ``thread`` directly;
+        # in the intent path the rescope spawns the task and the only
+        # carrier of the originating PR is the ``RescopeIntent`` itself.
+        # Without this, reply-back has no idea where to post follow-ups
+        # on the new task.
+        thread = _derive_thread_from_intents(op_intents, intents)
+        if thread is not None:
+            task["thread"] = thread
         new_tasks.append(task)
     return new_tasks
 

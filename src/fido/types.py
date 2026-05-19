@@ -398,6 +398,16 @@ class RescopeIntent:
     the commenter already knows they overrode themselves).  Empty
     string when the source path didn't populate it (legacy / synthetic
     test fixtures pre-INV-C)."""
+    repo: str = ""
+    """``owner/repo`` slug of the PR this intent was filed against.
+    Carried through to rescope so any new task the rescope creates
+    can populate its ``thread`` anchor (#1843) — without this, reply-
+    back has no idea where to post follow-ups.  Empty string for
+    synthetic test fixtures that don't simulate a real PR context."""
+    pr_number: int = 0
+    """GitHub PR number this intent was filed against.  Same use as
+    :attr:`repo` — anchors the new task's ``thread`` field.  ``0`` for
+    synthetic fixtures."""
 
 
 @dataclass(frozen=True)
