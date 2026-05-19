@@ -2603,14 +2603,17 @@ class TestMakeNewTasksFromOpus:
         assert result[0]["type"] == "ci"
 
     def test_skips_blank_title(self) -> None:
+        # #1844 codex P2: slot is preserved at null-id position so the
+        # interleave doesn't shift later items into earlier positions.
+        # Blank-title items materialize as ``None`` rather than vanishing.
         items = [{"title": "", "description": "no title"}]
         result = _make_new_tasks_from_opus(items, frozenset())
-        assert result == []
+        assert result == [None]
 
     def test_skips_whitespace_only_title(self) -> None:
         items = [{"title": "   ", "description": "no title"}]
         result = _make_new_tasks_from_opus(items, frozenset())
-        assert result == []
+        assert result == [None]
 
     def test_multiple_new_tasks(self) -> None:
         items = [
@@ -2668,7 +2671,10 @@ class TestMakeNewTasksFromOpus:
         result = _make_new_tasks_from_opus(
             items, snapshot_ids, current=current, intents=intents
         )
-        assert result == [], "covered intent must drop the duplicate (#1337)"
+        # #1844 codex P2: the dropped null-id slot is represented as
+        # ``None`` rather than absent so the interleave preserves
+        # positional alignment for later new tasks.
+        assert result == [None], "covered intent must drop the duplicate (#1337)"
 
     def test_does_not_dedup_when_lineage_does_not_match_intent(self) -> None:
         """When no post-snapshot thread task covers the intent, Opus's null-id
@@ -2695,6 +2701,7 @@ class TestMakeNewTasksFromOpus:
             items, snapshot_ids, current=current, intents=intents
         )
         assert len(result) == 1
+        assert result[0] is not None
         assert result[0]["title"] == "Genuinely new spec"
 
     def test_thread_anchor_derived_from_contributing_intent(self) -> None:
@@ -2720,6 +2727,7 @@ class TestMakeNewTasksFromOpus:
         ]
         result = _make_new_tasks_from_opus(ordered, frozenset(), intents=[intent])
         assert len(result) == 1
+        assert result[0] is not None
         assert result[0]["thread"] == {
             "repo": "FidoCanCode/home",
             "pr": 1842,
@@ -2747,7 +2755,50 @@ class TestMakeNewTasksFromOpus:
         ]
         result = _make_new_tasks_from_opus(ordered, frozenset(), intents=[intent])
         assert len(result) == 1
+        assert result[0] is not None
         assert "thread" not in result[0]
+
+    def test_dropped_slot_preserves_alignment_for_later_new_tasks(self) -> None:
+        # #1844 codex P2: a dropped duplicate slot at the front must
+        # not shift later kept new tasks into the dropped position.
+        # ``_apply_reorder`` walks the aligned list positionally and
+        # this test pins the per-slot alignment so the interleave can
+        # rely on it.
+        snapshot_ids = frozenset({"orig-1"})
+        current = [
+            {"id": "orig-1", "title": "Original", "status": "pending"},
+            {
+                "id": "post-snapshot-2",
+                "title": "Duplicate of the covered intent",
+                "status": "in_progress",
+                "type": "thread",
+                "thread": {
+                    "comment_id": 4371338003,
+                    "lineage_comment_ids": [4371338003],
+                },
+            },
+        ]
+        intents = [
+            RescopeIntent(
+                comment_id=4371338003,
+                change_request="covered by the post-snapshot task",
+                timestamp="2026-05-04T13:15:44Z",
+            ),
+        ]
+        # Two null-id items: the first matches the covered intent and
+        # is dropped, the second is a genuine new task.  Result must
+        # be [None, dict] — same length as the count of null-id items.
+        items = [
+            {"title": "Duplicate"},
+            {"title": "Genuine new"},
+        ]
+        result = _make_new_tasks_from_opus(
+            items, snapshot_ids, current=current, intents=intents
+        )
+        assert len(result) == 2
+        assert result[0] is None
+        assert result[1] is not None
+        assert result[1]["title"] == "Genuine new"
 
 
 # ── _find_duplicate_titles ────────────────────────────────────────────────────
