@@ -259,6 +259,12 @@ the pending task list based on dependency analysis.
   `unittest.mock.patch` does. Use constructor-DI and typed collaborators
   instead (see #1773). The 14 existing dirty files carry temporary exemptions
   and should be migrated over time.
+- **No `MagicMock`** — banned and CI-enforced (`tools/check_no_magicmock.py`).
+  `MagicMock` is a generic dynamic mock — it hides ownership and makes
+  constructor-DI migrations look complete while tests still depend on untyped
+  behavior. Use hand-rolled mock classes, fakes, spies, stubs, or typed
+  collaborators instead (see #1773). The 29 existing dirty files carry
+  temporary exemptions and should be migrated over time.
 
 ## OO + constructor-DI architecture
 
@@ -293,8 +299,8 @@ new instances; when you touch code that contains them, finish the job.
   of typed injected collaborators. Examples: `_run`, `_print_prompt`,
   `_start`, `_fn_*` parameters on `Worker`, `Events`, `Tasks`.
 - **Patch-heavy tests** — `@patch("fido.worker.subprocess.run")` decorators
-  override module-level names from outside. Replace with a `MagicMock` or
-  hand-rolled fake passed in at construction time.
+  override module-level names from outside. Replace with a hand-rolled fake
+  or typed collaborator passed in at construction time.
 
 ## Coordination ethos
 
