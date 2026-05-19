@@ -1041,5 +1041,339 @@ Definition task_still_pending
   | None => false
   end.
 
+
+(** ** Intents, ops, and reply-back routing (#1804 / INV-F)
+
+    Epic #1798 routes PR-comment intent through rescope rather than
+    materializing comments as tasks before rescope sees them.  Opus consumes
+    a batch of [IntentRow] entries (raw text + author + arrival index) and
+    emits a list of [OpAttribution] entries (each op tagged with the intents
+    that drove it).
+
+    Reply-back rule: for each intent [X] with author [A], fire a reply-back
+    to [X] iff some op targeting a task [X] contributed to is attributed to
+    a *strictly later* intent from a *different* author and that op
+    materially affects what gets done.  ``Materially affects'' means
+    [EffectChange] (rewrite title/description, retarget anchor) or
+    [EffectDrop] (close the task).  [EffectReorganize] (merge into another
+    task, split into children) does *not* trigger reply-back — the work
+    still gets done, just under a different task id.  [EffectNoChange]
+    (keep) likewise never triggers.
+
+    Same-author later changes never notify — the commenter already knows
+    they overrode their own earlier ask.  This rule replaces the verdict-
+    shape supersedence heuristic and the diff-based disposition classifier
+    the earlier iteration of this PR shipped: whether a reply is owed is
+    a structural property of ops + author + arrival order, not of the
+    verdict-shape Opus assigned.
+
+    Merge sources / split sources are themselves closed by separate
+    [CompleteTask] ops the Python adapter emits as part of the merge/split
+    sequence.  Those closures are not standalone drops — the adapter tags
+    them with [EffectReorganize] when constructing the [OpAttribution]
+    list so the model sees one effect per task per op.
+
+    [reply_back_intents] returns the intents that need a reply along with
+    the strongest [NotifyKind] (drop > change), in batch arrival order. *)
+
+Record IntentRow : Type := {
+  intent_comment_id : positive;
+  intent_author : positive;
+  intent_index : nat
+}.
+
+Inductive OpEffectKind : Type :=
+| EffectChange
+| EffectDrop
+| EffectReorganize
+| EffectNoChange.
+
+(** [op_effect] maps a [RescopeOp] to its [OpEffectKind] in the standalone
+    case (op not part of a merge/split sequence).  The Python adapter
+    overrides [EffectDrop] to [EffectReorganize] when the closed task is
+    itself a merge source or split source — that closure is part of the
+    reorganize, not a standalone drop. *)
+Definition op_effect (op : RescopeOp) : OpEffectKind :=
+  match op with
+  | KeepTask _ => EffectNoChange
+  | RewriteTask _ _ _ => EffectChange
+  | RewriteAnchor _ _ => EffectChange
+  | MergeTasks _ _ _ _ => EffectReorganize
+  | SplitTask _ _ => EffectReorganize
+  | CompleteTask _ => EffectDrop
+  end.
+
+(** [OpInput] is one parsed rescope op plus the intents that drove it
+    — the shape the Python adapter hands over.  ``oi_intents'' is the
+    op's ``contributing_intents'' field; the model computes the effect
+    kind (with the merge/split override) so all reply-back logic lives
+    here, not in the adapter. *)
+Record OpInput : Type := {
+  oi_op : RescopeOp;
+  oi_intents : list positive
+}.
+
+(** [OpAttribution] is one op + the intents that drove it + the
+    (possibly overridden) effect kind. *)
+Record OpAttribution : Type := {
+  oa_task : positive;
+  oa_effect : OpEffectKind;
+  oa_intents : list positive
+}.
+
+(** [op_input_task] is the task id this op targets — for [MergeTasks]
+    the target, otherwise the standalone task. *)
+Definition op_input_task (oi : OpInput) : positive :=
+  rescope_task_id (oi_op oi).
+
+(** [op_input_merge_sources] returns the merge source ids when this op
+    is a [MergeTasks], else nil.  Used by [reorganize_source_ids] to
+    detect [CompleteTask] ops emitted as part of a merge sequence. *)
+Definition op_input_merge_sources (oi : OpInput) : list positive :=
+  match oi_op oi with
+  | MergeTasks _ sources _ _ => sources
+  | _ => []
+  end.
+
+(** [op_input_split_source] returns the split source id when this op is
+    a [SplitTask], else None. *)
+Definition op_input_split_source (oi : OpInput) : option positive :=
+  match oi_op oi with
+  | SplitTask source _ => Some source
+  | _ => None
+  end.
+
+(** [reorganize_source_ids] returns every task id that is itself a
+    merge source or split source in the batch.  Standalone
+    [CompleteTask] ops for these tasks are reclassified from
+    [EffectDrop] to [EffectReorganize] — the closure is part of the
+    merge/split, not a standalone drop. *)
+Fixpoint reorganize_source_ids
+    (ops : list OpInput) : list positive :=
+  match ops with
+  | [] => []
+  | oi :: rest =>
+      let tail := reorganize_source_ids rest in
+      let merge_acc := List.app (op_input_merge_sources oi) tail in
+      match op_input_split_source oi with
+      | None => merge_acc
+      | Some src => src :: merge_acc
+      end
+  end.
+
+Definition op_input_effect
+    (oi : OpInput) (reorg_ids : list positive) : OpEffectKind :=
+  match op_effect (oi_op oi) with
+  | EffectDrop =>
+      if positive_mem (op_input_task oi) reorg_ids
+      then EffectReorganize
+      else EffectDrop
+  | other => other
+  end.
+
+Definition op_input_to_attribution
+    (oi : OpInput) (reorg_ids : list positive) : OpAttribution :=
+  {| oa_task := op_input_task oi;
+     oa_effect := op_input_effect oi reorg_ids;
+     oa_intents := oi_intents oi |}.
+
+Fixpoint op_attributions_in
+    (cursor : list OpInput) (reorg_ids : list positive) : list OpAttribution :=
+  match cursor with
+  | [] => []
+  | oi :: rest =>
+      let head := op_input_to_attribution oi reorg_ids in
+      let tail := op_attributions_in rest reorg_ids in
+      head :: tail
+  end.
+
+(** [op_attributions] converts a list of [OpInput] entries into the
+    [OpAttribution] list [reply_back_intents] consumes, applying the
+    merge/split-source reorganize override. *)
+Definition op_attributions (ops : list OpInput) : list OpAttribution :=
+  op_attributions_in ops (reorganize_source_ids ops).
+
+Inductive NotifyKind : Type :=
+| NotifyChanged
+| NotifyDropped.
+
+Definition effect_notify_kind (e : OpEffectKind) : option NotifyKind :=
+  match e with
+  | EffectChange => Some NotifyChanged
+  | EffectDrop => Some NotifyDropped
+  | EffectReorganize => None
+  | EffectNoChange => None
+  end.
+
+(** [TaskWithIntents] pairs a result-list task id with its
+    ``contributing_intents'' field — the intents the result attributes
+    to this task.  ``contributing_intents'' is the cumulative provenance
+    across every op that touched the task during this rescope batch and
+    every prior batch whose lineage carried through. *)
+Record TaskWithIntents : Type := {
+  twi_id : positive;
+  twi_row : TaskRow;
+  twi_contributing : list positive
+}.
+
+Fixpoint find_intent_by_id
+    (cid : positive) (intents : list IntentRow) : option IntentRow :=
+  match intents with
+  | [] => None
+  | r :: rest =>
+      if Pos.eqb (intent_comment_id r) cid then Some r
+      else find_intent_by_id cid rest
+  end.
+
+Definition intent_later_and_cross_author
+    (x other : IntentRow) : bool :=
+  if Nat.ltb (intent_index x) (intent_index other)
+  then negb (Pos.eqb (intent_author x) (intent_author other))
+  else false.
+
+(** [any_later_cross_author] checks whether any intent id in [others]
+    refers to an intent strictly later than [x] in arrival order AND
+    from a different author. *)
+Fixpoint any_later_cross_author
+    (x : IntentRow)
+    (intents : list IntentRow)
+    (others : list positive) : bool :=
+  match others with
+  | [] => false
+  | i :: rest =>
+      match find_intent_by_id i intents with
+      | None => any_later_cross_author x intents rest
+      | Some other =>
+          if intent_later_and_cross_author x other
+          then true
+          else any_later_cross_author x intents rest
+      end
+  end.
+
+(** [intent_contributing_tasks] returns the result-task ids that list
+    [intent] in their ``contributing_intents'' — the tasks [intent]
+    shaped during this batch (or carried forward from prior batches). *)
+Fixpoint intent_contributing_tasks
+    (intent : positive)
+    (tasks : list TaskWithIntents) : list positive :=
+  match tasks with
+  | [] => []
+  | t :: rest =>
+      let tail := intent_contributing_tasks intent rest in
+      if positive_mem intent (twi_contributing t)
+      then twi_id t :: tail
+      else tail
+  end.
+
+(** [stronger_kind] picks the more-significant [NotifyKind] for
+    aggregation across multiple matching ops.  [NotifyDropped] dominates
+    [NotifyChanged] — losing the task is the more salient outcome. *)
+Definition stronger_kind (a b : NotifyKind) : NotifyKind :=
+  match a, b with
+  | NotifyDropped, _ => NotifyDropped
+  | _, NotifyDropped => NotifyDropped
+  | _, _ => NotifyChanged
+  end.
+
+Definition combine_notify_kinds
+    (a b : option NotifyKind) : option NotifyKind :=
+  match a, b with
+  | None, k => k
+  | k, None => k
+  | Some k1, Some k2 => Some (stronger_kind k1 k2)
+  end.
+
+(** [task_notify_kind_for_intent] returns the strongest [NotifyKind] the
+    ops yield for a single task targeted by [task_id] on behalf of
+    [intent], applying the later-cross-author filter. *)
+Fixpoint task_notify_kind_for_intent
+    (task_id : positive)
+    (intent : IntentRow)
+    (intents : list IntentRow)
+    (ops : list OpAttribution) : option NotifyKind :=
+  match ops with
+  | [] => None
+  | o :: rest =>
+      let tail := task_notify_kind_for_intent task_id intent intents rest in
+      if andb
+           (Pos.eqb (oa_task o) task_id)
+           (any_later_cross_author intent intents (oa_intents o))
+      then combine_notify_kinds (effect_notify_kind (oa_effect o)) tail
+      else tail
+  end.
+
+(** [any_task_notify_kind] aggregates [task_notify_kind_for_intent]
+    across all of an intent's contributing tasks. *)
+Fixpoint any_task_notify_kind
+    (task_ids : list positive)
+    (intent : IntentRow)
+    (intents : list IntentRow)
+    (ops : list OpAttribution) : option NotifyKind :=
+  match task_ids with
+  | [] => None
+  | t :: rest =>
+      let head := task_notify_kind_for_intent t intent intents ops in
+      let tail := any_task_notify_kind rest intent intents ops in
+      combine_notify_kinds head tail
+  end.
+
+(** [intent_notify_kind] is the per-intent decision: ``[Some kind]'' if
+    a later cross-author op materially affected one of [intent]'s
+    contributing tasks; ``None'' otherwise. *)
+Definition intent_notify_kind
+    (intent : IntentRow)
+    (intents : list IntentRow)
+    (tasks : list TaskWithIntents)
+    (ops : list OpAttribution) : option NotifyKind :=
+  let x_tasks := intent_contributing_tasks (intent_comment_id intent) tasks in
+  any_task_notify_kind x_tasks intent intents ops.
+
+Definition reply_back_entry
+    (intent : IntentRow)
+    (intents : list IntentRow)
+    (tasks : list TaskWithIntents)
+    (ops : list OpAttribution) : option (positive * NotifyKind) :=
+  match intent_notify_kind intent intents tasks ops with
+  | None => None
+  | Some kind => Some (intent_comment_id intent, kind)
+  end.
+
+(** [reply_back_intents] walks the batch in arrival order and yields
+    the ``(comment_id, NotifyKind)'' pairs that warrant a reply.
+    Silent intents are omitted; the Python adapter posts one reply per
+    returned entry. *)
+Fixpoint reply_back_intents_in
+    (cursor intents : list IntentRow)
+    (tasks : list TaskWithIntents)
+    (ops : list OpAttribution)
+    : list (positive * NotifyKind) :=
+  match cursor with
+  | [] => []
+  | r :: rest =>
+      let tail := reply_back_intents_in rest intents tasks ops in
+      match reply_back_entry r intents tasks ops with
+      | None => tail
+      | Some entry => entry :: tail
+      end
+  end.
+
+Definition reply_back_intents
+    (intents : list IntentRow)
+    (tasks : list TaskWithIntents)
+    (ops : list OpAttribution)
+    : list (positive * NotifyKind) :=
+  reply_back_intents_in intents intents tasks ops.
+
+(** [reply_back_intents_for] is the all-in-one entry point: takes the
+    raw parsed op inputs, applies [op_attributions] (with merge/split
+    detection), and calls [reply_back_intents].  Python callers go
+    through this so no notify-rule logic lives in the adapter. *)
+Definition reply_back_intents_for
+    (intents : list IntentRow)
+    (tasks : list TaskWithIntents)
+    (ops : list OpInput)
+    : list (positive * NotifyKind) :=
+  reply_back_intents intents tasks (op_attributions ops).
+
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending merge_preserves_source_lineage merge_target_lineage_includes_source split_preserves_source_lineage split_child_inherits_source".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending merge_preserves_source_lineage merge_target_lineage_includes_source split_preserves_source_lineage split_child_inherits_source op_effect op_attributions effect_notify_kind intent_notify_kind reply_back_intents reply_back_intents_for".

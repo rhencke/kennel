@@ -1000,3 +1000,179 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
     )
     order, rows, created_ci2 = _enqueue(11, ci_row2, order, rows)
     assert oracle.should_abort_for_new_task(11, ci_lease, rows) is False
+
+
+# --- INV-F (#1804 / epic #1798): reply-back routing in Rocq -----------------
+
+
+def _intent_row(comment_id: int, author: int = 1, index: int = 0) -> object:
+    return oracle.IntentRow(
+        intent_comment_id=comment_id,
+        intent_author=author,
+        intent_index=index,
+    )
+
+
+def _twi(task_id: int, contributing: list[int]) -> object:
+    placeholder = oracle.TaskRow(
+        title="",
+        description="",
+        kind=oracle.TaskSpec(),
+        status=oracle.StatusPending(),
+        source_comment=None,
+        lineage_comments=[],
+    )
+    return oracle.TaskWithIntents(
+        twi_id=task_id, twi_row=placeholder, twi_contributing=contributing
+    )
+
+
+def _input(op: object, intents: list[int]) -> object:
+    return oracle.OpInput(oi_op=op, oi_intents=intents)
+
+
+def test_op_effect_classifies_each_rescope_op() -> None:
+    assert isinstance(oracle.op_effect(oracle.KeepTask(1)), oracle.EffectNoChange)
+    assert isinstance(
+        oracle.op_effect(oracle.RewriteTask(1, "t", "d")), oracle.EffectChange
+    )
+    assert isinstance(
+        oracle.op_effect(oracle.RewriteAnchor(1, 42)), oracle.EffectChange
+    )
+    assert isinstance(
+        oracle.op_effect(oracle.MergeTasks(1, [2], "t", "d")),
+        oracle.EffectReorganize,
+    )
+    assert isinstance(
+        oracle.op_effect(oracle.SplitTask(1, [])), oracle.EffectReorganize
+    )
+    assert isinstance(oracle.op_effect(oracle.CompleteTask(1)), oracle.EffectDrop)
+
+
+def test_op_attributions_overrides_merge_source_complete_to_reorganize() -> None:
+    ops = [
+        _input(oracle.MergeTasks(1, [2, 3], "merged", "d"), [101]),
+        _input(oracle.CompleteTask(2), [101]),
+        _input(oracle.CompleteTask(3), [101]),
+        _input(oracle.CompleteTask(7), [202]),  # standalone drop
+    ]
+    attributions = oracle.op_attributions(ops)
+    effects_by_task = {a.oa_task: a.oa_effect for a in attributions}
+    assert isinstance(effects_by_task[2], oracle.EffectReorganize)
+    assert isinstance(effects_by_task[3], oracle.EffectReorganize)
+    assert isinstance(effects_by_task[7], oracle.EffectDrop)
+
+
+def test_op_attributions_overrides_split_source_complete_to_reorganize() -> None:
+    ops = [
+        _input(oracle.SplitTask(1, []), [101]),
+        _input(oracle.CompleteTask(1), [101]),
+    ]
+    attributions = oracle.op_attributions(ops)
+    for a in attributions:
+        assert isinstance(a.oa_effect, oracle.EffectReorganize)
+
+
+def test_reply_back_intents_for_cross_author_change() -> None:
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    intents = [alice, bob]
+    tasks = [_twi(1, [101, 202])]
+    ops = [_input(oracle.RewriteTask(1, "bob's title", "bob's desc"), [202])]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert len(entries) == 1
+    cid, kind = entries[0]
+    assert cid == 101
+    assert isinstance(kind, oracle.NotifyChanged)
+
+
+def test_reply_back_intents_for_cross_author_drop() -> None:
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    intents = [alice, bob]
+    tasks = [_twi(1, [101, 202])]
+    ops = [_input(oracle.CompleteTask(1), [202])]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert len(entries) == 1
+    cid, kind = entries[0]
+    assert cid == 101
+    assert isinstance(kind, oracle.NotifyDropped)
+
+
+def test_reply_back_intents_for_same_author_change_is_silent() -> None:
+    alice1 = _intent_row(101, author=1, index=0)
+    alice2 = _intent_row(102, author=1, index=1)
+    intents = [alice1, alice2]
+    tasks = [_twi(1, [101, 102])]
+    ops = [_input(oracle.RewriteTask(1, "alice's new title", "d"), [102])]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert entries == []
+
+
+def test_reply_back_intents_for_earlier_cross_author_does_not_notify() -> None:
+    bob = _intent_row(202, author=2, index=0)
+    alice = _intent_row(101, author=1, index=1)
+    intents = [bob, alice]
+    tasks = [_twi(1, [101, 202])]
+    ops = [_input(oracle.RewriteTask(1, "bob's title", "d"), [202])]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert entries == []
+
+
+def test_reply_back_intents_for_split_does_not_notify() -> None:
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    intents = [alice, bob]
+    tasks = [_twi(1, [101, 202])]
+    ops = [_input(oracle.SplitTask(1, []), [202])]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert entries == []
+
+
+def test_reply_back_intents_for_merge_does_not_notify() -> None:
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    intents = [alice, bob]
+    tasks = [_twi(1, [101, 202]), _twi(9, [202])]
+    ops = [
+        _input(oracle.MergeTasks(9, [1], "merged", "d"), [202]),
+        _input(oracle.CompleteTask(1), [202]),
+    ]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert entries == []
+
+
+def test_reply_back_intents_for_drop_dominates_change() -> None:
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    intents = [alice, bob]
+    tasks = [_twi(1, [101, 202]), _twi(2, [101, 202])]
+    ops = [
+        _input(oracle.RewriteTask(1, "new", "new"), [202]),
+        _input(oracle.CompleteTask(2), [202]),
+    ]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert len(entries) == 1
+    cid, kind = entries[0]
+    assert cid == 101
+    assert isinstance(kind, oracle.NotifyDropped)
+
+
+def test_reply_back_intents_for_keep_op_never_notifies() -> None:
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    intents = [alice, bob]
+    tasks = [_twi(1, [101, 202])]
+    ops = [_input(oracle.KeepTask(1), [202])]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert entries == []
+
+
+def test_reply_back_intents_for_no_op_intent_silent() -> None:
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    intents = [alice, bob]
+    tasks = [_twi(1, [202])]
+    ops = [_input(oracle.RewriteTask(1, "new", "new"), [202])]
+    entries = oracle.reply_back_intents_for(intents, tasks, ops)
+    assert entries == []

@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, Literal
+from typing import IO, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fido.appstate import FidoState, TaskListSnapshot
@@ -1322,6 +1322,67 @@ _RescopeOp = (
 )
 
 
+def _build_op_inputs(
+    operations: list[_RescopeOp],
+    ids_by_task_id: dict[str, int],
+) -> list[rescope_oracle.OpInput]:
+    """Adapter glue: parsed ``_RescopeOp`` list → oracle ``OpInput``.
+
+    Shape conversion only — no rule logic.  The oracle's
+    ``reply_back_intents_for`` consumes the resulting list and applies
+    op classification (incl. merge/split reorganize override) and the
+    reply-back rule (later cross-author destructive change) internally.
+
+    ``_RescopeOpNew`` ops are skipped — they create brand-new tasks
+    with no pre-existing intent contributions, so they can never
+    trigger reply-back.
+    """
+    op_inputs: list[rescope_oracle.OpInput] = []
+    for op in operations:
+        model_op: rescope_oracle.RescopeOp
+        if isinstance(op, _RescopeOpKeep):
+            model_op = rescope_oracle.KeepTask(ids_by_task_id[op.id])
+        elif isinstance(op, _RescopeOpRewrite):
+            model_op = rescope_oracle.RewriteTask(
+                ids_by_task_id[op.id], op.title, op.description
+            )
+        elif isinstance(op, _RescopeOpRewriteAnchor):
+            model_op = rescope_oracle.RewriteAnchor(
+                ids_by_task_id[op.id], op.anchor_comment_id
+            )
+        elif isinstance(op, _RescopeOpRemove):
+            model_op = rescope_oracle.CompleteTask(ids_by_task_id[op.id])
+        elif isinstance(op, _RescopeOpMerge):
+            model_op = rescope_oracle.MergeTasks(
+                ids_by_task_id[op.target_id],
+                [ids_by_task_id[s] for s in op.sources],
+                op.title,
+                op.description,
+            )
+        elif isinstance(op, _RescopeOpSplit):
+            # Split children's positives don't need to be allocated for
+            # the reply-back rule — the oracle treats SplitTask as
+            # EffectReorganize on the source regardless of child ids.
+            children = [
+                rescope_oracle.SplitChild(
+                    child_task=0,
+                    child_title=child.title,
+                    child_description=child.description,
+                )
+                for child in op.children
+            ]
+            model_op = rescope_oracle.SplitTask(ids_by_task_id[op.id], children)
+        else:  # _RescopeOpNew — no existing task, no contribution lineage.
+            continue
+        op_inputs.append(
+            rescope_oracle.OpInput(
+                oi_op=model_op,
+                oi_intents=list(op.contributing_intents),
+            )
+        )
+    return op_inputs
+
+
 def _parse_rescope_operations(
     raw: str,
 ) -> tuple[list[_RescopeOp], list[str]]:
@@ -2626,139 +2687,6 @@ def _merge_source_ids(ordered_items: list[dict[str, Any]]) -> set[str]:
     return merged
 
 
-# ── #1723: classify per-intent rescope dispositions ──────────────────────────
-#
-# The reply-back filter epic (#1256) needs to decide, per originating
-# RescopeIntent, whether the rescope materially affected that
-# commenter's ask or just absorbed it into existing work.  This
-# classifier consumes the contributing_intents provenance written by
-# #1722's apply path and the original/result task lists; #1724 will
-# turn its output into per-intent notifications.
-
-IntentDispositionKind = Literal["material", "aggregation", "unhandled"]
-
-
-@dataclass(frozen=True)
-class IntentDisposition:
-    """How a single RescopeIntent was treated by one rescope batch.
-
-    * ``material`` — at least one task this intent contributed to had
-      a change the commenter needs to hear about (title/description
-      rewrite, status change to completed, anchor re-target, brand-new
-      task created for the intent).
-    * ``aggregation`` — intent attributed to one or more tasks but
-      none of those tasks materially changed (pure absorption into
-      an existing pending task without rewording or restructuring).
-    * ``unhandled`` — intent didn't appear in any task's
-      ``contributing_intents`` (Opus didn't act on it this batch).
-
-    ``affected_task_ids`` lists every task this intent contributed to
-    (in result-list order) so #1724 can route per-intent replies to
-    the right tasks.  ``reason`` is a short human-readable string
-    describing what the classifier saw.
-    """
-
-    kind: IntentDispositionKind
-    reason: str
-    affected_task_ids: list[str]
-
-
-def _intent_material_reasons(
-    original_task: dict[str, Any] | None, result_task: dict[str, Any]
-) -> list[str]:
-    """Return one reason per material change between *original_task* and *result_task*.
-
-    Empty list means the resulting task didn't change in any way that
-    the commenter needs to hear about — pure aggregation.
-
-    Material changes (per #1723 acceptance criteria):
-      * brand-new task (no original counterpart)
-      * status flipped to completed
-      * title rewritten
-      * description rewritten (counts as task wording)
-      * source-comment anchor re-targeted
-    """
-    if original_task is None:
-        return [f"new task created for this intent ({result_task['id']!r})"]
-    reasons: list[str] = []
-    completed_value = str(TaskStatus.COMPLETED)
-    if (
-        result_task.get("status") == completed_value
-        and original_task.get("status") != completed_value
-    ):
-        reasons.append(f"task closed ({result_task['id']!r})")
-    if result_task.get("title") != original_task.get("title"):
-        reasons.append(f"task title rewritten ({result_task['id']!r})")
-    if result_task.get("description") != original_task.get("description"):
-        reasons.append(f"task description rewritten ({result_task['id']!r})")
-    old_anchor = (original_task.get("thread") or {}).get("comment_id")
-    new_anchor = (result_task.get("thread") or {}).get("comment_id")
-    if old_anchor != new_anchor:
-        reasons.append(f"task anchor re-targeted ({result_task['id']!r})")
-    return reasons
-
-
-def _classify_rescope_intents(
-    original: list[dict[str, Any]],
-    result: list[dict[str, Any]],
-    intents: list[RescopeIntent],
-) -> dict[int, IntentDisposition]:
-    """Per-intent classification for the reply-back filter (#1723).
-
-    Returns a dict keyed on ``intent.comment_id`` so the caller can
-    look up each originating intent independently — the classifier
-    operates per ORIGINATING COMMENT id, not per task id.  An intent
-    that contributed to multiple tasks aggregates "material" if any
-    affected task had a material change; an intent that contributed
-    to zero tasks is ``unhandled``.
-
-    Iteration order of the returned dict is intent-timestamp ascending
-    (oldest first) — #1724's notifier reads dispositions in dict
-    insertion order to fire per-intent replies in chronological
-    sequence.
-
-    The downstream notifier (#1724) decides notification policy from
-    these dispositions; this layer just classifies and explains.
-    """
-    original_by_id = {t["id"]: t for t in original}
-    intent_to_tasks: dict[int, list[dict[str, Any]]] = {}
-    for task in result:
-        for intent_id in task.get("contributing_intents") or []:
-            intent_to_tasks.setdefault(intent_id, []).append(task)
-
-    out: dict[int, IntentDisposition] = {}
-    # Sort by timestamp so dict iteration order matches chronology.
-    for intent in sorted(intents, key=lambda i: i.timestamp):
-        cid = intent.comment_id
-        attributed = intent_to_tasks.get(cid, [])
-        if not attributed:
-            out[cid] = IntentDisposition(
-                kind="unhandled",
-                reason="not attributed to any operation",
-                affected_task_ids=[],
-            )
-            continue
-        affected_ids = [t["id"] for t in attributed]
-        material_reasons: list[str] = []
-        for task in attributed:
-            material_reasons.extend(
-                _intent_material_reasons(original_by_id.get(task["id"]), task)
-            )
-        if material_reasons:
-            out[cid] = IntentDisposition(
-                kind="material",
-                reason="; ".join(material_reasons),
-                affected_task_ids=affected_ids,
-            )
-        else:
-            out[cid] = IntentDisposition(
-                kind="aggregation",
-                reason="absorbed into existing task(s) without material change",
-                affected_task_ids=affected_ids,
-            )
-    return out
-
-
 def _compute_thread_changes(
     original: list[dict[str, Any]],
     result: list[dict[str, Any]],
@@ -2849,8 +2777,14 @@ def reorder_tasks(
     prior_attempts: list[ClosedPR] | None = None,
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[str], None] | None = None,
-    _on_intent_dispositions: Callable[
-        [dict[int, IntentDisposition], list[dict[str, Any]]], None
+    _on_rescope_apply: Callable[
+        [
+            list[dict[str, Any]],
+            list[rescope_oracle.OpInput],
+            dict[str, int],
+            list[IntentVerdict],
+        ],
+        None,
     ]
     | None = None,
     _on_done: Callable[[], None] | None = None,
@@ -2937,6 +2871,11 @@ def reorder_tasks(
     )
     operations: list[_RescopeOp] = []
     parse_errors: list[str] = ["initial parse"]
+    # Hoisted across nudge iterations so the final successful parse is
+    # available to the post-apply ``_on_intent_dispositions`` callback —
+    # INV-F (#1804) needs the verdict list to drive the extracted
+    # reply-back precedence decision (``oracle.reply_back_intents``).
+    verdicts: list[IntentVerdict] = []
     for nudge_attempt in range(_RESCOPE_MAX_NUDGES + 1):
         if use_verdicts:
             verdicts, verdict_errors = _parse_rescope_verdicts(raw, intents or [])
@@ -3188,15 +3127,21 @@ def reorder_tasks(
             )
         )
 
-    if _on_intent_dispositions is not None and intents is not None:
-        # #1723: per-intent material vs aggregation classification.
-        # The future #1724 leaf reads these dispositions and decides
-        # which originating commenter(s) to ping.  Computed always
-        # when an intents list is provided so the callback fires with
-        # the full disposition map even for batches that produced no
-        # thread-change records.
-        _on_intent_dispositions(
-            _classify_rescope_intents(pre_rescope, result, intents), result
+    if _on_rescope_apply is not None and intents is not None:
+        # INV-F (#1804): hand the post-apply state to the notifier so it
+        # can ask the oracle which intents need a reply.  We hand the
+        # adapter (a) the raw result task list, (b) the ``OpInput`` list
+        # (typed as the oracle expects) the model needs to apply its
+        # reply-back rule, (c) the task-string-id → positive map the
+        # adapter uses to translate oracle output back to result-task
+        # ids, and (d) the parsed verdicts (reserved; not consumed by
+        # the current rule, kept for forward compatibility).
+        ids_by_task_id, _, _, _ = _rescope_state_for_oracle(pre_rescope)
+        _on_rescope_apply(
+            result,
+            _build_op_inputs(operations, ids_by_task_id),
+            ids_by_task_id,
+            verdicts,
         )
 
     if inprogress_affected and _on_inprogress_affected is not None:

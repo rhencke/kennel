@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Never, cast
+from typing import Never
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,7 +16,7 @@ from fido.events import (
     _apply_reply_result,
     _BackgroundRescopeTrigger,
     _build_issue_comment_action,
-    _build_on_intent_dispositions,
+    _build_on_rescope_apply,
     _configured_agent,
     _existing_reply_artifact,
     _get_commit_summary,
@@ -44,12 +44,12 @@ from fido.events import (
 from fido.prompts import Prompts
 from fido.provider import ProviderID, ThreadKind
 from fido.rocq import replied_comment_claims as oracle
+from fido.rocq import task_queue_rescope
 from fido.state import State
 from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
-from fido.tasks import IntentDisposition
 from fido.types import ActiveIssue, ActivePR, RescopeIntent
 from fido.worker import ActivityReporter
 from tests.fakes import _FakeDispatcher
@@ -4259,8 +4259,11 @@ class TestReorderTasksBackground:
         assert current_thread_kind() == "worker"  # default when not set
 
 
-class TestNotifyIntentOutcome:
-    """Per-intent reply-back notifier (#1724)."""
+class TestBuildOnRescopeApply:
+    """INV-F (#1804): the post-apply notifier delegates the reply-back
+    decision entirely to ``oracle.reply_back_intents_for``; this layer
+    is just data-shape adapter glue and the call into
+    ``_notify_intent_outcome`` per yielded entry."""
 
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
@@ -4272,616 +4275,321 @@ class TestNotifyIntentOutcome:
             sub_dir=tmp_path / "sub",
         )
 
-    def _intent(self, comment_id: int = 999) -> RescopeIntent:
+    def _intent(
+        self,
+        comment_id: int,
+        ts: str = "2024-01-15T10:00:00+00:00",
+        author: str = "",
+    ) -> RescopeIntent:
+        return RescopeIntent(
+            change_request=f"req {comment_id}",
+            comment_id=comment_id,
+            timestamp=ts,
+            author=author,
+        )
+
+    def _pr(self) -> ActivePR:
+        return ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+
+    def test_no_pr_ctx_skips_silently(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        cb = _build_on_rescope_apply(
+            intents=[self._intent(101)],
+            repo="owner/repo",
+            pr_ctx=None,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=gh,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        cb([], [], {}, [])
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_cross_author_rewrite_notifies_displaced_commenter(
+        self, tmp_path: Path
+    ) -> None:
+        # alice contributed to task t1; bob (later, different author)
+        # rewrote it.  Oracle says alice gets NotifyChanged; this layer
+        # fires the GitHub reply for her.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
+        bob = self._intent(202, "2024-01-15T10:01:00+00:00", author="bob")
+        cb = _build_on_rescope_apply(
+            intents=[alice, bob],
+            repo="owner/repo",
+            pr_ctx=self._pr(),
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=gh,
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "Renamed by bob",
+                "contributing_intents": [101, 202],
+            }
+        ]
+        op_inputs = [
+            task_queue_rescope.OpInput(
+                oi_op=task_queue_rescope.RewriteTask(1, "Renamed by bob", ""),
+                oi_intents=[202],
+            )
+        ]
+        cb(result, op_inputs, {"t1": 1}, [])
+        # Alice (101) gets notified; bob is the actor, not displaced.
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101]
+
+    def test_same_author_followup_is_silent(self, tmp_path: Path) -> None:
+        # alice's later intent rewrites her own earlier-contributing task
+        # → silent (she already knows).
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice1 = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
+        alice2 = self._intent(102, "2024-01-15T10:01:00+00:00", author="alice")
+        cb = _build_on_rescope_apply(
+            intents=[alice1, alice2],
+            repo="owner/repo",
+            pr_ctx=self._pr(),
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=gh,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "Renamed",
+                "contributing_intents": [101, 102],
+            }
+        ]
+        op_inputs = [
+            task_queue_rescope.OpInput(
+                oi_op=task_queue_rescope.RewriteTask(1, "Renamed", ""),
+                oi_intents=[102],
+            )
+        ]
+        cb(result, op_inputs, {"t1": 1}, [])
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_cross_author_merge_does_not_notify(self, tmp_path: Path) -> None:
+        # Even cross-author merge — alice's task gets merged into bob's
+        # — doesn't notify, because the work still gets done.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
+        bob = self._intent(202, "2024-01-15T10:01:00+00:00", author="bob")
+        cb = _build_on_rescope_apply(
+            intents=[alice, bob],
+            repo="owner/repo",
+            pr_ctx=self._pr(),
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=gh,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {"id": "t1", "title": "merged", "contributing_intents": [101, 202]},
+            {"id": "t2", "title": "old alice", "contributing_intents": [101]},
+        ]
+        op_inputs = [
+            task_queue_rescope.OpInput(
+                oi_op=task_queue_rescope.MergeTasks(1, [2], "merged", ""),
+                oi_intents=[202],
+            ),
+            task_queue_rescope.OpInput(
+                oi_op=task_queue_rescope.CompleteTask(2),
+                oi_intents=[202],
+            ),
+        ]
+        cb(result, op_inputs, {"t1": 1, "t2": 2}, [])
+        gh.reply_to_review_comment.assert_not_called()
+
+
+class TestNotifyIntentOutcome:
+    """INV-F (#1804): ``_notify_intent_outcome`` posts a per-intent
+    reply with framing keyed on the oracle's ``NotifyKind``."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _intent(
+        self, comment_id: int = 101, comment_type: str = "pulls"
+    ) -> RescopeIntent:
         return RescopeIntent(
             change_request="please rename the parser",
             comment_id=comment_id,
             timestamp="2024-01-15T10:00:00+00:00",
+            comment_type=comment_type,
         )
 
-    def _disposition(
-        self,
-        kind: str = "material",
-        reason: str = "task title rewritten ('t1')",
-        affected: list[str] | None = None,
-    ) -> IntentDisposition:
-        from fido.tasks import IntentDispositionKind  # type: ignore[reportPrivateUsage]
-
-        return IntentDisposition(
-            kind=cast("IntentDispositionKind", kind),
-            reason=reason,
-            affected_task_ids=affected if affected is not None else ["t1"],
-        )
-
-    def _kwargs(
-        self,
-        intent: RescopeIntent,
-        disposition: IntentDisposition,
-        cfg: Config,
-        gh: MagicMock,
-        agent: object,
-        *,
-        batch_intents: list[RescopeIntent] | None = None,
-        batch_dispositions: dict[int, IntentDisposition] | None = None,
-        result: list[dict] | None = None,
-    ) -> dict[str, object]:
+    def _kwargs(self, cfg: Config, gh: MagicMock, agent: object) -> dict[str, object]:
         return {
             "repo": "owner/repo",
             "pr": 42,
             "config": cfg,
             "repo_cfg": cfg.repos["owner/repo"],
             "gh": gh,
+            "batch_intents": [self._intent()],
+            "affected_task_ids": ["t1"],
+            "result": [],
             "agent": agent,
-            "batch_intents": batch_intents if batch_intents is not None else [intent],
-            "batch_dispositions": batch_dispositions
-            if batch_dispositions is not None
-            else {intent.comment_id: disposition},
-            "result": result if result is not None else [],
+            "prompts": Prompts("p"),
         }
 
-    def test_aggregation_disposition_silently_skips(self, tmp_path: Path) -> None:
-        # Aggregation = pure absorption with no material change.
-        # Acceptance criteria #1723: don't notify.
+    def test_notify_changed_posts_review_thread_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        intent = self._intent()
-        disposition = self._disposition(kind="aggregation")
-        _notify_intent_outcome(
-            intent,
-            disposition,
-            **self._kwargs(intent, disposition, cfg, mock_gh, _client("nope")),
-        )
-        mock_gh.reply_to_review_comment.assert_not_called()
-        mock_gh.comment_issue.assert_not_called()
-
-    def test_unhandled_disposition_fires_with_story_framing(
-        self, tmp_path: Path
-    ) -> None:
-        # Per Q1: unhandled now notifies with Opus framing so the
-        # commenter knows their ask was considered (likely superseded).
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        intent = self._intent()
-        disposition = self._disposition(kind="unhandled", affected=[])
-        _notify_intent_outcome(
-            intent,
-            disposition,
-            **self._kwargs(intent, disposition, cfg, mock_gh, _client("ack")),
-        )
-        mock_gh.reply_to_review_comment.assert_called_once()
-
-    def test_material_posts_review_thread_reply(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
+        gh = MagicMock()
         intent = self._intent(comment_id=999)
-        disposition = self._disposition()
         _notify_intent_outcome(
             intent,
-            disposition,
-            **self._kwargs(
-                intent, disposition, cfg, mock_gh, _client("Replanned, not done.")
-            ),
+            task_queue_rescope.NotifyChanged(),
+            **self._kwargs(cfg, gh, _client("Replanned, not done.")),
         )
-        mock_gh.reply_to_review_comment.assert_called_once_with(
+        gh.reply_to_review_comment.assert_called_once_with(
             "owner/repo", 42, "Replanned, not done.", 999
         )
 
-    def test_material_instruction_says_replanned_not_completed(
-        self, tmp_path: Path
-    ) -> None:
-        # The reply text must NOT imply work is done (acceptance #1724).
+    def test_notify_dropped_uses_drop_framing(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         captured: list[str] = []
 
-        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
+        def fake(prompt: str, model: object, **kwargs: object) -> str:
             captured.append(prompt)
             return "ok"
 
-        intent = self._intent()
-        disposition = self._disposition()
         _notify_intent_outcome(
-            intent,
-            disposition,
-            **self._kwargs(
-                intent, disposition, cfg, MagicMock(), _client(side_effect=fake_pp)
-            ),
+            self._intent(),
+            task_queue_rescope.NotifyDropped(),
+            **self._kwargs(cfg, MagicMock(), _client(side_effect=fake)),
         )
-        assert any("REPLANNED, not completed" in p for p in captured)
+        assert any("DROPPED" in p for p in captured)
+        assert any("Do NOT say their work is done" in p for p in captured)
+
+    def test_notify_changed_uses_replan_framing(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        captured: list[str] = []
+
+        def fake(prompt: str, model: object, **kwargs: object) -> str:
+            captured.append(prompt)
+            return "ok"
+
+        _notify_intent_outcome(
+            self._intent(),
+            task_queue_rescope.NotifyChanged(),
+            **self._kwargs(cfg, MagicMock(), _client(side_effect=fake)),
+        )
+        assert any("REPLANNED" in p for p in captured)
         assert any("Do NOT say the work is done" in p for p in captured)
 
-    def test_material_instruction_includes_intent_and_reason(
-        self, tmp_path: Path
-    ) -> None:
+    def test_issue_comment_intent_skips(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        captured: list[str] = []
-
-        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
-            captured.append(prompt)
-            return "ok"
-
-        intent = self._intent(comment_id=777)
-        disposition = self._disposition(reason="task closed ('abc')", affected=["abc"])
+        gh = MagicMock()
+        intent = self._intent(comment_id=42, comment_type="issues")
         _notify_intent_outcome(
             intent,
-            disposition,
-            **self._kwargs(
-                intent, disposition, cfg, MagicMock(), _client(side_effect=fake_pp)
-            ),
+            task_queue_rescope.NotifyChanged(),
+            **{**self._kwargs(cfg, gh, _client("nope")), "batch_intents": [intent]},
         )
-        assert any("please rename the parser" in p for p in captured)
-        assert any("task closed" in p for p in captured)
+        gh.reply_to_review_comment.assert_not_called()
 
-    def test_material_instruction_lists_co_contributing_intents(
-        self, tmp_path: Path
-    ) -> None:
-        # "Tell the story": the prompt must enumerate other intents
-        # that contributed to the same affected task(s) so Opus can
-        # narrate "your ask landed on T2 because @bob's later
-        # comment...".
+    def test_post_failure_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        captured: list[str] = []
-
-        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
-            captured.append(prompt)
-            return "ok"
-
-        a = self._intent(comment_id=101)
-        b = RescopeIntent(
-            change_request="actually do Y instead",
-            comment_id=202,
-            timestamp="2024-01-15T10:01:00+00:00",
+        gh = MagicMock()
+        gh.reply_to_review_comment.side_effect = RuntimeError("network")
+        _notify_intent_outcome(
+            self._intent(),
+            task_queue_rescope.NotifyChanged(),
+            **self._kwargs(cfg, gh, _client("ok")),
         )
-        disp = self._disposition(affected=["t2"])
-        # Task t2 carries both intents in contributing_intents — they
-        # both shaped the same task.
-        result = [{"id": "t2", "title": "Y", "contributing_intents": [101, 202]}]
-        kwargs = self._kwargs(
-            a,
-            disp,
-            cfg,
-            MagicMock(),
-            _client(side_effect=fake_pp),
-            batch_intents=[a, b],
-            batch_dispositions={101: disp, 202: self._disposition()},
-            result=result,
-        )
-        _notify_intent_outcome(a, disp, **kwargs)
-        joined = "\n".join(captured)
-        # Other commenters who contributed to the same task surface
-        # in the prompt as a chronological list.
-        assert "Other commenters who contributed to the SAME" in joined
-        assert "comment #202" in joined
-        assert "actually do Y instead" in joined
-
-    def test_unhandled_instruction_lists_sibling_intents_with_dispositions(
-        self, tmp_path: Path
-    ) -> None:
-        # "Tell the story" for the unhandled case: include every
-        # other intent in the batch with its disposition so Opus can
-        # explain why this one was skipped (likely superseded).
-        cfg = self._cfg(tmp_path)
-        captured: list[str] = []
-
-        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
-            captured.append(prompt)
-            return "ok"
-
-        a = self._intent(comment_id=101)
-        b = RescopeIntent(
-            change_request="superseding ask",
-            comment_id=202,
-            timestamp="2024-01-15T10:01:00+00:00",
-        )
-        a_disp = self._disposition(kind="unhandled", affected=[])
-        b_disp = self._disposition(kind="material")
-        kwargs = self._kwargs(
-            a,
-            a_disp,
-            cfg,
-            MagicMock(),
-            _client(side_effect=fake_pp),
-            batch_intents=[a, b],
-            batch_dispositions={101: a_disp, 202: b_disp},
-            result=[],
-        )
-        _notify_intent_outcome(a, a_disp, **kwargs)
-        joined = "\n".join(captured)
-        assert "Other intents processed in this same rescope batch" in joined
-        assert "comment #202" in joined
-        assert "material" in joined
-        assert "superseding ask" in joined
-        # Unhandled framing tells Opus to narrate why, not apologize.
-        assert "NOT acted on" in joined
 
     def test_co_contributing_intent_outside_batch_silently_skipped(
         self, tmp_path: Path
     ) -> None:
-        # Real production case: a task's contributing_intents may
-        # include comment ids from PRIOR rescope batches whose
-        # RescopeIntent objects aren't in this batch's intents list.
-        # The notifier silently skips them rather than crashing —
-        # we don't have the change_request text to include in the
-        # prompt anyway.  (Persisting past-batch intents is a
-        # follow-up; #1256 epic doesn't require it.)
+        # The result task lists a contributing_intent id that isn't in
+        # batch_intents (e.g. a prior-batch intent that's no longer
+        # being notified about).  The notifier silently skips it.
         cfg = self._cfg(tmp_path)
         captured: list[str] = []
 
-        def fake_pp(prompt: str, model: object, **kwargs: object) -> str:
+        def fake(prompt: str, model: object, **kwargs: object) -> str:
             captured.append(prompt)
             return "ok"
 
-        intent = self._intent(comment_id=101)
-        disp = self._disposition(affected=["t1"])
-        # t1 has TWO contributing_intents: 101 (this batch) and 999
-        # (a prior batch — not in batch_intents).
+        intent = self._intent(101)
         result = [{"id": "t1", "title": "T", "contributing_intents": [101, 999]}]
-        kwargs = self._kwargs(
+        _notify_intent_outcome(
             intent,
-            disp,
-            cfg,
-            MagicMock(),
-            _client(side_effect=fake_pp),
-            batch_intents=[intent],  # 999 deliberately absent
-            batch_dispositions={101: disp},
-            result=result,
+            task_queue_rescope.NotifyChanged(),
+            **{
+                **self._kwargs(cfg, MagicMock(), _client(side_effect=fake)),
+                "batch_intents": [intent],  # 999 deliberately absent
+                "result": result,
+            },
         )
-        _notify_intent_outcome(intent, disp, **kwargs)
-        # Past-batch intent silently skipped: no co-contributing
-        # block in the prompt, but the call still completes.
         joined = "\n".join(captured)
-        assert "Other commenters who contributed" not in joined
+        assert "comment #999" not in joined
 
-    def test_post_failure_does_not_raise(self, tmp_path: Path) -> None:
+    def test_default_agent_and_prompts_constructed_when_none(
+        self, tmp_path: Path
+    ) -> None:
         cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        mock_gh.reply_to_review_comment.side_effect = RuntimeError("network")
         intent = self._intent()
-        disposition = self._disposition()
-        _notify_intent_outcome(
-            intent,
-            disposition,
-            **self._kwargs(intent, disposition, cfg, mock_gh, _client("ok")),
-        )
-
-    def test_issue_comment_intent_skips_with_log(self, tmp_path: Path) -> None:
-        # Issue comments already received a triage reply from the
-        # webhook handler — a second top-level comment here would
-        # duplicate that reply (codex P2 on #1747).
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        intent = RescopeIntent(
-            change_request="please rename",
-            comment_id=42,
-            timestamp="2024-01-15T10:00:00+00:00",
-            comment_type="issues",
-        )
-        disposition = self._disposition()
-        _notify_intent_outcome(
-            intent,
-            disposition,
-            **self._kwargs(intent, disposition, cfg, mock_gh, _client("nope")),
-        )
-        mock_gh.reply_to_review_comment.assert_not_called()
-        mock_gh.comment_issue.assert_not_called()
-
-    def test_default_agent_constructed_when_none(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        intent = self._intent()
-        disposition = self._disposition()
-        kwargs = self._kwargs(intent, disposition, cfg, mock_gh, agent=None)
-        # Drop the agent kwarg so the default-construction path fires.
+        kwargs = self._kwargs(cfg, MagicMock(), _client("Auto reply"))
         del kwargs["agent"]
+        del kwargs["prompts"]
         with patch("fido.events.DefaultProviderFactory") as factory_cls:
             factory_cls.return_value.create_agent.return_value = _client("Auto reply")
-            _notify_intent_outcome(intent, disposition, **kwargs)
+            _notify_intent_outcome(intent, task_queue_rescope.NotifyChanged(), **kwargs)
         factory_cls.return_value.create_agent.assert_called_once()
-        mock_gh.reply_to_review_comment.assert_called_once()
 
 
-class TestBuildOnIntentDispositions:
-    """Per-iteration intent-dispositions callback factory (#1724)."""
+class TestBuildOpInputsAuthors:
+    """Coverage for the empty-author branch of ``_intent_author_ids``
+    (unauthored intents get unique sentinel ids so they never
+    accidentally compare equal in the oracle's later-cross-author
+    check)."""
 
-    def _cfg(self, tmp_path: Path) -> Config:
-        return Config(
-            port=9000,
-            secret=b"test",
-            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
+    def test_unauthored_intents_get_unique_ids(self, tmp_path: Path) -> None:
+        from fido.events import _intent_author_ids
 
-    def _intent(self, comment_id: int, ts: str) -> RescopeIntent:
-        return RescopeIntent(
-            change_request=f"req {comment_id}",
-            comment_id=comment_id,
-            timestamp=ts,
-        )
-
-    def _disposition(
-        self,
-        kind: str = "material",
-        affected: list[str] | None = None,
-    ) -> IntentDisposition:
-        from fido.tasks import IntentDispositionKind  # type: ignore[reportPrivateUsage]
-
-        return IntentDisposition(
-            kind=cast("IntentDispositionKind", kind),
-            reason="title rewritten",
-            affected_task_ids=affected if affected is not None else ["t1"],
-        )
-
-    def test_no_pr_ctx_skips_silently(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        cb = _build_on_intent_dispositions(
-            intents=[self._intent(101, "2024-01-15T10:00:00+00:00")],
-            repo="owner/repo",
-            pr_ctx=None,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("nope"),
-            prompts=Prompts("p"),
-        )
-        cb({101: self._disposition()}, [])
-        mock_gh.reply_to_review_comment.assert_not_called()
-
-    def test_aggregation_filtered_material_and_unhandled_fire(
-        self, tmp_path: Path
-    ) -> None:
-        # Per Q1 (#1724): material AND unhandled both notify; only
-        # aggregation stays silent.  Per Q3: notifications fire in
-        # dispositions iteration order (timestamp-ascending).
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        pr = ActivePR(
-            number=42,
-            title="t",
-            url="https://github.com/owner/repo/pull/42",
-            body="",
-        )
-        cb = _build_on_intent_dispositions(
-            intents=[
-                self._intent(101, "2024-01-15T10:00:00+00:00"),
-                self._intent(202, "2024-01-15T10:01:00+00:00"),
-                self._intent(303, "2024-01-15T10:02:00+00:00"),
-            ],
-            repo="owner/repo",
-            pr_ctx=pr,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("Reply text"),
-            prompts=Prompts("p"),
-        )
-        cb(
-            {
-                101: self._disposition(kind="aggregation"),
-                202: self._disposition(kind="material"),
-                303: self._disposition(kind="unhandled", affected=[]),
-            },
-            [],
-        )
-        # 101 silent (aggregation); 202 + 303 both fire — in
-        # dispositions iteration order (timestamp).
-        comment_ids = [
-            c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
+        intents = [
+            RescopeIntent(
+                change_request="a",
+                comment_id=10,
+                timestamp="2024-01-15T10:00:00+00:00",
+                author="",
+            ),
+            RescopeIntent(
+                change_request="b",
+                comment_id=20,
+                timestamp="2024-01-15T10:01:00+00:00",
+                author="",
+            ),
         ]
-        assert comment_ids == [202, 303]
-
-    def test_notifications_fire_in_dispositions_iteration_order(
-        self, tmp_path: Path
-    ) -> None:
-        # Acceptance criteria #1724: notifications emitted in
-        # RescopeIntent.timestamp order.  The classifier returns
-        # dispositions sorted by timestamp; this test feeds an
-        # ordered map and asserts that order survives through the
-        # callback to the gh.* call sequence.
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        pr = ActivePR(
-            number=42,
-            title="t",
-            url="https://github.com/owner/repo/pull/42",
-            body="",
-        )
-        cb = _build_on_intent_dispositions(
-            intents=[
-                self._intent(101, "2024-01-15T10:00:00+00:00"),
-                self._intent(202, "2024-01-15T10:01:00+00:00"),
-                self._intent(303, "2024-01-15T10:02:00+00:00"),
-            ],
-            repo="owner/repo",
-            pr_ctx=pr,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("ok"),
-            prompts=Prompts("p"),
-        )
-        # Pass dispositions in oldest-first order (as the classifier does).
-        cb(
-            {
-                101: self._disposition(),
-                202: self._disposition(),
-                303: self._disposition(),
-            },
-            [],
-        )
-        comment_ids = [
-            c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
-        ]
-        assert comment_ids == [101, 202, 303]
-
-    def test_intent_not_in_intents_list_is_skipped(self, tmp_path: Path) -> None:
-        # If a disposition's comment_id isn't in this iteration's
-        # intents (shouldn't happen, but defensive), the callback
-        # silently skips rather than crashing.
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        pr = ActivePR(
-            number=42,
-            title="t",
-            url="https://github.com/owner/repo/pull/42",
-            body="",
-        )
-        cb = _build_on_intent_dispositions(
-            intents=[],  # no intents this iteration
-            repo="owner/repo",
-            pr_ctx=pr,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("nope"),
-            prompts=Prompts("p"),
-        )
-        cb({101: self._disposition()}, [])
-        mock_gh.reply_to_review_comment.assert_not_called()
-
-    def test_unhandled_with_only_later_attributed_silently_skips(
-        self, tmp_path: Path
-    ) -> None:
-        # Rob's #1747 directive: unhandled is silent when every
-        # attributed sibling is strictly NEWER than this intent.
-        # The original "got it" reply still stands — work continues
-        # under the later cover, no need to ping the original
-        # commenter.
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        pr = ActivePR(
-            number=42,
-            title="t",
-            url="https://github.com/owner/repo/pull/42",
-            body="",
-        )
-        older_unhandled = self._intent(101, "2024-01-15T10:00:00+00:00")
-        newer_attributed = self._intent(202, "2024-01-15T10:01:00+00:00")
-        cb = _build_on_intent_dispositions(
-            intents=[older_unhandled, newer_attributed],
-            repo="owner/repo",
-            pr_ctx=pr,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("text"),
-            prompts=Prompts("p"),
-        )
-        cb(
-            {
-                101: self._disposition(kind="unhandled", affected=[]),
-                202: self._disposition(kind="material"),
-            },
-            [],
-        )
-        # 101 silent (older unhandled, only later attributed); 202
-        # fires (material).
-        comment_ids = [
-            c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
-        ]
-        assert comment_ids == [202]
-
-    def test_unhandled_with_earlier_attributed_fires_notification(
-        self, tmp_path: Path
-    ) -> None:
-        # Inverse of the above: when an EARLIER attributed sibling
-        # exists, the unhandled one was likely covered by that earlier
-        # work and the commenter deserves to hear about it.
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        pr = ActivePR(
-            number=42,
-            title="t",
-            url="https://github.com/owner/repo/pull/42",
-            body="",
-        )
-        earlier_attributed = self._intent(101, "2024-01-15T10:00:00+00:00")
-        later_unhandled = self._intent(202, "2024-01-15T10:01:00+00:00")
-        cb = _build_on_intent_dispositions(
-            intents=[earlier_attributed, later_unhandled],
-            repo="owner/repo",
-            pr_ctx=pr,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("text"),
-            prompts=Prompts("p"),
-        )
-        cb(
-            {
-                101: self._disposition(kind="material"),
-                202: self._disposition(kind="unhandled", affected=[]),
-            },
-            [],
-        )
-        comment_ids = [
-            c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
-        ]
-        # Both fire: 101 material + 202 unhandled-with-earlier-cover.
-        assert comment_ids == [101, 202]
-
-    def test_solo_unhandled_intent_silently_skips(self, tmp_path: Path) -> None:
-        # Edge case: only one intent in the batch and it's unhandled
-        # (Opus dropped it for some reason, no siblings).  No
-        # earlier-attributed sibling exists → silent.  Letting Opus
-        # speculate about WHY would just be guessing.
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        pr = ActivePR(
-            number=42,
-            title="t",
-            url="https://github.com/owner/repo/pull/42",
-            body="",
-        )
-        solo = self._intent(101, "2024-01-15T10:00:00+00:00")
-        cb = _build_on_intent_dispositions(
-            intents=[solo],
-            repo="owner/repo",
-            pr_ctx=pr,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("text"),
-            prompts=Prompts("p"),
-        )
-        cb({101: self._disposition(kind="unhandled", affected=[])}, [])
-        mock_gh.reply_to_review_comment.assert_not_called()
-
-    def test_unhandled_silent_when_only_unhandled_siblings(
-        self, tmp_path: Path
-    ) -> None:
-        # When this intent is unhandled AND every sibling is also
-        # unhandled, no attributed sibling exists at all → silent
-        # (no story to tell about being covered by someone else).
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        pr = ActivePR(
-            number=42,
-            title="t",
-            url="https://github.com/owner/repo/pull/42",
-            body="",
-        )
-        a = self._intent(101, "2024-01-15T10:00:00+00:00")
-        b = self._intent(202, "2024-01-15T10:01:00+00:00")
-        cb = _build_on_intent_dispositions(
-            intents=[a, b],
-            repo="owner/repo",
-            pr_ctx=pr,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=mock_gh,
-            agent=_client("text"),
-            prompts=Prompts("p"),
-        )
-        cb(
-            {
-                101: self._disposition(kind="unhandled", affected=[]),
-                202: self._disposition(kind="unhandled", affected=[]),
-            },
-            [],
-        )
-        mock_gh.reply_to_review_comment.assert_not_called()
+        out = _intent_author_ids(intents)
+        # Distinct sentinel ids — unauthored intents must never
+        # accidentally compare equal-author.
+        assert out[10] != out[20]
 
 
 class TestBackfillMissedPrComments:

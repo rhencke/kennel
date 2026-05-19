@@ -1401,3 +1401,432 @@ def task_still_pending(
         return False
     row = __option
     return isinstance(row.status, StatusPending)
+
+
+@final
+@dataclass(frozen=True)
+class IntentRow:
+    intent_comment_id: int
+    intent_author: int
+    intent_index: int
+
+    def later_and_cross_author(
+        self,
+        other: IntentRow,
+    ) -> bool:
+        x = self
+        if x.intent_index < other.intent_index:
+            return x.intent_author != other.intent_author
+        return False
+
+    def notify_kind(
+        self,
+        intents: list[IntentRow],
+        tasks: list[TaskWithIntents],
+        ops: list[OpAttribution],
+    ) -> NotifyKind | None:
+        intent = self
+        x_tasks = intent_contributing_tasks(intent.intent_comment_id, tasks)
+        return any_task_notify_kind(
+            x_tasks,
+            intent,
+            intents,
+            ops,
+        )
+
+
+class OpEffectKind:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class EffectChange(OpEffectKind):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class EffectDrop(OpEffectKind):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class EffectReorganize(OpEffectKind):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class EffectNoChange(OpEffectKind):
+    pass
+
+
+OpEffectKindT = EffectChange | EffectDrop | EffectReorganize | EffectNoChange
+
+
+def op_effect(op: RescopeOp) -> OpEffectKind:
+    match op:
+        case KeepTask(task):
+            return EffectNoChange()
+        case RewriteTask(task, new_title, new_description):
+            return EffectChange()
+        case RewriteAnchor(task, new_anchor):
+            return EffectChange()
+        case MergeTasks(task, sources, new_title, new_description):
+            return EffectReorganize()
+        case SplitTask(task, children):
+            return EffectReorganize()
+        case CompleteTask(task):
+            return EffectDrop()
+        case __impossible:
+            assert_never(__impossible)
+
+
+@final
+@dataclass(frozen=True)
+class OpInput:
+    oi_op: RescopeOp
+    oi_intents: list[int]
+
+
+@final
+@dataclass(frozen=True)
+class OpAttribution:
+    oa_task: int
+    oa_effect: OpEffectKind
+    oa_intents: list[int]
+
+
+def op_input_task(oi: OpInput) -> int:
+    return rescope_task_id(oi.oi_op)
+
+
+def op_input_merge_sources(oi: OpInput) -> list[int]:
+    match oi.oi_op:
+        case KeepTask(task):
+            return []
+        case RewriteTask(task, new_title, new_description):
+            return []
+        case RewriteAnchor(task, new_anchor):
+            return []
+        case MergeTasks(task, sources, new_title, new_description):
+            return sources
+        case SplitTask(task, children):
+            return []
+        case CompleteTask(task):
+            return []
+        case __impossible:
+            assert_never(__impossible)
+
+
+def op_input_split_source(oi: OpInput) -> int | None:
+    match oi.oi_op:
+        case KeepTask(task):
+            return None
+        case RewriteTask(task, new_title, new_description):
+            return None
+        case RewriteAnchor(task, new_anchor):
+            return None
+        case MergeTasks(task, sources, new_title, new_description):
+            return None
+        case SplitTask(source, children):
+            return source
+        case CompleteTask(task):
+            return None
+        case __impossible:
+            assert_never(__impossible)
+
+
+def reorganize_source_ids(ops: list[OpInput]) -> list[int]:
+    __list = ops
+    if __list == []:
+        return []
+    oi = __list[0]
+    rest = __list[1:]
+    tail = reorganize_source_ids(rest)
+    merge_acc = op_input_merge_sources(oi) + tail
+    __option = op_input_split_source(oi)
+    if __option is None:
+        return merge_acc
+    src = __option
+    return [src] + merge_acc
+
+
+def op_input_effect(
+    oi: OpInput,
+    reorg_ids: list[int],
+) -> OpEffectKind:
+    match op_effect(oi.oi_op):
+        case EffectChange():
+            return EffectChange()
+        case EffectDrop():
+            if op_input_task(oi) in reorg_ids:
+                return EffectReorganize()
+            return EffectDrop()
+        case EffectReorganize():
+            return EffectReorganize()
+        case EffectNoChange():
+            return EffectNoChange()
+        case __impossible:
+            assert_never(__impossible)
+
+
+def op_input_to_attribution(
+    oi: OpInput,
+    reorg_ids: list[int],
+) -> OpAttribution:
+    return OpAttribution(
+        oa_task=op_input_task(oi),
+        oa_effect=op_input_effect(oi, reorg_ids),
+        oa_intents=oi.oi_intents,
+    )
+
+
+def op_attributions_in(
+    cursor: list[OpInput],
+    reorg_ids: list[int],
+) -> list[OpAttribution]:
+    __list = cursor
+    if __list == []:
+        return []
+    oi = __list[0]
+    rest = __list[1:]
+    head = op_input_to_attribution(oi, reorg_ids)
+    tail = op_attributions_in(rest, reorg_ids)
+    return [head] + tail
+
+
+def op_attributions(ops: list[OpInput]) -> list[OpAttribution]:
+    return op_attributions_in(ops, reorganize_source_ids(ops))
+
+
+class NotifyKind:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class NotifyChanged(NotifyKind):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class NotifyDropped(NotifyKind):
+    pass
+
+
+NotifyKindT = NotifyChanged | NotifyDropped
+
+
+def effect_notify_kind(e: OpEffectKind) -> NotifyKind | None:
+    match e:
+        case EffectChange():
+            return NotifyChanged()
+        case EffectDrop():
+            return NotifyDropped()
+        case EffectReorganize():
+            return None
+        case EffectNoChange():
+            return None
+        case __impossible:
+            assert_never(__impossible)
+
+
+@final
+@dataclass(frozen=True)
+class TaskWithIntents:
+    twi_id: int
+    twi_row: TaskRow
+    twi_contributing: list[int]
+
+
+def find_intent_by_id(
+    cid: int,
+    intents: list[IntentRow],
+) -> IntentRow | None:
+    for r in intents:
+        if r.intent_comment_id == cid:
+            return r
+        continue
+    return None
+
+
+def any_later_cross_author(
+    x: IntentRow,
+    intents: list[IntentRow],
+    others: list[int],
+) -> bool:
+    for i in others:
+        __option = find_intent_by_id(i, intents)
+        if __option is None:
+            continue
+        other = __option
+        if x.later_and_cross_author(other):
+            return True
+        continue
+    return False
+
+
+def intent_contributing_tasks(
+    intent: int,
+    tasks: list[TaskWithIntents],
+) -> list[int]:
+    __list = tasks
+    if __list == []:
+        return []
+    t0 = __list[0]
+    rest = __list[1:]
+    tail = intent_contributing_tasks(intent, rest)
+    if intent in t0.twi_contributing:
+        return [t0.twi_id] + tail
+    return tail
+
+
+def stronger_kind(
+    a: NotifyKind,
+    b: NotifyKind,
+) -> NotifyKind:
+    match a:
+        case NotifyChanged():
+            match b:
+                case NotifyChanged():
+                    return NotifyChanged()
+                case NotifyDropped():
+                    return NotifyDropped()
+                case __impossible:
+                    assert_never(__impossible)
+        case NotifyDropped():
+            return NotifyDropped()
+        case __impossible:
+            assert_never(__impossible)
+
+
+def combine_notify_kinds(
+    a: NotifyKind | None,
+    b: NotifyKind | None,
+) -> NotifyKind | None:
+    __option = a
+    if __option is None:
+        return b
+    k1 = __option
+    __option = b
+    if __option is None:
+        return a
+    k2 = __option
+    return stronger_kind(k1, k2)
+
+
+def task_notify_kind_for_intent(
+    task_id: int,
+    intent: IntentRow,
+    intents: list[IntentRow],
+    ops: list[OpAttribution],
+) -> NotifyKind | None:
+    __list = ops
+    if __list == []:
+        return None
+    o = __list[0]
+    rest = __list[1:]
+    tail = task_notify_kind_for_intent(
+        task_id,
+        intent,
+        intents,
+        rest,
+    )
+    if o.oa_task == task_id and any_later_cross_author(intent, intents, o.oa_intents):
+        return combine_notify_kinds(effect_notify_kind(o.oa_effect), tail)
+    return tail
+
+
+def any_task_notify_kind(
+    task_ids: list[int],
+    intent: IntentRow,
+    intents: list[IntentRow],
+    ops: list[OpAttribution],
+) -> NotifyKind | None:
+    __list = task_ids
+    if __list == []:
+        return None
+    t0 = __list[0]
+    rest = __list[1:]
+    head = task_notify_kind_for_intent(
+        t0,
+        intent,
+        intents,
+        ops,
+    )
+    tail = any_task_notify_kind(
+        rest,
+        intent,
+        intents,
+        ops,
+    )
+    return combine_notify_kinds(head, tail)
+
+
+def reply_back_entry(
+    intent: IntentRow,
+    intents: list[IntentRow],
+    tasks: list[TaskWithIntents],
+    ops: list[OpAttribution],
+) -> tuple[int, NotifyKind] | None:
+    __option = intent.notify_kind(intents, tasks, ops)
+    if __option is None:
+        return None
+    kind0 = __option
+    return (
+        intent.intent_comment_id,
+        kind0,
+    )
+
+
+def reply_back_intents_in(
+    cursor: list[IntentRow],
+    intents: list[IntentRow],
+    tasks: list[TaskWithIntents],
+    ops: list[OpAttribution],
+) -> list[tuple[int, NotifyKind]]:
+    __list = cursor
+    if __list == []:
+        return []
+    r = __list[0]
+    rest = __list[1:]
+    tail = reply_back_intents_in(
+        rest,
+        intents,
+        tasks,
+        ops,
+    )
+    __option = reply_back_entry(r, intents, tasks, ops)
+    if __option is None:
+        return tail
+    entry = __option
+    return [entry] + tail
+
+
+def reply_back_intents(
+    intents: list[IntentRow],
+    tasks: list[TaskWithIntents],
+    ops: list[OpAttribution],
+) -> list[tuple[int, NotifyKind]]:
+    return reply_back_intents_in(
+        intents,
+        intents,
+        tasks,
+        ops,
+    )
+
+
+def reply_back_intents_for(
+    intents: list[IntentRow],
+    tasks: list[TaskWithIntents],
+    ops: list[OpInput],
+) -> list[tuple[int, NotifyKind]]:
+    return reply_back_intents(
+        intents,
+        tasks,
+        op_attributions(ops),
+    )
