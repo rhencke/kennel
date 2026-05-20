@@ -1869,12 +1869,18 @@ class TestWorkerExecuteTaskBranches:
         tmp_path: Path,
         task_list: list[dict] | None = None,
         *,
-        build_prompt: object = None,
-        provider_run: object = None,
-        harness_committer_cls: object = None,
-        sync_tasks: object = None,
+        prompt_builder: object = None,
+        provider_runner: object = None,
+        harness_committer_factory: object = None,
+        task_syncer: object = None,
     ) -> tuple[object, object]:
-        from tests.test_worker import Worker
+        from tests.test_worker import (
+            Worker,
+            _FakeHarnessCommitterFactory,
+            _FakePromptBuilder,
+            _FakeProviderRunner,
+            _FakeTaskSyncer,
+        )
 
         fake_tasks = TestWorkerExecuteTaskBranches._FakeTasks(task_list or [])
         gh = MagicMock()
@@ -1885,10 +1891,16 @@ class TestWorkerExecuteTaskBranches:
             tmp_path,
             gh,
             _tasks=fake_tasks,
-            _build_prompt=build_prompt or (lambda *a, **k: None),
-            _provider_run=provider_run or (lambda *a, **k: ("sid", "")),
-            _harness_committer_cls=harness_committer_cls,
-            _sync_tasks=sync_tasks or (lambda *a, **k: None),
+            prompt_builder=prompt_builder
+            if prompt_builder is not None
+            else _FakePromptBuilder(),
+            provider_runner=provider_runner
+            if provider_runner is not None
+            else _FakeProviderRunner(),
+            harness_committer_factory=harness_committer_factory
+            if harness_committer_factory is not None
+            else _FakeHarnessCommitterFactory(),
+            task_syncer=task_syncer if task_syncer is not None else _FakeTaskSyncer(),
         )
         return worker, gh
 
@@ -2045,8 +2057,6 @@ class TestWorkerExecuteTaskBranches:
     def test_thread_lineage_appends_related_comment_ids(self, tmp_path: Path) -> None:
         # worker.py:3061-3066 — lineage_comment_ids appends the
         # "Related thread comment_ids:" context line.
-        from fido.rocq.commit_result import CommitSuccess
-
         task = {
             "id": "t1",
             "title": "Reply to comment",
@@ -2062,21 +2072,26 @@ class TestWorkerExecuteTaskBranches:
         sentinel = (
             '{"turn_outcome":"commit-task-complete","summary":"Reply to comment"}'
         )
+        from tests.test_worker import (
+            ProviderRunOutcome,
+            _FakeHarnessCommitterFactory,
+            _FakePromptBuilder,
+            _FakeProviderRunner,
+        )
+
         mock_build = MagicMock()
-
-        class _FakeHC:
-            def __init__(self, *_a: object, **_k: object) -> None:
-                pass
-
-            def commit(self, *_a: object, **_k: object) -> object:
-                return CommitSuccess(sha="abc123")
-
+        fake_pb = _FakePromptBuilder()
+        fake_pb.build_prompt = mock_build
+        fake_runner = _FakeProviderRunner()
+        fake_runner.run.return_value = ProviderRunOutcome(
+            session_id="sid", text=sentinel, cancelled=False
+        )
         worker, _ = self._make_worker(
             tmp_path,
             [task],
-            build_prompt=mock_build,
-            provider_run=lambda *a, **k: ("sid", sentinel),
-            harness_committer_cls=_FakeHC,
+            prompt_builder=fake_pb,
+            provider_runner=fake_runner,
+            harness_committer_factory=_FakeHarnessCommitterFactory(),
         )
         fido_dir = self._fido_dir(tmp_path)
         worker.set_status = lambda *a, **k: None  # type: ignore[attr-defined]
@@ -3048,6 +3063,13 @@ class TestWorkerSleep:
 
         sleep_calls: list[float] = []
 
+        class _FakeClock:
+            def sleep(self, secs: float) -> None:
+                sleep_calls.append(secs)
+
+            def monotonic(self) -> float:
+                return 0.0
+
         # Pass provider= directly so the factory is not invoked.
         worker = _Worker(
             tmp_path,
@@ -3055,7 +3077,7 @@ class TestWorkerSleep:
             provider=MagicMock(),
             issue_cache=MagicMock(),
             dispatcher=MagicMock(),
-            _sleep_fn=sleep_calls.append,
+            clock=_FakeClock(),
         )
         worker._sleep(0.001)
         assert sleep_calls == [0.001]
