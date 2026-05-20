@@ -1514,12 +1514,12 @@ class Worker:
         first_iteration: bool = False,
         nudges: Nudges | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
-        prompt_builder: PromptBuilder | None = None,
-        provider_runner: ProviderRunner | None = None,
-        harness_committer_factory: HarnessCommitterFactory | None = None,
-        task_syncer: TaskSyncer | None = None,
-        clock: Clock | None = None,
-        reply_promise_recoverer: ReplyPromiseRecoverer | None = None,
+        prompt_builder: PromptBuilder = _DEFAULT_PROMPT_BUILDER,
+        provider_runner: ProviderRunner = _DEFAULT_PROVIDER_RUNNER,
+        harness_committer_factory: HarnessCommitterFactory = _DEFAULT_HARNESS_COMMITTER_FACTORY,
+        task_syncer: TaskSyncer = _DEFAULT_TASK_SYNCER,
+        clock: Clock = _DEFAULT_CLOCK,
+        reply_promise_recoverer: ReplyPromiseRecoverer = _DEFAULT_REPLY_PROMISE_RECOVERER,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
@@ -1580,26 +1580,12 @@ class Worker:
             self._provider = None
         if self._provider is not None:
             self._bootstrap_session = self._provider.agent.session
-        self._prompt_builder = (
-            prompt_builder if prompt_builder is not None else _DEFAULT_PROMPT_BUILDER
-        )
-        self._provider_runner = (
-            provider_runner if provider_runner is not None else _DEFAULT_PROVIDER_RUNNER
-        )
-        self._harness_committer_factory = (
-            harness_committer_factory
-            if harness_committer_factory is not None
-            else _DEFAULT_HARNESS_COMMITTER_FACTORY
-        )
-        self._task_syncer = (
-            task_syncer if task_syncer is not None else _DEFAULT_TASK_SYNCER
-        )
-        self._clock = clock if clock is not None else _DEFAULT_CLOCK
-        self._reply_promise_recoverer = (
-            reply_promise_recoverer
-            if reply_promise_recoverer is not None
-            else _DEFAULT_REPLY_PROMISE_RECOVERER
-        )
+        self._prompt_builder = prompt_builder
+        self._provider_runner = provider_runner
+        self._harness_committer_factory = harness_committer_factory
+        self._task_syncer = task_syncer
+        self._clock = clock
+        self._reply_promise_recoverer = reply_promise_recoverer
         # Delegation impl attributes -- tests inject mocks via direct instance assignment
         # instead of patching module functions.
         self._sync_tasks_background_impl = tasks.sync_tasks_background
@@ -5385,6 +5371,12 @@ class WorkerThread(threading.Thread):
             repo_cfg=self._repo_cfg,
             provider_factory=self._provider_factory,
             first_iteration=self._is_first_iteration,
+            prompt_builder=_DEFAULT_PROMPT_BUILDER,
+            provider_runner=_DEFAULT_PROVIDER_RUNNER,
+            harness_committer_factory=_DEFAULT_HARNESS_COMMITTER_FACTORY,
+            task_syncer=_DEFAULT_TASK_SYNCER,
+            clock=_DEFAULT_CLOCK,
+            reply_promise_recoverer=_DEFAULT_REPLY_PROMISE_RECOVERER,
             dispatcher=self._dispatcher,
             issue_cache=self._issue_cache,
             state_updater=self._state_updater,
