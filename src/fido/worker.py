@@ -3678,7 +3678,7 @@ class Worker:
         with self._state.modify() as state:
             state.pop("current_task_id", None)
         self._abort_task.clear()
-        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+        self._sync_tasks(self.work_dir, self.gh, blocking=True)
 
     def _yield_for_untriaged(self) -> None:
         """Yield at a provider-turn boundary if untriaged webhooks are waiting.
