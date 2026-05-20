@@ -3438,6 +3438,7 @@ class Worker:
         self._tasks.complete_with_resolve(
             task["id"],
             self.gh,
+            syncer=tasks.sync_tasks_background,
             collaborators=repo_ctx.collaborators,
             allowed_bots=allowed_bots,
         )

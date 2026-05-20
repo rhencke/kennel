@@ -5382,14 +5382,18 @@ class TestTasksCompleteWithResolve:
     def test_marks_task_completed(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
-        Tasks(work_dir).complete_with_resolve(task["id"], MagicMock())
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], MagicMock(), syncer=lambda _w, _g: None
+        )
         assert Tasks(work_dir).list()[0]["status"] == "completed"
 
     def test_no_thread_does_not_call_github(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
         gh = MagicMock()
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
         gh.get_user.assert_not_called()
         gh.resolve_thread.assert_not_called()
 
@@ -5398,12 +5402,16 @@ class TestTasksCompleteWithResolve:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.THREAD, thread={"repo": "a/b"})
         gh = MagicMock()
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
         gh.resolve_thread.assert_not_called()
 
     def test_nonexistent_id_does_not_raise(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
-        Tasks(work_dir).complete_with_resolve("nonexistent-id", MagicMock())
+        Tasks(work_dir).complete_with_resolve(
+            "nonexistent-id", MagicMock(), syncer=lambda _w, _g: None
+        )
 
     def test_triggers_background_sync(self, tmp_path: Path) -> None:
         """Every completion fires sync_tasks_background so the PR body
@@ -5416,7 +5424,7 @@ class TestTasksCompleteWithResolve:
         Tasks(work_dir).complete_with_resolve(
             task["id"],
             gh,
-            _sync_background=lambda wd, g: sync_calls.append((wd, g)),
+            syncer=lambda wd, g: sync_calls.append((wd, g)),
         )
         assert sync_calls == [(work_dir, gh)]
 
@@ -5429,7 +5437,7 @@ class TestTasksCompleteWithResolve:
         Tasks(work_dir).complete_with_resolve(
             "nonexistent-id",
             gh,
-            _sync_background=lambda wd, g: sync_calls.append((wd, g)),
+            syncer=lambda wd, g: sync_calls.append((wd, g)),
         )
         assert sync_calls == [(work_dir, gh)]
 
@@ -5458,7 +5466,9 @@ class TestTasksCompleteWithResolve:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
 
         gh.resolve_thread.assert_called_once_with("thread_node_abc")
         assert "thread resolved: thread_node_abc" in caplog.text
@@ -5488,7 +5498,9 @@ class TestTasksCompleteWithResolve:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
 
         gh.resolve_thread.assert_not_called()
         assert "not resolving" in caplog.text
@@ -5502,7 +5514,9 @@ class TestTasksCompleteWithResolve:
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = []
 
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
 
         gh.resolve_thread.assert_not_called()
 
@@ -5529,7 +5543,9 @@ class TestTasksCompleteWithResolve:
             }
         ]
 
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
 
         gh.resolve_thread.assert_called_once_with("thread_node_abc")
 
@@ -5550,7 +5566,9 @@ class TestTasksCompleteWithResolve:
             }
         ]
 
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
 
         gh.resolve_thread.assert_not_called()
 
@@ -5585,7 +5603,9 @@ class TestTasksCompleteWithResolve:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
 
         gh.resolve_thread.assert_not_called()
         assert "pending same-thread work" in caplog.text
@@ -5603,5 +5623,7 @@ class TestTasksCompleteWithResolve:
         gh.get_user.side_effect = RuntimeError("network error")
 
         with caplog.at_level(logging.WARNING, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
         assert "thread resolution skipped" in caplog.text

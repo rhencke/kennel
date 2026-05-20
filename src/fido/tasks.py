@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from fido.appstate import FidoState, TaskListSnapshot
@@ -3307,6 +3307,12 @@ def reorder_tasks(
         _on_done()
 
 
+class BackgroundSyncer(Protocol):
+    """Typed collaborator for launching :func:`sync_tasks` in the background."""
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
+
+
 def sync_tasks_background(
     work_dir: Path,
     gh: GitHub,
@@ -3530,9 +3536,9 @@ class Tasks(JsonFileStore):
         task_id: str,
         gh: GitHub,
         *,
+        syncer: BackgroundSyncer,
         collaborators: frozenset[str] = frozenset(),
         allowed_bots: frozenset[str] = frozenset(),
-        _sync_background: Callable[..., None] | None = None,
     ) -> None:
         """Mark a task completed and resolve its review thread if we posted last.
 
@@ -3546,11 +3552,8 @@ class Tasks(JsonFileStore):
         another sync between this completion and the PR-ready/merge step
         (#988).
         """
-        _do_sync = (
-            _sync_background if _sync_background is not None else sync_tasks_background
-        )
         thread = self.complete_by_id(task_id)
-        _do_sync(self._work_dir, gh)
+        syncer(self._work_dir, gh)
         if not thread:
             return
         repo = thread.get("repo", "")

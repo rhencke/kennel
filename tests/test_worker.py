@@ -11317,6 +11317,7 @@ class TestExecuteTask:
         worker._tasks.complete_with_resolve.assert_called_once_with(
             task["id"],
             gh,
+            syncer=sync_tasks_background,
             collaborators=frozenset({"owner"}),
             allowed_bots=frozenset(),
         )
@@ -11422,6 +11423,7 @@ class TestExecuteTask:
         worker._tasks.complete_with_resolve.assert_called_once_with(
             task["id"],
             gh,
+            syncer=sync_tasks_background,
             collaborators=frozenset({"owner"}),
             allowed_bots=frozenset(),
         )

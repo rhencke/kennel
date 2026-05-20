@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fido.github import GitHub
-from fido.tasks import Tasks
+from fido.tasks import Tasks, sync_tasks_background
 from fido.types import TaskType
 
 log = logging.getLogger(__name__)
@@ -46,7 +46,9 @@ class Cmd:
         return task
 
     def complete(self, work_dir: Path, task_id: str) -> None:
-        Tasks(work_dir).complete_with_resolve(task_id, self._github)
+        Tasks(work_dir).complete_with_resolve(
+            task_id, self._github, syncer=sync_tasks_background
+        )
 
     def list(self, work_dir: Path) -> None:
         result = Tasks(work_dir).list()
