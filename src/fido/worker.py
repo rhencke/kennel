@@ -1387,6 +1387,18 @@ class Worker:
         self._sync_tasks = _sync_tasks if _sync_tasks is not None else tasks.sync_tasks
         self._sleep_fn = _sleep_fn if _sleep_fn is not None else time.sleep
         self._recover_reply_promises_fn = _recover_reply_promises
+        # Delegation impl attributes -- tests inject mocks via direct instance assignment
+        # instead of patching module functions.
+        self._sync_tasks_background_impl = tasks.sync_tasks_background
+        self._reorder_tasks_impl = tasks.reorder_tasks
+        # Events delegation targets.  Imported lazily (inside __init__) to avoid
+        # creating a module-level circular import with fido.events -> fido.worker.
+        from fido import events as _fev  # noqa: PLC0415
+
+        self._reply_to_comment_impl = _fev.reply_to_comment
+        self._reply_to_issue_comment_impl = _fev.reply_to_issue_comment
+        self._get_commit_summary_impl = _fev._get_commit_summary  # pyright: ignore[reportPrivateUsage]
+        self._make_reorder_kwargs_impl = _fev._make_reorder_kwargs  # pyright: ignore[reportPrivateUsage]
 
     def _ensure_provider(self) -> Provider:
         """Return the owned provider, creating the configured provider if needed."""
@@ -2767,9 +2779,7 @@ class Worker:
         prompts: Prompts | None = None,
     ) -> tuple[str, list[str]]:
         """Thin delegation — tests override via direct instance attribute assignment."""
-        from fido import events
-
-        return events.reply_to_comment(
+        return self._reply_to_comment_impl(
             action,
             config,
             repo_cfg,
@@ -2791,9 +2801,7 @@ class Worker:
         prompts: Prompts | None = None,
     ) -> tuple[str, list[str]]:
         """Thin delegation — tests override via direct instance attribute assignment."""
-        from fido import events
-
-        return events.reply_to_issue_comment(
+        return self._reply_to_issue_comment_impl(
             action,
             config,
             repo_cfg,
@@ -2805,7 +2813,7 @@ class Worker:
 
     def _sync_tasks_background(self, work_dir: Path, gh: GitHub) -> None:
         """Thin delegation — tests override via direct instance attribute assignment."""
-        tasks.sync_tasks_background(work_dir, gh)
+        self._sync_tasks_background_impl(work_dir, gh)
 
     def _prepare_reply(
         self,
@@ -4545,11 +4553,7 @@ class Worker:
 
     def _get_commit_summary_fn(self) -> str:
         """Thin delegation — tests override via direct instance attribute assignment."""
-        from fido.events import (
-            _get_commit_summary,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        return _get_commit_summary(self.work_dir)
+        return self._get_commit_summary_impl(self.work_dir)
 
     def _make_reorder_kwargs_fn(
         self,
@@ -4565,11 +4569,7 @@ class Worker:
         sync_tasks_fn: Callable[[Path, Any], None] | None = None,
     ) -> dict[str, Any]:
         """Thin delegation — tests override via direct instance attribute assignment."""
-        from fido.events import (
-            _make_reorder_kwargs,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        return _make_reorder_kwargs(
+        return self._make_reorder_kwargs_impl(
             work_dir,
             config,
             repo_cfg,
@@ -4586,9 +4586,7 @@ class Worker:
         self, tasks_obj: Tasks, commit_summary: str, reorder_kwargs: dict[str, Any]
     ) -> None:
         """Thin delegation — tests override via direct instance attribute assignment."""
-        from fido.tasks import reorder_tasks
-
-        reorder_tasks(tasks_obj, commit_summary, **reorder_kwargs)
+        self._reorder_tasks_impl(tasks_obj, commit_summary, **reorder_kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
         """Enforce the git-identity invariant (see #792).
@@ -5148,6 +5146,37 @@ class WorkerThread(threading.Thread):
             raise RuntimeError("provider.ensure_session() returned no session")
         return session
 
+    def _create_worker(
+        self,
+        session: "PromptSession | None",
+        worker_tasks: "Tasks | None",
+        worker_state: "State | None",
+    ) -> "Worker":
+        """Create a Worker for the current loop iteration.
+
+        Extracted so tests can override this method via direct instance attribute
+        assignment, returning a fake instead of patching Worker at the class level.
+        """
+        return Worker(
+            self.work_dir,
+            self._gh,
+            self._abort_task,
+            self._repo_name,
+            self._registry,
+            self._membership,
+            session=session,
+            session_issue=self._session_issue,
+            _tasks=worker_tasks,
+            _state=worker_state,
+            config=self._config,
+            repo_cfg=self._repo_cfg,
+            provider_factory=self._provider_factory,
+            first_iteration=self._is_first_iteration,
+            dispatcher=self._dispatcher,
+            issue_cache=self._issue_cache,
+            state_updater=self._state_updater,
+        )
+
     def _resolve_fido_dir(self) -> Path | None:
         """Return the ``.git/fido`` directory for this worker's work_dir,
         or ``None`` when *work_dir* is not a git worktree (e.g. pytest
@@ -5262,25 +5291,7 @@ class WorkerThread(threading.Thread):
                 else:
                     worker_tasks = None
                     worker_state = None
-                worker = Worker(
-                    self.work_dir,
-                    self._gh,
-                    self._abort_task,
-                    self._repo_name,
-                    self._registry,
-                    self._membership,
-                    session=session,
-                    session_issue=self._session_issue,
-                    _tasks=worker_tasks,
-                    _state=worker_state,
-                    config=self._config,
-                    repo_cfg=self._repo_cfg,
-                    provider_factory=self._provider_factory,
-                    first_iteration=self._is_first_iteration,
-                    dispatcher=self._dispatcher,
-                    issue_cache=self._issue_cache,
-                    state_updater=self._state_updater,
-                )
+                worker = self._create_worker(session, worker_tasks, worker_state)
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
                 worker._provider_agent = provider.agent  # pyright: ignore[reportPrivateUsage]
                 try:
