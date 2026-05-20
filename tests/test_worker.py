@@ -6,6 +6,7 @@ import logging
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,7 +92,7 @@ _MISSING = object()
 
 
 class _FakeTasks:
-    """Fake Tasks collaborator for execute_task tests.
+    """Fake Tasks collaborator for execute_task and handle_promote_merge tests.
 
     Holds a mutable task list; all mutating methods are MagicMock instances
     so tests can assert call args without patching the Tasks class.
@@ -108,6 +109,11 @@ class _FakeTasks:
 
     def list(self) -> list[dict]:
         return self._task_list
+
+    @contextlib.contextmanager
+    def modify(self) -> Iterator[list[dict]]:  # type: ignore[override]
+        """Yield _task_list for in-place mutation (mirrors Tasks.modify)."""
+        yield self._task_list
 
 
 def _enqueue_pr_comment(tmp_path: Path, *, pr_number: int = 1) -> None:
@@ -13115,7 +13121,15 @@ class TestHandlePromoteMerge:
 
     def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
+        return (
+            Worker(
+                tmp_path,
+                gh,
+                registry=MagicMock(spec=ActivityReporter),
+                _tasks=_FakeTasks(),
+            ),
+            gh,
+        )
 
     def _repo_ctx(self, owner: str = "rhencke") -> RepoContext:
         return RepoContext(
@@ -13151,11 +13165,8 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 7, "my-branch", 3)
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 7, "my-branch", 3)
         gh.get_reviews.assert_called_once_with("rhencke/myrepo", 7)
 
     # --- merge on approval ---
@@ -13165,12 +13176,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.get_pr.assert_called_once_with("rhencke/myrepo", 9)
 
     def test_approved_not_draft_no_pending_merges_squash(self, tmp_path: Path) -> None:
@@ -13178,12 +13186,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True)
 
     def test_approved_not_draft_no_pending_resets_tasks_json(
@@ -13191,20 +13196,14 @@ class TestHandlePromoteMerge:
     ) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        tasks_file = fido_dir / "tasks.json"
-        # tasks.json must hold valid Tasks (type field required) — the
-        # PR-merge clear path now goes through Tasks.modify() which
-        # validates on read (#1696 codex).
-        tasks_file.write_text('[{"id":"x","status":"completed","type":"spec"}]')
+        # Pre-populate _task_list with a completed entry to verify it gets cleared.
+        worker._tasks._task_list = [{"id": "x", "status": "completed", "type": "spec"}]
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        assert tasks_file.read_text() == "[]"
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert worker._tasks._task_list == []
 
     def test_approved_not_draft_no_pending_clears_state(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -13212,12 +13211,9 @@ class TestHandlePromoteMerge:
         State(fido_dir).save({"issue": 5})
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert State(fido_dir).load() == {}
 
     def test_approved_not_draft_no_pending_git_checkout_default(
@@ -13228,12 +13224,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["checkout", "main"] in calls
 
@@ -13245,12 +13238,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["pull", "origin", "main", "--ff-only"] in calls
 
@@ -13262,12 +13252,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["branch", "-d", "fix-slug"] in calls
 
@@ -13279,12 +13266,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["push", "origin", "--delete", "fix-slug"] in calls
 
@@ -13296,12 +13280,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_status = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status", mock_status),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = mock_status
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         msg = mock_status.call_args[0][0]
         assert "Merged" in msg
         assert "9" in msg
@@ -13312,14 +13293,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 1
 
     def test_approved_not_draft_no_pending_blocked_enables_auto_merge(
@@ -13329,8 +13305,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True, auto=True)
 
     def test_approved_not_draft_no_pending_blocked_returns_0(
@@ -13340,10 +13315,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_approved_with_pending_skips_merge(self, tmp_path: Path) -> None:
@@ -13351,11 +13323,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         pending = [{"id": "t1", "title": "Do work", "status": "pending"}]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=pending),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = pending
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
     def test_approved_but_draft_skips_merge(self, tmp_path: Path) -> None:
@@ -13363,22 +13333,17 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=True)
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=completed),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = completed
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
     def test_not_approved_skips_merge(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(state="COMMENTED", is_draft=False)
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
     # --- changes requested ---
@@ -13391,8 +13356,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_changes_requested_ci_failing_skips_reviewer(self, tmp_path: Path) -> None:
@@ -13404,8 +13368,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
         gh.get_required_checks.return_value = ["ci"]
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_changes_requested_ci_failing_returns_0(self, tmp_path: Path) -> None:
@@ -13417,10 +13380,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
         gh.get_required_checks.return_value = ["ci"]
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_changes_requested_returns_0(self, tmp_path: Path) -> None:
@@ -13431,10 +13391,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_changes_requested_draft_marks_ready_before_rerequest(
@@ -13447,10 +13404,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 1
         ready_call = call.pr_ready("rhencke/myrepo", 9)
         rerequest_call = call.add_pr_reviewers("rhencke/myrepo", 9, ["rhencke"])
@@ -13471,10 +13425,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 1
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
         gh.add_pr_reviewers.assert_not_called()
@@ -13487,8 +13438,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
     def test_uses_latest_review_for_changes_requested(self, tmp_path: Path) -> None:
@@ -13504,12 +13454,9 @@ class TestHandlePromoteMerge:
             "isDraft": False,
         }
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         # APPROVED is latest — should merge, not re-request
         gh.pr_merge.assert_called_once()
         gh.add_pr_reviewers.assert_not_called()
@@ -13532,12 +13479,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.get_pr.assert_called_once_with("rhencke/myrepo", 9)
 
     def test_changes_req_then_approved_merges_squash(self, tmp_path: Path) -> None:
@@ -13545,31 +13489,22 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True)
 
     def test_changes_req_then_approved_resets_tasks_json(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        tasks_file = fido_dir / "tasks.json"
-        # tasks.json must hold valid Tasks (type field required) — the
-        # PR-merge clear path now goes through Tasks.modify() which
-        # validates on read (#1696 codex).
-        tasks_file.write_text('[{"id":"x","status":"completed","type":"spec"}]')
+        # Pre-populate _task_list with a completed entry to verify it gets cleared.
+        worker._tasks._task_list = [{"id": "x", "status": "completed", "type": "spec"}]
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        assert tasks_file.read_text() == "[]"
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert worker._tasks._task_list == []
 
     def test_changes_req_then_approved_clears_state(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -13577,12 +13512,9 @@ class TestHandlePromoteMerge:
         State(fido_dir).save({"issue": 5})
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert State(fido_dir).load() == {}
 
     def test_changes_req_then_approved_git_checkout_default(
@@ -13593,12 +13525,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["checkout", "main"] in calls
 
@@ -13608,12 +13537,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["pull", "origin", "main", "--ff-only"] in calls
 
@@ -13623,12 +13549,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["branch", "-d", "fix-slug"] in calls
 
@@ -13640,12 +13563,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git", mock_git),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        worker._git = mock_git
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
         calls = [c[0][0] for c in mock_git.call_args_list]
         assert ["push", "origin", "--delete", "fix-slug"] in calls
 
@@ -13655,12 +13575,9 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_status = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status", mock_status),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = mock_status
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         msg = mock_status.call_args[0][0]
         assert "Merged" in msg
         assert "9" in msg
@@ -13671,14 +13588,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 1
 
     def test_changes_req_then_approved_blocked_enables_auto_merge(
@@ -13688,8 +13600,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True, auto=True)
 
     def test_changes_req_then_approved_blocked_returns_0(self, tmp_path: Path) -> None:
@@ -13697,10 +13608,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_latest_changes_requested_overrides_earlier_approved(
@@ -13725,8 +13633,7 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-01T08:00:00Z"}],
             "isDraft": False,
         }
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         # CHANGES_REQUESTED is latest — must not merge
         gh.pr_merge.assert_not_called()
 
@@ -13747,8 +13654,7 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
             "isDraft": False,
         }
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_changes_requested_newer_than_commit_returns_0(
@@ -13767,10 +13673,7 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
             "isDraft": False,
         }
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_changes_requested_older_than_commit_re_requests(
@@ -13792,8 +13695,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_changes_requested_older_than_commit_returns_0(
@@ -13816,10 +13718,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_changes_requested_no_submitted_at_re_requests(
@@ -13833,8 +13732,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once()
 
     def test_changes_requested_no_commits_re_requests(self, tmp_path: Path) -> None:
@@ -13854,8 +13752,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once()
 
     def test_changes_requested_newer_than_commit_logs_skip(
@@ -13876,10 +13773,7 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
             "isDraft": False,
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "skipping re-request" in caplog.text
 
@@ -13901,8 +13795,7 @@ class TestHandlePromoteMerge:
             "isDraft": False,
             "requestedReviewers": ["rhencke"],
         }
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     # --- decisive review state (APPROVED/CHANGES_REQUESTED vs COMMENTED) ---
@@ -13920,12 +13813,9 @@ class TestHandlePromoteMerge:
             "isDraft": False,
         }
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once()
 
     def test_approved_then_commented_does_not_rerequest(self, tmp_path: Path) -> None:
@@ -13941,12 +13831,9 @@ class TestHandlePromoteMerge:
             "isDraft": False,
         }
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_changes_requested_then_commented_rerequests(self, tmp_path: Path) -> None:
@@ -13964,8 +13851,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_changes_requested_then_commented_does_not_merge(
@@ -13982,8 +13868,7 @@ class TestHandlePromoteMerge:
             "commits": [],
             "isDraft": False,
         }
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
     # --- draft promote ---
@@ -13992,18 +13877,14 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_draft_no_completed_tasks_does_not_promote(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
 
     def test_draft_with_completed_tasks_calls_pr_ready(self, tmp_path: Path) -> None:
@@ -14014,8 +13895,8 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("fido.tasks.Tasks.list", return_value=completed):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = completed
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
 
     def test_draft_refuses_pr_ready_when_branch_has_no_diff(
@@ -14032,13 +13913,9 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = []
         gh.get_issue_comments.return_value = []  # no prior BLOCKED marker
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=completed),
-            patch.object(worker, "_pr_has_real_diff", return_value=False),
-        ):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = completed
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
         gh.add_pr_reviewers.assert_not_called()
         # PR stays open with a one-time BLOCKED comment.
@@ -14064,11 +13941,9 @@ class TestHandlePromoteMerge:
             {"body": "BLOCKED: ...\n<!-- fido:empty-pr-blocked -->"}
         ]
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=completed),
-            patch.object(worker, "_pr_has_real_diff", return_value=False),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = completed
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
         # No second BLOCKED comment posted.
         gh.comment_issue.assert_not_called()
@@ -14097,13 +13972,9 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_issue_comments.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=completed),
-            patch.object(worker, "_pr_has_real_diff", return_value=False),
-        ):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = completed
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
         gh.comment_issue.assert_called_once()
         assert result == 0
@@ -14114,15 +13985,15 @@ class TestHandlePromoteMerge:
         """`git diff --quiet` exit 1 means diff present → True."""
         worker, _ = self._make_worker(tmp_path)
         fake_git = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr=""))
-        with patch.object(worker, "_git", fake_git):
-            assert worker._pr_has_real_diff("origin", "fix", "main") is True
+        worker._git = fake_git
+        assert worker._pr_has_real_diff("origin", "fix", "main") is True
 
     def test_pr_has_real_diff_returns_false_on_clean_diff(self, tmp_path: Path) -> None:
         """`git diff --quiet` exit 0 means no diff → False."""
         worker, _ = self._make_worker(tmp_path)
         fake_git = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
-        with patch.object(worker, "_git", fake_git):
-            assert worker._pr_has_real_diff("origin", "fix", "main") is False
+        worker._git = fake_git
+        assert worker._pr_has_real_diff("origin", "fix", "main") is False
 
     def test_pr_has_real_diff_fails_closed_on_unexpected_error(
         self, tmp_path: Path
@@ -14132,8 +14003,8 @@ class TestHandlePromoteMerge:
         fake_git = MagicMock(
             return_value=MagicMock(returncode=128, stdout="", stderr="bad ref")
         )
-        with patch.object(worker, "_git", fake_git):
-            assert worker._pr_has_real_diff("origin", "fix", "main") is False
+        worker._git = fake_git
+        assert worker._pr_has_real_diff("origin", "fix", "main") is False
 
     def test_draft_with_completed_tasks_adds_reviewer(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -14143,8 +14014,8 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("fido.tasks.Tasks.list", return_value=completed):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = completed
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_draft_with_completed_tasks_returns_1(self, tmp_path: Path) -> None:
@@ -14155,10 +14026,8 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("fido.tasks.Tasks.list", return_value=completed):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = completed
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 1
 
     def test_draft_owner_already_requested_skips_add(self, tmp_path: Path) -> None:
@@ -14175,8 +14044,8 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("fido.tasks.Tasks.list", return_value=completed):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = completed
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_draft_pending_tasks_block_promote(self, tmp_path: Path) -> None:
@@ -14188,10 +14057,8 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
         ]
-        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = tasks_list
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
         gh.pr_ready.assert_not_called()
 
@@ -14215,10 +14082,8 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
         ]
-        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = tasks_list
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
         gh.pr_ready.assert_not_called()
 
@@ -14241,10 +14106,8 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Running", "status": "in_progress", "type": "spec"},
         ]
-        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = tasks_list
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
         gh.pr_ready.assert_not_called()
 
@@ -14267,8 +14130,8 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Running", "status": "in_progress", "type": "spec"},
         ]
-        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = tasks_list
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
     # --- CI gate on draft promotion ---
@@ -14286,8 +14149,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = self._passing_checks()
         gh.get_required_checks.return_value = ["ci / test"]
         gh.get_review_threads.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = self._completed_tasks()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_draft_promote_ci_not_passing_defers_review(self, tmp_path: Path) -> None:
@@ -14298,8 +14161,8 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = self._completed_tasks()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_draft_promote_ci_not_passing_does_not_call_pr_ready(
@@ -14312,8 +14175,8 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "FAILURE", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = self._completed_tasks()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
 
     def test_draft_promote_ci_not_passing_returns_0(self, tmp_path: Path) -> None:
@@ -14324,10 +14187,8 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = self._completed_tasks()
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_draft_promote_no_required_checks_requests_review(
@@ -14339,8 +14200,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = self._completed_tasks()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_draft_promote_uses_default_branch_for_required_checks(
@@ -14352,8 +14213,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = self._completed_tasks()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.get_required_checks.assert_called_once_with("rhencke/myrepo", "main")
 
     # --- unresolved threads gate on draft promotion ---
@@ -14373,10 +14234,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = [self._unresolved_thread()]
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = self._completed_tasks()
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
         gh.pr_ready.assert_not_called()
 
@@ -14387,8 +14246,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = [self._resolved_thread()]
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = self._completed_tasks()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
 
     def test_draft_promote_unresolved_threads_logs_deferring(
@@ -14402,13 +14261,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = [self._unresolved_thread()]
-        with (
-            patch(
-                "fido.tasks.Tasks.list",
-                return_value=self._completed_tasks(),
-            ),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._tasks._task_list = self._completed_tasks()
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "unresolved review threads" in caplog.text
 
@@ -14419,8 +14273,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
-        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = self._completed_tasks()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.get_review_threads.assert_called_once_with("rhencke", "myrepo", 9)
 
     # --- CI gate for non-draft PRs with no review yet ---
@@ -14433,8 +14287,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         gh.pr_checks.return_value = self._passing_checks()
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
     def test_non_draft_no_review_ci_not_passing_skips_review(
@@ -14447,8 +14300,7 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_non_draft_no_review_returns_0(self, tmp_path: Path) -> None:
@@ -14457,10 +14309,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         gh.pr_checks.return_value = self._passing_checks()
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_non_draft_review_already_requested_skips_ci_check(
@@ -14475,11 +14324,8 @@ class TestHandlePromoteMerge:
             "isDraft": False,
             "requestedReviewers": ["rhencke"],
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_checks.assert_not_called()
         gh.add_pr_reviewers.assert_not_called()
 
@@ -14490,11 +14336,8 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(state="COMMENTED", is_draft=False)
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_checks.assert_called_once()
 
     # --- idle / no work ---
@@ -14510,11 +14353,8 @@ class TestHandlePromoteMerge:
             "requestedReviewers": ["rhencke"],
         }
         mock_status = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status", mock_status),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker.set_status = mock_status
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         mock_status.assert_called_once_with("Napping — waiting for work", busy=False)
 
     def test_not_draft_not_approved_idle_returns_0(self, tmp_path: Path) -> None:
@@ -14527,13 +14367,8 @@ class TestHandlePromoteMerge:
             "isDraft": False,
             "requestedReviewers": ["rhencke"],
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-        ):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker.set_status = MagicMock()
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     # --- logging ---
@@ -14546,11 +14381,8 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker.set_status = MagicMock()
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "review status" in caplog.text
 
@@ -14561,12 +14393,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_git"),
-            patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._git = MagicMock()
+        worker.set_status = MagicMock()
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "merging" in caplog.text
 
@@ -14579,10 +14408,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "auto-merge" in caplog.text
 
@@ -14596,10 +14422,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(
             state="CHANGES_REQUESTED", is_draft=False
         )
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "changes requested" in caplog.text
 
@@ -14611,10 +14434,7 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "not promoting" in caplog.text
 
@@ -14630,10 +14450,8 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=completed),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._tasks._task_list = completed
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "marking ready" in caplog.text
 
@@ -14650,11 +14468,8 @@ class TestHandlePromoteMerge:
             "isDraft": False,
             "requestedReviewers": ["rhencke"],
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker.set_status = MagicMock()
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "no work" in caplog.text
 
@@ -14675,8 +14490,8 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed"},
             self._ask_task(),
         ]
-        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = tasks_list
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
 
     def test_pending_ask_draft_review_not_requested(self, tmp_path: Path) -> None:
@@ -14687,16 +14502,16 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed"},
             self._ask_task(),
         ]
-        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = tasks_list
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_pending_ask_non_draft_review_not_requested(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
-        with patch("fido.tasks.Tasks.list", return_value=[self._ask_task()]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = [self._ask_task()]
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_pending_ask_changes_requested_rerequest_skipped(
@@ -14707,8 +14522,8 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(
             state="CHANGES_REQUESTED", is_draft=False
         )
-        with patch("fido.tasks.Tasks.list", return_value=[self._ask_task()]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        worker._tasks._task_list = [self._ask_task()]
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
     def test_pending_ask_returns_zero(self, tmp_path: Path) -> None:
@@ -14719,10 +14534,8 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed"},
             self._ask_task(),
         ]
-        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 9, "fix", 5
-            )
+        worker._tasks._task_list = tasks_list
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert result == 0
 
     def test_pending_ask_logs_deferring(
@@ -14737,10 +14550,8 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed"},
             self._ask_task(),
         ]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=tasks_list),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._tasks._task_list = tasks_list
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "open questions" in caplog.text
 
@@ -14752,10 +14563,8 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
         completed = {"id": "t1", "title": "Done", "status": "completed", "type": "spec"}
         pending = {"id": "t2", "title": "Not done", "status": "pending", "type": "spec"}
-        with patch("fido.tasks.Tasks.list", return_value=[completed, pending]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 1, "branch", 1
-            )
+        worker._tasks._task_list = [completed, pending]
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 1, "branch", 1)
         assert result == 0
         gh.pr_ready.assert_not_called()
 
@@ -14767,10 +14576,8 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = {"id": "t1", "title": "Done", "status": "completed", "type": "spec"}
-        with patch("fido.tasks.Tasks.list", return_value=[completed]):
-            result = worker.handle_promote_merge(
-                fido_dir, self._repo_ctx(), 1, "branch", 1
-            )
+        worker._tasks._task_list = [completed]
+        result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 1, "branch", 1)
         assert result == 1
         gh.pr_ready.assert_called_once()
 
@@ -14787,8 +14594,8 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = []
         gh.try_enable_auto_merge.return_value = True
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
-        with patch("fido.tasks.Tasks.list", return_value=[completed]):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
+        worker._tasks._task_list = [completed]
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         gh.try_enable_auto_merge.assert_called_once_with(
             "rhencke/myrepo", 9, squash=True
         )
@@ -14807,11 +14614,8 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.try_enable_auto_merge.return_value = True
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
         gh.try_enable_auto_merge.assert_called_once_with(
             "rhencke/myrepo", 11, squash=True
         )
@@ -14829,10 +14633,8 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = []
         gh.try_enable_auto_merge.return_value = False
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[completed]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._tasks._task_list = [completed]
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         assert "auto-merge not available" in caplog.text
 
@@ -14849,10 +14651,8 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = []
         gh.try_enable_auto_merge.return_value = True
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[completed]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._tasks._task_list = [completed]
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         assert "auto-merge enabled" in caplog.text
 
@@ -14871,10 +14671,8 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = []
         gh.try_enable_auto_merge.side_effect = RuntimeError("boom")
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[completed]),
-            caplog.at_level(logging.WARNING, logger="fido"),
-        ):
+        worker._tasks._task_list = [completed]
+        with caplog.at_level(logging.WARNING, logger="fido"):
             result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         assert result == 1  # mark-ready still happened
         assert "failed to enable auto-merge" in caplog.text
@@ -14892,11 +14690,8 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
         gh.get_required_checks.return_value = ["ci"]
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "set_status"),
-        ):
-            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
+        worker.set_status = MagicMock()
+        worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
         gh.try_enable_auto_merge.assert_not_called()
 
 
@@ -14934,23 +14729,19 @@ class TestRunPromoteMergeIntegration:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_hpm = MagicMock(return_value=0)
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", mock_hpm),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = mock_hpm
+        worker.run()
         mock_hpm.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", 7)
 
     def test_run_returns_0_when_handle_promote_merge_returns_0(
@@ -14961,23 +14752,19 @@ class TestRunPromoteMergeIntegration:
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            result = worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        result = worker.run()
         assert result == 0
 
     def test_run_returns_1_when_handle_promote_merge_returns_1(
@@ -14988,23 +14775,19 @@ class TestRunPromoteMergeIntegration:
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=1),
-        ):
-            result = worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=1)
+        result = worker.run()
         assert result == 1
 
     def test_handle_promote_merge_not_called_when_execute_task_returns_true(
@@ -15016,24 +14799,20 @@ class TestRunPromoteMergeIntegration:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_hpm = MagicMock(return_value=0)
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=True),
-            patch.object(worker, "resolve_addressed_threads"),
-            patch.object(worker, "handle_promote_merge", mock_hpm),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=True)
+        worker.resolve_addressed_threads = MagicMock()
+        worker.handle_promote_merge = mock_hpm
+        worker.run()
         mock_hpm.assert_not_called()
 
 
