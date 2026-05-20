@@ -1497,36 +1497,39 @@ class Worker:
         self,
         work_dir: Path,
         gh: GitHub,
-        abort_task: AbortHandle | None = None,
         repo_name: str = "",
         registry: ActivityReporter | None = None,
-        membership: RepoMembership | None = None,
         session: PromptSession | None = None,
         session_issue: int | None = None,
-        _tasks: Tasks | None = None,
-        _state: State | None = None,
         provider_agent: ProviderAgent | None = None,
         provider: Provider | None = None,
         prompts: Prompts | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
-        provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
-        nudges: Nudges | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
-        prompt_builder: PromptBuilder = _DEFAULT_PROMPT_BUILDER,
-        provider_runner: ProviderRunner = _DEFAULT_PROVIDER_RUNNER,
-        harness_committer_factory: HarnessCommitterFactory = _DEFAULT_HARNESS_COMMITTER_FACTORY,
-        task_syncer: TaskSyncer = _DEFAULT_TASK_SYNCER,
-        clock: Clock = _DEFAULT_CLOCK,
-        reply_promise_recoverer: ReplyPromiseRecoverer = _DEFAULT_REPLY_PROMISE_RECOVERER,
         *,
+        # Required collaborators — all keyword-only, no defaults.
+        # WorkerThread._create_worker() passes the _DEFAULT_* singletons;
+        # tests inject typed fakes via the test-local Worker wrapper.
+        abort_task: AbortHandle,
+        membership: RepoMembership,
+        _tasks: Tasks,
+        _state: State,
+        nudges: Nudges,
+        provider_factory: DefaultProviderFactory,
+        prompt_builder: PromptBuilder,
+        provider_runner: ProviderRunner,
+        harness_committer_factory: HarnessCommitterFactory,
+        task_syncer: TaskSyncer,
+        clock: Clock,
+        reply_promise_recoverer: ReplyPromiseRecoverer,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
-        self._abort_task = abort_task if abort_task is not None else AbortHandle()
+        self._abort_task = abort_task
         self._repo_name = repo_name
         # Replay missed issue_comment webhooks exactly once per WorkerThread
         # lifetime (at startup).  Fix for #794 — without this, top-level PR
@@ -1538,28 +1541,21 @@ class Worker:
         # iteration; webhook events keep the cache in sync.
         self._issue_cache = issue_cache
         self._registry = registry
-        self._membership = membership if membership is not None else RepoMembership()
+        self._membership = membership
         self._session_issue: int | None = session_issue
         self._next_turn_session_mode = TurnSessionMode.REUSE
 
-        self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        self._tasks = _tasks
         # Composition root passes the registry-owned State so worker
         # writes go through the publishing-aware on_mutate hook
-        # (#1696).  Tests bypassing the registry get a bare State
-        # whose on_mutate is a no-op.
-        self._state = (
-            _state if _state is not None else State(work_dir / ".git" / "fido")
-        )
+        # (#1696).  Callers must supply an explicit State instance.
+        self._state = _state
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
-        self._nudges = nudges if nudges is not None else Nudges()
+        self._nudges = nudges
         self._dispatcher = dispatcher
-        self._provider_factory = (
-            DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
-            if provider_factory is None
-            else provider_factory
-        )
+        self._provider_factory = provider_factory
         self._state_updater: AtomicUpdater[FidoState] | None = state_updater
         self._bootstrap_session: PromptSession | None = session
         if provider is not None:
@@ -5181,6 +5177,7 @@ class WorkerThread(threading.Thread):
         # True until the first ``Worker.run()`` returns — flipped after that so
         # the one-shot startup backfill (fix #794) only fires once per thread.
         self._is_first_iteration = True
+        self._nudges = Nudges()
 
     def detach_provider(self) -> Provider | None:
         """Detach and return the owned provider for crash rescue."""
@@ -5360,18 +5357,20 @@ class WorkerThread(threading.Thread):
         return Worker(
             self.work_dir,
             self._gh,
-            self._abort_task,
             self._repo_name,
             self._registry,
-            self._membership,
             session=session,
             session_issue=self._session_issue,
-            _tasks=worker_tasks,
-            _state=worker_state,
             config=self._config,
             repo_cfg=self._repo_cfg,
-            provider_factory=self._provider_factory,
             first_iteration=self._is_first_iteration,
+            state_updater=self._state_updater,
+            abort_task=self._abort_task,
+            membership=self._membership,
+            _tasks=worker_tasks if worker_tasks is not None else Tasks(self.work_dir),
+            _state=worker_state if worker_state is not None else self._state,
+            nudges=self._nudges,
+            provider_factory=self._provider_factory,
             prompt_builder=_DEFAULT_PROMPT_BUILDER,
             provider_runner=_DEFAULT_PROVIDER_RUNNER,
             harness_committer_factory=_DEFAULT_HARNESS_COMMITTER_FACTORY,
@@ -5380,7 +5379,6 @@ class WorkerThread(threading.Thread):
             reply_promise_recoverer=_DEFAULT_REPLY_PROMISE_RECOVERER,
             dispatcher=self._dispatcher,
             issue_cache=self._issue_cache,
-            state_updater=self._state_updater,
         )
 
     def _resolve_fido_dir(self) -> Path | None:

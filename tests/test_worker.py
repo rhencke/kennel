@@ -20,8 +20,9 @@ from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
 from fido.claude import ClaudeClient
-from fido.config import Config, RepoConfig, RepoMembership
+from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.issue_cache import IssueCache, IssueNode
+from fido.nudges import Nudges
 from fido.prompts import Prompts
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
@@ -32,6 +33,7 @@ from fido.provider import (
     ProviderModel,
     TurnSessionMode,
 )
+from fido.provider_factory import DefaultProviderFactory
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -274,6 +276,39 @@ class Worker(_WorkerBase):
             kwargs["issue_cache"] = IssueCache(kwargs.get("repo_name", "test/repo"))
         if "dispatcher" not in kwargs:
             kwargs["dispatcher"] = _FakeDispatcher()
+        # Inject required collaborator defaults so individual tests only pass
+        # the params they care about.  These mirror what the production
+        # WorkerThread._create_worker() passes explicitly.
+        if "abort_task" not in kwargs:
+            kwargs["abort_task"] = AbortHandle()
+        if "membership" not in kwargs:
+            kwargs["membership"] = RepoMembership()
+        if "_tasks" not in kwargs:
+            kwargs["_tasks"] = Tasks(work_dir)
+        if "_state" not in kwargs:
+            kwargs["_state"] = State(work_dir / ".git" / "fido")
+        if "nudges" not in kwargs:
+            kwargs["nudges"] = Nudges()
+        if "provider_factory" not in kwargs:
+            kwargs["provider_factory"] = DefaultProviderFactory(
+                session_system_file=default_sub_dir() / "persona.md"
+            )
+        if "prompt_builder" not in kwargs:
+            kwargs["prompt_builder"] = worker_module._DEFAULT_PROMPT_BUILDER  # pyright: ignore[reportPrivateUsage]
+        if "provider_runner" not in kwargs:
+            kwargs["provider_runner"] = worker_module._DEFAULT_PROVIDER_RUNNER  # pyright: ignore[reportPrivateUsage]
+        if "harness_committer_factory" not in kwargs:
+            kwargs["harness_committer_factory"] = (
+                worker_module._DEFAULT_HARNESS_COMMITTER_FACTORY
+            )  # pyright: ignore[reportPrivateUsage]
+        if "task_syncer" not in kwargs:
+            kwargs["task_syncer"] = worker_module._DEFAULT_TASK_SYNCER  # pyright: ignore[reportPrivateUsage]
+        if "clock" not in kwargs:
+            kwargs["clock"] = worker_module._DEFAULT_CLOCK  # pyright: ignore[reportPrivateUsage]
+        if "reply_promise_recoverer" not in kwargs:
+            kwargs["reply_promise_recoverer"] = (
+                worker_module._DEFAULT_REPLY_PROMISE_RECOVERER
+            )  # pyright: ignore[reportPrivateUsage]
         super().__init__(work_dir, gh, *args, **kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
@@ -2616,6 +2651,20 @@ class TestAssertGitIdentity:
             _WorkerBase(
                 tmp_path,
                 gh,
+                abort_task=AbortHandle(),
+                membership=RepoMembership(),
+                _tasks=Tasks(tmp_path),
+                _state=State(tmp_path / ".git" / "fido"),
+                nudges=Nudges(),
+                provider_factory=DefaultProviderFactory(
+                    session_system_file=default_sub_dir() / "persona.md"
+                ),
+                prompt_builder=worker_module._DEFAULT_PROMPT_BUILDER,  # pyright: ignore[reportPrivateUsage]
+                provider_runner=worker_module._DEFAULT_PROVIDER_RUNNER,  # pyright: ignore[reportPrivateUsage]
+                harness_committer_factory=worker_module._DEFAULT_HARNESS_COMMITTER_FACTORY,  # pyright: ignore[reportPrivateUsage]
+                task_syncer=worker_module._DEFAULT_TASK_SYNCER,  # pyright: ignore[reportPrivateUsage]
+                clock=worker_module._DEFAULT_CLOCK,  # pyright: ignore[reportPrivateUsage]
+                reply_promise_recoverer=worker_module._DEFAULT_REPLY_PROMISE_RECOVERER,  # pyright: ignore[reportPrivateUsage]
                 dispatcher=_FakeDispatcher(),
                 issue_cache=IssueCache("test/repo"),
             ),

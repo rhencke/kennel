@@ -3059,7 +3059,7 @@ class TestWorkerSleep:
     """
 
     def test_sleep_calls_time_sleep(self, tmp_path: Path) -> None:
-        from fido.worker import Worker as _Worker
+        from tests.test_worker import Worker as _Worker
 
         sleep_calls: list[float] = []
 
