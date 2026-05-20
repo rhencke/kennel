@@ -475,9 +475,12 @@ def _claim_reply_outbox_effects(
     *,
     delivery_id: str,
     promise_ids: Iterable[str],
+    _store_factory: Callable[..., Any] | None = None,
 ) -> None:
     """Durably claim every visible-reply outbox effect before posting."""
-    store = FidoStore(repo_cfg.work_dir)
+    store = (_store_factory if _store_factory is not None else FidoStore)(
+        repo_cfg.work_dir
+    )
     for promise_id in promise_ids:
         promise = store.promise(promise_id)
         assert promise is not None, (
@@ -3027,36 +3030,30 @@ def create_task(
     dispatcher.launch_sync()
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
-        if _reorder_background_fn is _reorder_tasks_background:
-            # Production path — _reorder_tasks_background requires a real
-            # registry to bookkeep the inbox.  Without one, skip the rescope
-            # entirely and log loudly (#1336): silently dropping the rescope
-            # is exactly the fail-soft pattern that produced the original
-            # bug.
-            if registry is None:  # pragma: no cover
-                log.warning(
-                    "create_task: thread task created without registry — "
-                    "skipping background rescope (#1336)",
-                )
-            else:
-                registry.enter_untriaged(repo_cfg.name)
-                try:
-                    _reorder_background_fn(
-                        repo_cfg.work_dir,
-                        commit_summary,
-                        config,
-                        gh,
-                        repo_cfg,
-                        registry,
-                        _release_untriaged_on_finish=True,
-                    )
-                except Exception:
-                    registry.exit_untriaged(repo_cfg.name)
-                    raise
-        else:
-            _reorder_background_fn(  # pragma: no cover
-                repo_cfg.work_dir, commit_summary, config, gh, repo_cfg, registry
+        # Bookkeep the inbox regardless of which background function is used.
+        # Without a registry, skip the rescope entirely and log loudly
+        # (#1336): silently dropping the rescope is exactly the fail-soft
+        # pattern that produced the original bug.
+        if registry is None:  # pragma: no cover
+            log.warning(
+                "create_task: thread task created without registry — "
+                "skipping background rescope (#1336)",
             )
+        else:
+            registry.enter_untriaged(repo_cfg.name)
+            try:
+                _reorder_background_fn(
+                    repo_cfg.work_dir,
+                    commit_summary,
+                    config,
+                    gh,
+                    repo_cfg,
+                    registry,
+                    _release_untriaged_on_finish=True,
+                )
+            except Exception:
+                registry.exit_untriaged(repo_cfg.name)
+                raise
     if registry is not None:  # pragma: no cover
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task  # pragma: no cover

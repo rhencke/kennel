@@ -34,6 +34,7 @@ from fido.color import (
 from fido.config import RepoConfig, default_sub_dir
 from fido.provider import (
     ProviderID,
+    ProviderPalette,
     ProviderPressureStatus,
     palette_for,
 )
@@ -1047,7 +1048,10 @@ def _provider_status_summary(status: ProviderPressureStatus) -> str:
 
 
 def _styled_provider_status(
-    status: ProviderPressureStatus, *, env: Mapping[str, str] | None = None
+    status: ProviderPressureStatus,
+    *,
+    env: Mapping[str, str] | None = None,
+    _palette_for: Callable[..., ProviderPalette | None] | None = None,
 ) -> str:
     base_style = _provider_status_style(status)
     summary = _provider_status_summary(status)
@@ -1058,7 +1062,9 @@ def _styled_provider_status(
         return color(base_style, summary, env=env)
     # Highlight the provider name (prefix of the summary) with the provider's
     # bright fg so each provider is visually identifiable in the limits line.
-    palette = palette_for(status.provider)
+    palette = (_palette_for if _palette_for is not None else palette_for)(
+        status.provider
+    )
     provider_token = str(status.provider)
     if palette is not None and summary.startswith(provider_token):
         tail = summary[len(provider_token) :]
@@ -1067,7 +1073,10 @@ def _styled_provider_status(
 
 
 def _styled_repo_provider(
-    repo: RepoStatus, *, env: Mapping[str, str] | None = None
+    repo: RepoStatus,
+    *,
+    env: Mapping[str, str] | None = None,
+    _palette_for: Callable[..., ProviderPalette | None] | None = None,
 ) -> str:
     """Render the repo's provider label without repeating global limits details."""
     provider_str = str(repo.provider)
@@ -1078,7 +1087,7 @@ def _styled_repo_provider(
             # Warning/paused state wins over identity color — same precedence
             # as the global limits line in _styled_provider_status.
             return color(base_style, provider_str, env=env)
-    palette = palette_for(repo.provider)
+    palette = (_palette_for if _palette_for is not None else palette_for)(repo.provider)
     if palette is not None:
         return wrap_raw(rgb_fg(*palette.bright_fg), provider_str, env=env)
     return provider_str

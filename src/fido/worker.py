@@ -980,7 +980,13 @@ def _assert_ci_failure_matches_oracle(
     check_name: str,
     state: str,
     run_id: str,
+    _pick_next_task_fn: Callable[..., Any] | None = None,
 ) -> None:
+    _pick_fn = (
+        _pick_next_task_fn
+        if _pick_next_task_fn is not None
+        else ci_oracle.pick_next_task
+    )
     order, rows = _ci_oracle_task_rows(task_list)
     new_task = len(order) + 1
     result, created_task = ci_oracle.record_ci_failure(
@@ -993,7 +999,7 @@ def _assert_ci_failure_matches_oracle(
     )
     store_order, next_rows = result
     _store, next_order = store_order
-    picked = ci_oracle.pick_next_task(next_order, next_rows)
+    picked = _pick_fn(next_order, next_rows)
     if picked != created_task:
         raise AssertionError(
             "ci_task_lifecycle oracle: admitted CI failure was not first pickup"
@@ -1295,6 +1301,11 @@ class Worker:
         first_iteration: bool = False,
         nudges: Nudges | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
+        _build_prompt: Callable[..., None] | None = None,
+        _provider_run: Callable[..., Any] | None = None,
+        _harness_committer_cls: type | None = None,
+        _sync_tasks: Callable[..., None] | None = None,
+        _sleep_fn: Callable[[float], None] | None = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
@@ -1355,6 +1366,19 @@ class Worker:
             self._provider = None
         if self._provider is not None:
             self._bootstrap_session = self._provider.agent.session
+        self._build_prompt = (
+            _build_prompt if _build_prompt is not None else build_prompt
+        )
+        self._provider_run = (
+            _provider_run if _provider_run is not None else provider_run
+        )
+        self._harness_committer_cls = (
+            _harness_committer_cls
+            if _harness_committer_cls is not None
+            else HarnessCommitter
+        )
+        self._sync_tasks = _sync_tasks if _sync_tasks is not None else tasks.sync_tasks
+        self._sleep_fn = _sleep_fn if _sleep_fn is not None else time.sleep
 
     def _ensure_provider(self) -> Provider:
         """Return the owned provider, creating the configured provider if needed."""
@@ -2865,10 +2889,9 @@ class Worker:
     _PUSH_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)
 
     def _sleep(self, seconds: float) -> None:
-        """Sleep for *seconds*.  Extracted as an instance method so tests can
-        patch it via ``patch.object`` without touching the global
-        ``time.sleep``."""
-        time.sleep(seconds)
+        """Sleep for *seconds*.  Injectable via ``_sleep_fn`` constructor
+        parameter so tests can substitute a fake without patching."""
+        self._sleep_fn(seconds)
 
     def _push_with_retry(self, remote: str, slug: str) -> bool:
         """Push with exponential backoff, returning True on success.
@@ -3053,7 +3076,7 @@ class Worker:
         )
         with self._state.modify() as state:
             state.pop("current_task_id", None)
-        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+        self._sync_tasks(self.work_dir, self.gh, blocking=True)
         self._delete_leaked_task_comments(
             repo_ctx.repo,
             pr_number,
@@ -3711,7 +3734,7 @@ class Worker:
             parent_repo=repo_ctx.repo,
         )
         context = f"{active_ctx}\n\n" + "\n".join(context_parts)
-        build_prompt(fido_dir, "task", context, labels=issue_labels)
+        self._build_prompt(fido_dir, "task", context, labels=issue_labels)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         # Snapshot fido-authored PR comments so we can detect and delete any
         # improvised top-level BLOCKED/leak comments this task turn posts
@@ -3735,13 +3758,13 @@ class Worker:
                 "task no longer current after webhook turn admission — restarting loop"
             )
             return True
-        harness_committer = HarnessCommitter(
+        harness_committer = self._harness_committer_cls(
             self.work_dir,
             RealProcessRunner(),
             decision_oracle=RealDecisionOracle(),
             commit_oracle=RealCommitOracle(),
         )
-        run_outcome = provider_run(
+        run_outcome = self._provider_run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -3920,7 +3943,7 @@ class Worker:
                     "task no longer current after webhook turn admission — stopping"
                 )
                 return True
-            run_outcome = provider_run(
+            run_outcome = self._provider_run(
                 fido_dir,
                 agent=self._provider_agent,
                 model=self._provider_agent.work_model,

@@ -12,7 +12,7 @@ import io
 import queue
 from pathlib import Path
 from typing import Never
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from frozendict import frozendict
@@ -172,11 +172,11 @@ class TestProviderTryPreemptWorker:
         """Caller not a webhook → no cancel, returns False (provider.py:486)."""
         provider.set_thread_kind("worker")
         try:
-            with patch("fido.provider.get_talker", return_value=None):
-                fired, _kind = provider.try_preempt_worker(
-                    repo_name="owner/repo",
-                    cancel_fn=MagicMock(),
-                )
+            fired, _kind = provider.try_preempt_worker(
+                repo_name="owner/repo",
+                cancel_fn=MagicMock(),
+                _get_talker=lambda r: None,
+            )
             assert fired is False
         finally:
             provider.set_thread_kind(None)
@@ -184,12 +184,12 @@ class TestProviderTryPreemptWorker:
     def test_returns_false_when_no_current_holder(self) -> None:
         provider.set_thread_kind("webhook")
         try:
-            with patch("fido.provider.get_talker", return_value=None):
-                cancel = MagicMock()
-                fired, kind = provider.try_preempt_worker(
-                    repo_name="owner/repo",
-                    cancel_fn=cancel,
-                )
+            cancel = MagicMock()
+            fired, kind = provider.try_preempt_worker(
+                repo_name="owner/repo",
+                cancel_fn=cancel,
+                _get_talker=lambda r: None,
+            )
             assert fired is False
             assert kind is None
             cancel.assert_not_called()
@@ -230,8 +230,7 @@ class TestOwnedSessionPreemptWorker:
             subprocess_pid=None,
             started_at=provider.talker_now(),
         )
-        with patch("fido.provider.get_talker", return_value=worker_talker):
-            assert session.preempt_worker() is True
+        assert session.preempt_worker(_get_talker=lambda r: worker_talker) is True
         assert len(session.cancels) == 1  # type: ignore[attr-defined]
 
     def test_returns_false_when_holder_is_webhook(self) -> None:
@@ -244,8 +243,7 @@ class TestOwnedSessionPreemptWorker:
             subprocess_pid=None,
             started_at=provider.talker_now(),
         )
-        with patch("fido.provider.get_talker", return_value=webhook_talker):
-            assert session.preempt_worker() is False
+        assert session.preempt_worker(_get_talker=lambda r: webhook_talker) is False
         assert session.cancels == []  # type: ignore[attr-defined]
 
     def test_returns_false_when_repo_name_is_none(self) -> None:
@@ -360,8 +358,7 @@ class TestStatusFallbacks:
             window_name="hourly",
             pressure=0.5,
         )
-        with patch("fido.status.palette_for", return_value=None):
-            result = _styled_provider_status(status)
+        result = _styled_provider_status(status, _palette_for=lambda p: None)
         assert "claude-code" in result
 
     def test_styled_repo_provider_no_palette(self) -> None:
@@ -370,8 +367,7 @@ class TestStatusFallbacks:
         from fido.status import _styled_repo_provider
 
         repo = self._make_repo()
-        with patch("fido.status.palette_for", return_value=None):
-            result = _styled_repo_provider(repo)  # type: ignore[arg-type]
+        result = _styled_repo_provider(repo, _palette_for=lambda p: None)  # type: ignore[arg-type]
         assert "claude-code" in result
 
     def test_should_show_worker_line_when_paused(self) -> None:
@@ -388,14 +384,9 @@ class TestStatusFallbacks:
                 pressure=1.0,
             ),
         )
-        # provider_status.paused requires level == "paused"; force it
-        # via attribute substitution since the dataclass is frozen.
-        with patch.object(
-            type(repo.provider_status),
-            "paused",
-            new_callable=lambda: True,  # type: ignore[union-attr]
-        ):
-            assert _should_show_worker_line(repo) is True  # type: ignore[arg-type]
+        # pressure=1.0 >= PROVIDER_PRESSURE_PAUSE_THRESHOLD (0.95) so
+        # provider_status.paused is already True without any substitution.
+        assert _should_show_worker_line(repo) is True  # type: ignore[arg-type]
 
     def test_format_worker_thread_line_waiting_fallback(self) -> None:
         """The fallback ``"waiting for work"`` line fires when no
@@ -833,12 +824,16 @@ class TestCodexSpawnAppServer:
         bidirectional pipes (codex.py:147)."""
         from fido import codex as codex_mod
 
+        popen_calls: list[list[str]] = []
         sentinel = MagicMock()
-        with patch.object(codex_mod.subprocess, "Popen", return_value=sentinel) as p:
-            result = codex_mod._spawn_app_server(cwd=tmp_path)
+
+        def fake_popen(cmd: list[str], **_kw: object) -> object:
+            popen_calls.append(cmd)
+            return sentinel
+
+        result = codex_mod._spawn_app_server(cwd=tmp_path, _popen=fake_popen)
         assert result is sentinel
-        cmd = p.call_args.args[0]
-        assert cmd[:3] == ["codex", "app-server", "--listen"]
+        assert popen_calls[0][:3] == ["codex", "app-server", "--listen"]
 
 
 class TestCodexAppServerErrorPaths:
@@ -1187,22 +1182,18 @@ class TestCopilotCLIOwnerMore:
 
     def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
         # copilotcli.py:975-977 — get_talker None or wrong kind.
-        from fido import provider as provider_module
-
         session = self._build_session(tmp_path)
-        with patch.object(provider_module, "get_talker", return_value=None):
-            assert session.owner is None
+        session._get_talker = lambda r: None  # type: ignore[attr-defined]
+        assert session.owner is None  # type: ignore[union-attr]
 
     def test_owner_returns_none_when_no_thread_matches(self, tmp_path: Path) -> None:
         # copilotcli.py:978-981 — talker.kind == worker but thread_id absent.
-        from fido import provider as provider_module
-
         session = self._build_session(tmp_path)
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = -1
-        with patch.object(provider_module, "get_talker", return_value=fake_talker):
-            assert session.owner is None
+        session._get_talker = lambda r: fake_talker  # type: ignore[attr-defined]
+        assert session.owner is None  # type: ignore[union-attr]
 
     def test_owner_returns_thread_name_when_thread_id_matches(
         self, tmp_path: Path
@@ -1210,15 +1201,13 @@ class TestCopilotCLIOwnerMore:
         # copilotcli.py:980 — return t.name when ident matches.
         import threading
 
-        from fido import provider as provider_module
-
         session = self._build_session(tmp_path)
         current = threading.current_thread()
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = current.ident
-        with patch.object(provider_module, "get_talker", return_value=fake_talker):
-            assert session.owner == current.name
+        session._get_talker = lambda r: fake_talker  # type: ignore[attr-defined]
+        assert session.owner == current.name  # type: ignore[union-attr]
 
 
 class TestCopilotCLIOwner:
@@ -1456,23 +1445,18 @@ class TestCodexSessionMoreBranches:
     def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
         # codex.py:701 — owner returns None when get_talker returns None
         # (or talker.kind != "worker").
-        from fido import provider as provider_module
-
         fake = _FakeAppServerForCoverage()
         session = self._build_session(tmp_path, fake)
         # _repo_name is None by default (we didn't set it), so _repo_name is None
         # short-circuits.  Set it manually so we can exercise the get_talker
         # None branch (line 700-701).
         session._repo_name = "test/repo"  # type: ignore[attr-defined]
-        # Ensure no talker is registered for this repo.
-        with patch.object(provider_module, "get_talker", return_value=None):
-            assert session.owner is None
+        session._get_talker = lambda r: None  # type: ignore[attr-defined]
+        assert session.owner is None  # type: ignore[union-attr]
 
     def test_owner_returns_none_when_no_thread_matches(self, tmp_path: Path) -> None:
         # codex.py:702-705 — owner walks threading.enumerate() and returns
         # None when no thread.ident matches talker.thread_id.
-        from fido import provider as provider_module
-
         fake = _FakeAppServerForCoverage()
         session = self._build_session(tmp_path, fake)
         session._repo_name = "test/repo"  # type: ignore[attr-defined]
@@ -1480,8 +1464,8 @@ class TestCodexSessionMoreBranches:
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = -1  # no real thread has this ident
-        with patch.object(provider_module, "get_talker", return_value=fake_talker):
-            assert session.owner is None
+        session._get_talker = lambda r: fake_talker  # type: ignore[attr-defined]
+        assert session.owner is None  # type: ignore[union-attr]
 
     def test_consume_until_result_raises_provider_error_on_error_notification(
         self, tmp_path: Path
@@ -1653,10 +1637,10 @@ class TestWorkerHandleQueuedComment:
         action_stub.thread = {"comment_id": 42}
         action_stub.reply_to = {"comment_id": 42}
         action_stub.context = None
-        with patch.object(worker, "_queued_comment_action", return_value=action_stub):
-            worker._handle_queued_comment(  # type: ignore[attr-defined]
-                store, self._make_queued_record(), repo_ctx
-            )
+        worker._queued_comment_action = lambda *a, **kw: action_stub  # type: ignore[attr-defined]
+        worker._handle_queued_comment(  # type: ignore[attr-defined]
+            store, self._make_queued_record(), repo_ctx
+        )
         store.complete_pr_comment.assert_called_with("q1")
 
 
@@ -1749,20 +1733,19 @@ class TestEventsCreateTaskExitUntriaged:
         def boom(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
             raise RuntimeError("explode")
 
-        with patch.object(events, "_reorder_tasks_background", new=boom):
-            with pytest.raises(RuntimeError, match="explode"):
-                events.create_task(
-                    "prompt",
-                    config,
-                    repo_cfg,
-                    gh,
-                    thread=thread,
-                    registry=registry,
-                    dispatcher=_FakeDispatcher(),
-                    _reorder_background_fn=boom,
-                    _get_commit_summary_fn=lambda wd: "summary",
-                    _tasks=tasks,
-                )
+        with pytest.raises(RuntimeError, match="explode"):
+            events.create_task(
+                "prompt",
+                config,
+                repo_cfg,
+                gh,
+                thread=thread,
+                registry=registry,
+                dispatcher=_FakeDispatcher(),
+                _reorder_background_fn=boom,
+                _get_commit_summary_fn=lambda wd: "summary",
+                _tasks=tasks,
+            )
         registry.enter_untriaged.assert_called_once_with("test/repo")
         registry.exit_untriaged.assert_called_once_with("test/repo")
 
@@ -1771,15 +1754,50 @@ class TestWorkerExecuteTaskBranches:
     """Cover several leaf branches inside Worker.execute_task that the
     main test_worker.py suite doesn't exercise."""
 
+    class _FakeTasks:
+        """Minimal Tasks stand-in for execute_task tests."""
+
+        def __init__(self, task_list: list[dict]) -> None:
+            self._task_list = task_list
+
+        def list(self) -> list[dict]:
+            return list(self._task_list)
+
+        def update(self, task_id: str, status: object) -> bool:  # noqa: ARG002
+            return True
+
+        def complete_with_resolve(  # noqa: ARG002
+            self, task_id: str, gh: object, **kw: object
+        ) -> None:
+            pass
+
     @staticmethod
-    def _make_worker(tmp_path: Path) -> object:
+    def _make_worker(
+        tmp_path: Path,
+        task_list: list[dict] | None = None,
+        *,
+        build_prompt: object = None,
+        provider_run: object = None,
+        harness_committer_cls: object = None,
+        sync_tasks: object = None,
+    ) -> tuple[object, object]:
         from tests.test_worker import Worker
 
+        fake_tasks = TestWorkerExecuteTaskBranches._FakeTasks(task_list or [])
         gh = MagicMock()
         gh.find_closed_prs_as_context.return_value = []
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
         gh.get_pr.return_value = {"title": "", "body": ""}
-        return Worker(tmp_path, gh), gh
+        worker = Worker(
+            tmp_path,
+            gh,
+            _tasks=fake_tasks,
+            _build_prompt=build_prompt or (lambda *a, **k: None),
+            _provider_run=provider_run or (lambda *a, **k: ("sid", "")),
+            _harness_committer_cls=harness_committer_cls,
+            _sync_tasks=sync_tasks or (lambda *a, **k: None),
+        )
+        return worker, gh
 
     @staticmethod
     def _repo_ctx() -> object:
@@ -1821,57 +1839,30 @@ class TestWorkerExecuteTaskBranches:
     ) -> None:
         # worker.py:3128-3132 — _admit_worker_turn returns False → reset
         # task to PENDING + clear current_task_id + return True.
-        worker, _ = self._make_worker(tmp_path)
+        task = {"id": "t1", "title": "feature", "status": "pending", "type": "spec"}
+        worker, _ = self._make_worker(tmp_path, [task])
         fido_dir = self._fido_dir(tmp_path)
-        task = {
-            "id": "t1",
-            "title": "feature",
-            "status": "pending",
-            "type": "spec",
-        }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch.object(worker, "_admit_worker_turn", return_value=False),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-        ):
-            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        worker.set_status = lambda *a, **k: None  # type: ignore[attr-defined]
+        worker._admit_worker_turn = lambda *a, **k: False  # type: ignore[attr-defined]
+        worker._git = self._git_with_new_commits()  # type: ignore[attr-defined]
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")  # type: ignore[union-attr]
         assert result is True
 
     def test_task_no_longer_current_after_admission(self, tmp_path: Path) -> None:
         # worker.py:3136-3140 — _task_still_current False after admit returns True.
-        worker, _ = self._make_worker(tmp_path)
+        task = {"id": "t1", "title": "feature", "status": "pending", "type": "spec"}
+        worker, _ = self._make_worker(tmp_path, [task])
         fido_dir = self._fido_dir(tmp_path)
-        task = {
-            "id": "t1",
-            "title": "feature",
-            "status": "pending",
-            "type": "spec",
-        }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch.object(worker, "_admit_worker_turn", return_value=True),
-            patch.object(worker, "_task_still_current", return_value=False),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-        ):
-            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        worker.set_status = lambda *a, **k: None  # type: ignore[attr-defined]
+        worker._admit_worker_turn = lambda *a, **k: True  # type: ignore[attr-defined]
+        worker._task_still_current = lambda *a, **k: False  # type: ignore[attr-defined]
+        worker._git = self._git_with_new_commits()  # type: ignore[attr-defined]
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")  # type: ignore[union-attr]
         assert result is True
 
     def test_abort_active_after_provider_run_cleans_up(self, tmp_path: Path) -> None:
         # Inside the sentinel loop, abort active for task → cleanup + return True.
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
-        task = {
-            "id": "t1",
-            "title": "feature",
-            "status": "pending",
-            "type": "spec",
-        }
+        task = {"id": "t1", "title": "feature", "status": "pending", "type": "spec"}
         # First abort check (pre-loop) returns False; second (in-loop) returns True.
         active_responses = iter([False, True])
 
@@ -1882,25 +1873,22 @@ class TestWorkerExecuteTaskBranches:
             def clear(self) -> None:
                 pass
 
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch.object(worker, "_admit_worker_turn", return_value=True),
-            patch.object(worker, "_task_still_current", return_value=True),
-            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_cleanup_aborted_task"),
-            patch("fido.worker.build_prompt"),
-            # Empty output → no sentinel → nudge → yield → admit → abort check
-            patch("fido.worker.provider_run", return_value=("sid", "")),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch.object(worker, "_abort_task", _AbortStub()),
-        ):
-            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        worker, _ = self._make_worker(tmp_path, [task])
+        fido_dir = self._fido_dir(tmp_path)
+        worker.set_status = lambda *a, **k: None  # type: ignore[attr-defined]
+        worker._admit_worker_turn = lambda *a, **k: True  # type: ignore[attr-defined]
+        worker._task_still_current = lambda *a, **k: True  # type: ignore[attr-defined]
+        worker._provider_turn_was_preempted = lambda *a, **k: False  # type: ignore[attr-defined]
+        worker._cleanup_aborted_task = lambda *a, **k: None  # type: ignore[attr-defined]
+        # Empty output → no sentinel → nudge → yield → admit → abort check
+        worker._git = self._git_with_new_commits()  # type: ignore[attr-defined]
+        worker._abort_task = _AbortStub()  # type: ignore[attr-defined]
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")  # type: ignore[union-attr]
         assert result is True
 
     @staticmethod
     def _git_no_new_commits() -> object:
-        """Mock _git so rev-parse HEAD always returns the SAME SHA — drives
+        """Fake _git so rev-parse HEAD always returns the SAME SHA — drives
         the retry loop where head_before == head_after."""
 
         def side_effect(args: object, **_kw: object) -> object:
@@ -1917,19 +1905,14 @@ class TestWorkerExecuteTaskBranches:
     def _setup_retry_loop(self, tmp_path: Path) -> object:
         """Common setup for tests that exercise the head_before == head_after
         retry loop in execute_task."""
-        worker, _ = self._make_worker(tmp_path)
+        task = {"id": "t1", "title": "feature", "status": "pending", "type": "spec"}
+        worker, _ = self._make_worker(tmp_path, [task])
         fido_dir = self._fido_dir(tmp_path)
-        task = {
-            "id": "t1",
-            "title": "feature",
-            "status": "pending",
-            "type": "spec",
-        }
         return worker, fido_dir, task
 
     def test_retry_abort_active_cleans_and_returns_true(self, tmp_path: Path) -> None:
         # Inside the sentinel loop, abort active → cleanup + return True.
-        worker, fido_dir, task = self._setup_retry_loop(tmp_path)
+        worker, fido_dir, _task = self._setup_retry_loop(tmp_path)
         # pre-loop abort check (line 3229): False; in-loop abort check: True.
         abort_responses = iter([False, True])
 
@@ -1940,45 +1923,30 @@ class TestWorkerExecuteTaskBranches:
             def clear(self) -> None:
                 pass
 
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch.object(worker, "_admit_worker_turn", return_value=True),
-            patch.object(worker, "_task_still_current", return_value=True),
-            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_cleanup_aborted_task"),
-            patch("fido.worker.build_prompt"),
-            # Empty output → no sentinel → nudge → yield → admit → abort check
-            patch("fido.worker.provider_run", return_value=("sid", "")),
-            patch.object(worker, "_git", self._git_no_new_commits()),
-            patch.object(worker, "_abort_task", _AbortStub()),
-        ):
-            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        worker.set_status = lambda *a, **k: None  # type: ignore[attr-defined]
+        worker._admit_worker_turn = lambda *a, **k: True  # type: ignore[attr-defined]
+        worker._task_still_current = lambda *a, **k: True  # type: ignore[attr-defined]
+        worker._provider_turn_was_preempted = lambda *a, **k: False  # type: ignore[attr-defined]
+        worker._cleanup_aborted_task = lambda *a, **k: None  # type: ignore[attr-defined]
+        # Empty output → no sentinel → nudge → yield → admit → abort check
+        worker._git = self._git_no_new_commits()  # type: ignore[attr-defined]
+        worker._abort_task = _AbortStub()  # type: ignore[attr-defined]
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")  # type: ignore[union-attr]
         assert result is True
 
     def test_retry_task_no_longer_current_returns_true(self, tmp_path: Path) -> None:
         # Inside the sentinel loop, _task_still_current False → return True.
-        worker, fido_dir, task = self._setup_retry_loop(tmp_path)
+        worker, fido_dir, _task = self._setup_retry_loop(tmp_path)
         # First _task_still_current (pre-loop line 3232): True.
         # Second (in-loop): False.
         current_responses = iter([True, False])
-
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch.object(worker, "_admit_worker_turn", return_value=True),
-            patch.object(
-                worker,
-                "_task_still_current",
-                side_effect=lambda _fd, _tid: next(current_responses),
-            ),
-            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch("fido.worker.build_prompt"),
-            # Empty output → no sentinel → nudge → yield → admit → task check
-            patch("fido.worker.provider_run", return_value=("sid", "")),
-            patch.object(worker, "_git", self._git_no_new_commits()),
-        ):
-            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        worker.set_status = lambda *a, **k: None  # type: ignore[attr-defined]
+        worker._admit_worker_turn = lambda *a, **k: True  # type: ignore[attr-defined]
+        worker._task_still_current = lambda _fd, _tid: next(current_responses)  # type: ignore[attr-defined]
+        worker._provider_turn_was_preempted = lambda *a, **k: False  # type: ignore[attr-defined]
+        # Empty output → no sentinel → nudge → yield → admit → task check
+        worker._git = self._git_no_new_commits()  # type: ignore[attr-defined]
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")  # type: ignore[union-attr]
         assert result is True
 
     def test_thread_lineage_appends_related_comment_ids(self, tmp_path: Path) -> None:
@@ -1986,8 +1954,6 @@ class TestWorkerExecuteTaskBranches:
         # "Related thread comment_ids:" context line.
         from fido.rocq.commit_result import CommitSuccess
 
-        worker, _ = self._make_worker(tmp_path)
-        fido_dir = self._fido_dir(tmp_path)
         task = {
             "id": "t1",
             "title": "Reply to comment",
@@ -2004,19 +1970,26 @@ class TestWorkerExecuteTaskBranches:
             '{"turn_outcome":"commit-task-complete","summary":"Reply to comment"}'
         )
         mock_build = MagicMock()
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[task]),
-            patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_run", return_value=("sid", sentinel)),
-            patch.object(worker, "_git", self._git_with_new_commits()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
-            patch.object(worker, "ensure_pushed", return_value=True),
-            patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
-        ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
-            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        class _FakeHC:
+            def __init__(self, *_a: object, **_k: object) -> None:
+                pass
+
+            def commit(self, *_a: object, **_k: object) -> object:
+                return CommitSuccess(sha="abc123")
+
+        worker, _ = self._make_worker(
+            tmp_path,
+            [task],
+            build_prompt=mock_build,
+            provider_run=lambda *a, **k: ("sid", sentinel),
+            harness_committer_cls=_FakeHC,
+        )
+        fido_dir = self._fido_dir(tmp_path)
+        worker.set_status = lambda *a, **k: None  # type: ignore[attr-defined]
+        worker._git = self._git_with_new_commits()  # type: ignore[attr-defined]
+        worker.ensure_pushed = lambda *a, **k: True  # type: ignore[attr-defined]
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")  # type: ignore[union-attr]
         _, _, context = mock_build.call_args.args
         assert "Related thread comment_ids" in context
         assert "10" in context and "20" in context and "30" in context
@@ -2027,19 +2000,19 @@ class TestWorkerOracleAssertion:
     (worker.py:849-852)."""
 
     def test_raises_when_oracle_pick_disagrees(self) -> None:
-        from fido import worker as worker_module
         from fido.worker import _assert_ci_failure_matches_oracle
 
         task_list: list[dict] = []
-        # Patch ci_oracle.pick_next_task to return a value that does NOT
+        # Inject a fake pick_next_task that returns a value that does NOT
         # match the just-admitted CI failure → fires the assertion.
-        with patch.object(
-            worker_module.ci_oracle, "pick_next_task", return_value="mismatched-task"
-        ):
-            with pytest.raises(AssertionError, match="not first pickup"):
-                _assert_ci_failure_matches_oracle(
-                    task_list, "tests", "FAILURE", "run-1"
-                )
+        with pytest.raises(AssertionError, match="not first pickup"):
+            _assert_ci_failure_matches_oracle(
+                task_list,
+                "tests",
+                "FAILURE",
+                "run-1",
+                _pick_next_task_fn=lambda *a, **k: "mismatched-task",
+            )
 
 
 class TestNudgeKindOracle:
@@ -2266,13 +2239,13 @@ class TestEventsClaimReplyOutboxEffectsDelivered:
             def reply_outbox_effect(self, _pid: str) -> object:
                 return existing
 
-        with patch.object(events, "FidoStore", _StoreStub):
-            with pytest.raises(RuntimeError, match="missing artifact row"):
-                events._claim_reply_outbox_effects(
-                    repo_cfg,
-                    delivery_id="d1",
-                    promise_ids=["promise-1"],
-                )
+        with pytest.raises(RuntimeError, match="missing artifact row"):
+            events._claim_reply_outbox_effects(
+                repo_cfg,
+                delivery_id="d1",
+                promise_ids=["promise-1"],
+                _store_factory=_StoreStub,
+            )
 
 
 class TestEventsIngressFsmCollapsed:
@@ -2508,27 +2481,26 @@ class TestCodexLeafBranches:
         # thread.name when ident matches.
         import threading
 
-        from fido import provider as provider_module
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
         system_file = tmp_path / "system.md"
         system_file.write_text("")
-        session = CodexSession(
-            system_file,
-            work_dir=tmp_path,
-            model=ProviderModel("gpt-5.5", "medium"),
-            repo_name="test/repo",
-            client_factory=lambda **_: _FakeAppServerForCoverage(),
-        )
         # Use the running test thread's ident so threading.enumerate()
         # finds a match.
         current = threading.current_thread()
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = current.ident
-        with patch.object(provider_module, "get_talker", return_value=fake_talker):
-            assert session.owner == current.name
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            repo_name="test/repo",
+            client_factory=lambda **_: _FakeAppServerForCoverage(),
+            _get_talker=lambda r: fake_talker,
+        )
+        assert session.owner == current.name
 
     def test_poll_completed_turn_returns_none_on_timeout(self, tmp_path: Path) -> None:
         # codex.py:988-989 — _poll_completed_turn returns None when the
@@ -2594,7 +2566,9 @@ class TestCodexSessionMisc:
     """Misc CodexSession leaf branches."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, *, repo_name: str = "test/repo") -> object:
+    def _build_session(
+        tmp_path: Path, *, repo_name: str = "test/repo", **kw: object
+    ) -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
@@ -2606,6 +2580,7 @@ class TestCodexSessionMisc:
             model=ProviderModel("gpt-5.5", "medium"),
             repo_name=repo_name,
             client_factory=lambda **_: _FakeAppServerForCoverage(),
+            **kw,  # type: ignore[arg-type]
         )
 
     def test_interrupt_active_turn_delegates_to_fire_worker_cancel(
@@ -2613,37 +2588,35 @@ class TestCodexSessionMisc:
     ) -> None:
         # codex.py:883 — interrupt_active_turn just delegates.
         session = self._build_session(tmp_path)
-        with patch.object(session, "_fire_worker_cancel") as cancel:
-            session.interrupt_active_turn()
-            cancel.assert_called_once()
+        cancel_calls: list[None] = []
+        session._fire_worker_cancel = lambda: cancel_calls.append(None)  # type: ignore[attr-defined]
+        session.interrupt_active_turn()  # type: ignore[union-attr]
+        assert len(cancel_calls) == 1
 
     def test_enter_reentrant_bumps_depth_and_returns_self(self, tmp_path: Path) -> None:
         # codex.py:906-908 — re-entrant __enter__ skips fsm acquire.
-        from fido import provider as provider_module
-
-        session = self._build_session(tmp_path)
-        # First enter goes through full path.  Patch register_talker so we
-        # don't accidentally talk to the real provider.
-        with patch.object(provider_module, "register_talker"):
-            with patch.object(provider_module, "unregister_talker"):
-                with session as s1:
-                    with session as s2:  # re-entrant
-                        assert s1 is s2
+        # Inject no-op register/unregister so we don't touch the real provider.
+        session = self._build_session(
+            tmp_path,
+            _register_talker=lambda t: None,
+            _unregister_talker=lambda repo, tid: None,
+        )
+        with session as s1:
+            with session as s2:  # re-entrant
+                assert s1 is s2
 
     def test_enter_routes_through_handler_branch_when_kind_handler(
         self, tmp_path: Path
     ) -> None:
         # codex.py:913 — non-worker kind takes the handler branch.
-        from fido import provider as provider_module
-
-        session = self._build_session(tmp_path)
-        with patch.object(
-            provider_module, "current_thread_kind", return_value="handler"
-        ):
-            with patch.object(provider_module, "register_talker"):
-                with patch.object(provider_module, "unregister_talker"):
-                    with session:
-                        pass
+        session = self._build_session(
+            tmp_path,
+            _current_thread_kind=lambda: "handler",
+            _register_talker=lambda t: None,
+            _unregister_talker=lambda repo, tid: None,
+        )
+        with session:
+            pass
 
 
 class TestCodexAppServerStdinStdout:
@@ -2729,7 +2702,13 @@ class TestCodexSessionEnter:
     """Cover __enter__ paths involving register_talker (codex.py:915-937)."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, *, repo_name: str = "test/repo") -> object:
+    def _build_session(
+        tmp_path: Path,
+        *,
+        repo_name: str = "test/repo",
+        register_talker: object = None,
+        unregister_talker: object = None,
+    ) -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
@@ -2741,33 +2720,31 @@ class TestCodexSessionEnter:
             model=ProviderModel("gpt-5.5", "medium"),
             repo_name=repo_name,
             client_factory=lambda **_: _FakeAppServerForCoverage(),
+            _register_talker=register_talker,  # type: ignore[arg-type]
+            _unregister_talker=unregister_talker,  # type: ignore[arg-type]
         )
 
     def test_enter_registers_talker_then_exit_unregisters(self, tmp_path: Path) -> None:
         # Cover happy-path through __enter__ (line 917-926) and __exit__
         # (line 936-937 unregister_talker).
-        from fido import provider as provider_module
-
-        session = self._build_session(tmp_path)
         register_calls: list[str] = []
         unregister_calls: list[str] = []
 
-        def fake_register(talker: object) -> None:  # noqa: ARG001
-            register_calls.append(talker.repo_name)
+        def fake_register(talker: object) -> None:
+            register_calls.append(talker.repo_name)  # type: ignore[union-attr]
 
         def fake_unregister(repo_name: str, thread_id: int) -> None:  # noqa: ARG001
             unregister_calls.append(repo_name)
 
-        with patch.object(
-            provider_module, "register_talker", side_effect=fake_register
-        ):
-            with patch.object(
-                provider_module, "unregister_talker", side_effect=fake_unregister
-            ):
-                # Force __enter__ kind branch.  current_thread_kind is "handler"
-                # by default which routes through _fsm_acquire_handler.
-                with session:
-                    pass
+        # Force __enter__ kind branch.  current_thread_kind is "handler"
+        # by default which routes through _fsm_acquire_handler.
+        session = self._build_session(
+            tmp_path,
+            register_talker=fake_register,
+            unregister_talker=fake_unregister,
+        )
+        with session:
+            pass
         assert register_calls == ["test/repo"]
         assert unregister_calls == ["test/repo"]
 
@@ -2778,15 +2755,13 @@ class TestCodexSessionEnter:
         # is re-raised after _drop_entry_depth and _fsm_release are called.
         from fido import provider as provider_module
 
-        session = self._build_session(tmp_path)
-
         def explode(_talker: object) -> Never:
             raise provider_module.SessionLeakError("test leak")
 
-        with patch.object(provider_module, "register_talker", side_effect=explode):
-            with pytest.raises(provider_module.SessionLeakError, match="test leak"):
-                with session:
-                    pass
+        session = self._build_session(tmp_path, register_talker=explode)
+        with pytest.raises(provider_module.SessionLeakError, match="test leak"):
+            with session:
+                pass
 
 
 class _FakeAppServerForCoverage:
@@ -2898,9 +2873,9 @@ class TestWorkerSleep:
     """
 
     def test_sleep_calls_time_sleep(self, tmp_path: Path) -> None:
-        from unittest.mock import MagicMock, patch
-
         from fido.worker import Worker as _Worker
+
+        sleep_calls: list[float] = []
 
         # Pass provider= directly so the factory is not invoked.
         worker = _Worker(
@@ -2909,7 +2884,7 @@ class TestWorkerSleep:
             provider=MagicMock(),
             issue_cache=MagicMock(),
             dispatcher=MagicMock(),
+            _sleep_fn=sleep_calls.append,
         )
-        with patch("fido.worker.time.sleep") as mock_sleep:
-            worker._sleep(0.001)
-        mock_sleep.assert_called_once_with(0.001)
+        worker._sleep(0.001)
+        assert sleep_calls == [0.001]

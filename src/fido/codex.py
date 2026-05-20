@@ -176,8 +176,10 @@ def _codex(
 def _spawn_app_server(
     *,
     cwd: Path | str | None = None,
+    _popen: Callable[..., CodexAppServerProcess] | None = None,
 ) -> CodexAppServerProcess:
-    return subprocess.Popen(  # noqa: S603 - command is fixed, args are not shell-expanded.
+    _popen_fn = _popen if _popen is not None else subprocess.Popen
+    return _popen_fn(  # noqa: S603 - command is fixed, args are not shell-expanded.
         ["codex", "app-server", "--listen", "stdio://"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -721,9 +723,31 @@ class CodexSession(OwnedSession):
         turn_idle_timeout: float = _CODEX_TURN_IDLE_TIMEOUT,
         clock: Callable[[], float] = time.monotonic,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
+        _get_talker: Callable[[str], "provider.SessionTalker | None"] | None = None,
+        _register_talker: Callable[["provider.SessionTalker"], None] | None = None,
+        _unregister_talker: Callable[[str, int], None] | None = None,
+        _current_thread_kind: Callable[[], "provider.ThreadKind"] | None = None,
     ) -> None:
         self._work_dir = Path(work_dir).resolve()
         self._repo_name = repo_name
+        self._get_talker = (
+            _get_talker if _get_talker is not None else provider.get_talker
+        )
+        self._register_talker = (
+            _register_talker
+            if _register_talker is not None
+            else provider.register_talker
+        )
+        self._unregister_talker = (
+            _unregister_talker
+            if _unregister_talker is not None
+            else provider.unregister_talker
+        )
+        self._current_thread_kind = (
+            _current_thread_kind
+            if _current_thread_kind is not None
+            else provider.current_thread_kind
+        )
         self._base_system_prompt = (
             system_file.read_text() if system_file.exists() else ""
         )
@@ -748,7 +772,7 @@ class CodexSession(OwnedSession):
     def owner(self) -> str | None:
         if self._repo_name is None:
             return None
-        talker = provider.get_talker(self._repo_name)
+        talker = self._get_talker(self._repo_name)
         if talker is None or talker.kind != "worker":
             return None
         for thread in threading.enumerate():
@@ -1050,7 +1074,7 @@ class CodexSession(OwnedSession):
         if depth > 0:
             self._bump_entry_depth()
             return self
-        kind = provider.current_thread_kind()
+        kind = self._current_thread_kind()
         if kind == "worker":
             self._fsm_acquire_worker()
         else:
@@ -1058,7 +1082,7 @@ class CodexSession(OwnedSession):
         self._bump_entry_depth()
         if self._repo_name is not None:
             try:
-                provider.register_talker(
+                self._register_talker(
                     provider.SessionTalker(
                         repo_name=self._repo_name,
                         thread_id=threading.get_ident(),
@@ -1078,7 +1102,7 @@ class CodexSession(OwnedSession):
         depth = self._drop_entry_depth()
         if depth == 0:
             if self._repo_name is not None:
-                provider.unregister_talker(self._repo_name, threading.get_ident())
+                self._unregister_talker(self._repo_name, threading.get_ident())
             self._fsm_release()
 
     def _ensure_thread(self, *, session_id: str | None) -> None:

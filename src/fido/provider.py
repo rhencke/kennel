@@ -644,7 +644,9 @@ def current_thread_kind() -> ThreadKind:
 
 
 def try_preempt_worker(
-    repo_name: str | None, cancel_fn: Callable[[], None]
+    repo_name: str | None,
+    cancel_fn: Callable[[], None],
+    _get_talker: Callable[[str], "SessionTalker | None"] | None = None,
 ) -> tuple[bool, ThreadKind | None]:
     """Invoke *cancel_fn* iff the calling thread is a real webhook AND the
     session's current lock holder is a worker.  Otherwise do nothing.
@@ -664,8 +666,9 @@ def try_preempt_worker(
     third kind: they're system-internal, not user-facing, so they have
     no priority claim on interrupting in-flight worker turns.
     """
+    _talker_fn = _get_talker if _get_talker is not None else get_talker
     caller_kind = current_thread_kind()
-    current = get_talker(repo_name) if repo_name is not None else None
+    current = _talker_fn(repo_name) if repo_name is not None else None
     current_kind = current.kind if current is not None else None
     if caller_kind == "webhook" and current_kind == "worker":
         cancel_fn()
@@ -1194,7 +1197,10 @@ class OwnedSession:
         with their provider-specific cancel mechanism."""
         raise NotImplementedError  # pragma: no cover — abstract hook
 
-    def preempt_worker(self) -> bool:
+    def preempt_worker(
+        self,
+        _get_talker: Callable[[str], "SessionTalker | None"] | None = None,
+    ) -> bool:
         """Fire the cancel signal synchronously if a worker currently holds
         the session.
 
@@ -1211,7 +1217,8 @@ class OwnedSession:
         Returns ``True`` if a worker was preempted, ``False`` if the session
         was idle or already held by another webhook.
         """
-        current = get_talker(self._repo_name) if self._repo_name else None
+        _talker_fn = _get_talker if _get_talker is not None else get_talker
+        current = _talker_fn(self._repo_name) if self._repo_name else None
         current_kind = current.kind if current is not None else None
         if current_kind == "worker":
             self._fire_worker_cancel()

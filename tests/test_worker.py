@@ -11210,7 +11210,17 @@ class TestExecuteTask:
         gh = MagicMock()
         gh.find_closed_prs_as_context.return_value = []
         gh.fetch_closed_sub_issues.return_value = []
-        return Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)), gh
+        mock_hc_cls = MagicMock()
+        mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+        return Worker(
+            tmp_path,
+            gh,
+            registry=MagicMock(spec=ActivityReporter),
+            _provider_run=lambda *a, **k: ("", ""),
+            _build_prompt=lambda *a, **k: None,
+            _harness_committer_cls=mock_hc_cls,
+            _sync_tasks=lambda *a, **k: None,
+        ), gh
 
     def _repo_ctx(self) -> RepoContext:
         return RepoContext(
@@ -11275,21 +11285,14 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Implement feature")
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
 
@@ -11314,17 +11317,14 @@ class TestExecuteTask:
             # Rob flagged on PR #1793).
             return ProviderRunOutcome(session_id="sid", text="", cancelled=True)
 
+        mock_provider_run = MagicMock(side_effect=preempt_provider_turn)
+        worker._provider_run = mock_provider_run
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run", side_effect=preempt_provider_turn
-            ) as mock_provider_run,
             patch.object(worker, "_git", self._simple_git_mock()),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
 
@@ -11337,21 +11337,14 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Write the tests")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status") as mock_status,
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_status.assert_called_once_with("Working on: Write the tests")
 
@@ -11382,21 +11375,14 @@ class TestExecuteTask:
             ],
         ]
 
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             assert worker.execute_task(fido_dir, self._repo_ctx(), 7, "branch") is True
 
         # The pre-existing comment 100 stays; only the improvised 200 is deleted.
@@ -11406,21 +11392,16 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Fix the bug")
+        mock_bp = MagicMock()
+        worker._build_prompt = mock_bp
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt") as mock_bp,
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "fix-branch")
         _, skill, _ = mock_bp.call_args[0]
         assert skill == "task"
@@ -11429,21 +11410,16 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Do work")
+        mock_bp = MagicMock()
+        worker._build_prompt = mock_bp
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt") as mock_bp,
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "my-slug")
         _, _, context = mock_bp.call_args[0]
         assert "PR: 42" in context
@@ -11455,21 +11431,16 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("The special task")
+        mock_bp = MagicMock()
+        worker._build_prompt = mock_bp
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt") as mock_bp,
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         _, _, context = mock_bp.call_args[0]
         assert "Task title: The special task" in context
@@ -11488,21 +11459,16 @@ class TestExecuteTask:
                 "url": "https://github.com/owner/repo/pull/42#discussion_r12345",
             },
         }
+        mock_bp = MagicMock()
+        worker._build_prompt = mock_bp
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt") as mock_bp,
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
         _, _, context = mock_bp.call_args[0]
         assert "comment_id: 12345" in context
@@ -11513,21 +11479,16 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Plain task")
+        mock_bp = MagicMock()
+        worker._build_prompt = mock_bp
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt") as mock_bp,
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         _, _, context = mock_bp.call_args[0]
         assert "comment_id" not in context
@@ -11537,21 +11498,15 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        mock_run = MagicMock(return_value=("sess", self._commit_complete_output()))
+        worker._provider_run = mock_run
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sess", self._commit_complete_output()),
-            ) as mock_run,
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_run.assert_called_once_with(
             fido_dir,
@@ -11567,21 +11522,14 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "my-slug")
         mock_push.assert_called_once_with("origin", "my-slug")
 
@@ -11589,21 +11537,14 @@ class TestExecuteTask:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("My task title")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(
             task["id"],
@@ -11616,22 +11557,15 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
             patch("fido.tasks.Tasks.update"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
 
@@ -11639,22 +11573,15 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
             patch("fido.tasks.Tasks.update"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
 
@@ -11662,22 +11589,17 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        mock_sync = MagicMock()
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
+        worker._sync_tasks = mock_sync
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks") as mock_sync,
             patch("fido.tasks.Tasks.update"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_not_called()
 
@@ -11688,22 +11610,15 @@ class TestExecuteTask:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.update") as mock_update,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_update.assert_any_call(task["id"], TaskStatus.BLOCKED)
         gh.comment_issue.assert_called_once()
@@ -11721,22 +11636,15 @@ class TestExecuteTask:
 
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.update"),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         with State(fido_dir).modify() as state:
             assert "current_task_id" not in state
@@ -11745,21 +11653,14 @@ class TestExecuteTask:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=None),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(
             task["id"],
@@ -11772,21 +11673,14 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=None),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
 
@@ -11794,21 +11688,16 @@ class TestExecuteTask:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        mock_sync = MagicMock()
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
+        worker._sync_tasks = mock_sync
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=None),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
@@ -11816,21 +11705,16 @@ class TestExecuteTask:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        mock_sync = MagicMock()
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
+        worker._sync_tasks = mock_sync
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
@@ -11842,22 +11726,15 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Log me please")
+        worker._provider_run = lambda *a, **k: ("", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="fido"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "Log me please" in caplog.text
 
@@ -11869,22 +11746,18 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
+        worker._provider_run = lambda *a, **k: (
+            "my-session",
+            self._commit_complete_output(),
+        )
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("my-session", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
             caplog.at_level(logging.INFO, logger="fido"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "my-session" in caplog.text
 
@@ -11901,18 +11774,14 @@ class TestExecuteTask:
             captured.update(State(fd).load())
             return ("sess", self._commit_complete_output())
 
+        worker._provider_run = capture
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert captured.get("current_task_id") == "task-99"
 
@@ -11921,21 +11790,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1})
         task = {"id": "task-77", "title": "Complete me", "status": "pending"}
+        worker._provider_run = lambda *a, **k: ("sess", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sess", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "current_task_id" not in State(fido_dir).load()
 
@@ -11952,18 +11814,14 @@ class TestExecuteTask:
             captured.update(State(fd).load())
             return ("sess", self._commit_complete_output())
 
+        worker._provider_run = capture
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
         assert captured.get("issue") == 5
         assert captured.get("current_task_id") == "t-111"
@@ -11974,22 +11832,15 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1, "current_task_id": "task-push-fail"})
         task = {"id": "task-push-fail", "title": "Push me", "status": "pending"}
+        worker._provider_run = lambda *a, **k: ("sess", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sess", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "_push_with_retry", return_value=False),
             patch("fido.tasks.Tasks.complete_with_resolve"),
             patch("fido.tasks.Tasks.update"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "current_task_id" not in State(fido_dir).load()
 
@@ -12032,17 +11883,15 @@ class TestExecuteTask:
                 stderr="",
             )
         )
+        worker._provider_run = lambda *a, **k: ("sid", "")
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
             # Mock the preempt detector so the turn looks cancelled.
             patch.object(worker, "_provider_turn_was_preempted", return_value=True),
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch-slug")
         # Yielded (return True) because the turn was preempted.
@@ -12066,11 +11915,10 @@ class TestExecuteTask:
             "status": "pending",
         }
         head_sha = "sha-unchanged"
+        worker._provider_run = lambda *a, **k: ("sid", "")
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_provider_turn_was_preempted", return_value=True),
             # HEAD did not move — both rev-parse calls return same SHA so
             # _push_committed_work_before_yield short-circuits.
@@ -12079,7 +11927,6 @@ class TestExecuteTask:
             ),
             patch.object(worker, "ensure_pushed") as mock_push,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch-slug")
         assert result is True
@@ -12104,16 +11951,14 @@ class TestExecuteTask:
             "title": "Spec task preempted at initial turn",
             "status": "pending",
         }
+        worker._provider_run = lambda *a, **k: ("sid", "")
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_provider_turn_was_preempted", return_value=True),
             patch.object(worker, "_git", self._git_same_sha()),
             patch("fido.tasks.Tasks.update") as mock_update,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
 
@@ -12139,11 +11984,10 @@ class TestExecuteTask:
             "title": "Spec task preempted in resume loop",
             "status": "pending",
         }
+        worker._provider_run = lambda *a, **k: ("sid", "")
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
             # First call (initial turn) → not preempted; second (resume) → preempted.
             patch.object(
                 worker, "_provider_turn_was_preempted", side_effect=[False, True]
@@ -12153,7 +11997,6 @@ class TestExecuteTask:
             patch.object(worker, "_git", self._git_same_sha()),
             patch("fido.tasks.Tasks.update") as mock_update,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
 
@@ -12185,18 +12028,16 @@ class TestExecuteTask:
             worker._abort_task.request(task["id"])
             return ("sid", "")
 
+        worker._provider_run = set_abort_mid_turn
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=set_abort_mid_turn),
             patch.object(worker, "_provider_turn_was_preempted", return_value=True),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
             patch("fido.tasks.Tasks.update"),
             patch("fido.tasks.Tasks.remove") as mock_remove,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
 
@@ -12230,11 +12071,10 @@ class TestExecuteTask:
                 worker._abort_task.request(task["id"])
             return ("sid", "")
 
+        worker._provider_run = set_abort_on_second
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=set_abort_on_second),
             patch.object(
                 worker, "_provider_turn_was_preempted", side_effect=[False, True]
             ),
@@ -12243,7 +12083,6 @@ class TestExecuteTask:
             patch("fido.tasks.Tasks.update"),
             patch("fido.tasks.Tasks.remove") as mock_remove,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
 
@@ -12266,16 +12105,14 @@ class TestExecuteTask:
         task = {"id": "t-current", "title": "Current task", "status": "pending"}
         # Abort is for a completely different task — not the one being preempted.
         worker._abort_task.request("t-other-task")
+        worker._provider_run = lambda *a, **k: ("sid", "")
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_provider_turn_was_preempted", return_value=True),
             patch.object(worker, "_git", self._git_same_sha()),
             patch("fido.tasks.Tasks.update"),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
 
@@ -12307,23 +12144,17 @@ class TestExecuteTask:
         next_task = {"id": "t-next", "title": "Next task", "status": "pending"}
         # Stale abort from a prior task that's already been removed by rescope.
         worker._abort_task.request("t-prior-removed")
+        mock_run = MagicMock(return_value=("sid", self._commit_complete_output()))
+        worker._provider_run = mock_run
         with (
             patch("fido.tasks.Tasks.list", return_value=[next_task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ) as mock_run,
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch.object(worker, "git_clean") as mock_clean,
             patch("fido.tasks.Tasks.remove") as mock_remove,
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         # The stale abort was for a different task — t-next must NOT have
         # been auto-cleaned up.  provider_run runs.  git_clean and
@@ -12347,11 +12178,10 @@ class TestExecuteTask:
         State(fido_dir).save({"issue": 1, "current_task_id": "t-abort"})
         task = {"id": "t-abort", "title": "Abort me", "status": "pending"}
         worker._abort_task.request(task["id"])
+        worker._provider_run = lambda *a, **k: ("sid", "")
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
             patch("fido.tasks.Tasks.reset_to_pending") as mock_reset,
@@ -12385,11 +12215,10 @@ class TestExecuteTask:
                 worker._abort_task.request(task["id"])
             return ("sid", "")
 
+        worker._provider_run = set_abort_on_second
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=set_abort_on_second),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
             patch("fido.tasks.Tasks.reset_to_pending") as mock_reset,
@@ -12411,16 +12240,14 @@ class TestExecuteTask:
         State(fido_dir).save({"issue": 1})
         task = {"id": "t-no-complete", "title": "No complete", "status": "pending"}
         worker._abort_task.request(task["id"])
+        worker._provider_run = lambda *a, **k: ("sid", "")
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean"),
             patch("fido.tasks.Tasks.remove"),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
@@ -12460,19 +12287,12 @@ class TestExecuteTask:
             }
         ]
 
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "branch")
 
         gh.resolve_thread.assert_called_once_with("thread-node-xyz")
@@ -12489,21 +12309,15 @@ class TestExecuteTask:
         gh.get_pr.return_value = {"title": "Fix the bug (closes #7)", "body": ""}
         task = self._pending_task("Write a test")
         mock_build = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "Repro steps here." in context
@@ -12519,21 +12333,15 @@ class TestExecuteTask:
         }
         task = self._pending_task("Write a test")
         mock_build = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "branch")
         _, _, context = mock_build.call_args.args
         assert "PR #42" in context
@@ -12553,21 +12361,15 @@ class TestExecuteTask:
             "description": "Details about the feature.",
         }
         mock_build = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "Implement the feature" in context
@@ -12593,21 +12395,15 @@ class TestExecuteTask:
         ]
         task = self._pending_task("Write a test")
         mock_build = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "## Prior attempts" in context
@@ -12644,21 +12440,15 @@ class TestExecuteTask:
         ]
         task = self._pending_task("Do remaining work")
         mock_build = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         _, _, context = mock_build.call_args.args
         assert "## Closed sub-issues" in context
@@ -12697,21 +12487,15 @@ class TestExecuteTask:
         ]
         task = self._pending_task("Do remaining work")
         mock_build = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         gh.fetch_closed_sub_issues.assert_called_once_with("owner/repo", 7)
         _, _, context = mock_build.call_args.args
@@ -12729,21 +12513,18 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Add feature")
+        worker._provider_run = lambda *a, **k: (
+            "sid",
+            self._commit_complete_output("Add feature"),
+        )
+        mock_hc_cls = worker._harness_committer_cls
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output("Add feature")),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         mock_hc_cls.return_value.commit.assert_called_once()
@@ -12755,23 +12536,20 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Do nothing")
+        worker._provider_run = lambda *a, **k: (
+            "sid",
+            self._skip_output("already done"),
+        )
+        worker._harness_committer_cls.return_value.commit.return_value = CommitSkipped(
+            reason="already done"
+        )
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._skip_output("already done")),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed") as mock_push,
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSkipped(
-                reason="already done"
-            )
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         mock_push.assert_not_called()
@@ -12783,24 +12561,19 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Fix bug")
+        worker._provider_run = MagicMock(
+            side_effect=[
+                ("sid", ""),  # no sentinel
+                ("sid", self._commit_complete_output()),
+            ]
+        )
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                side_effect=[
-                    ("sid", ""),  # no sentinel
-                    ("sid", self._commit_complete_output()),
-                ],
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         # Nudge was written to the prompt file
@@ -12812,28 +12585,23 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Fix lint")
+        worker._provider_run = MagicMock(
+            side_effect=[
+                ("sid", self._commit_complete_output()),
+                ("sid", self._commit_complete_output()),
+            ]
+        )
+        worker._harness_committer_cls.return_value.commit.side_effect = [
+            CommitHookFailure(output="ruff: 3 errors"),
+            CommitSuccess(sha="abc123"),
+        ]
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                side_effect=[
-                    ("sid", self._commit_complete_output()),
-                    ("sid", self._commit_complete_output()),
-                ],
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc = mock_hc_cls.return_value
-            mock_hc.commit.side_effect = [
-                CommitHookFailure(output="ruff: 3 errors"),
-                CommitSuccess(sha="abc123"),
-            ]
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         prompt_text = (fido_dir / "prompt").read_text()
@@ -12845,27 +12613,23 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Add tests")
+        worker._provider_run = MagicMock(
+            side_effect=[
+                ("sid", self._commit_complete_output()),
+                ("sid", self._commit_complete_output()),
+            ]
+        )
+        worker._harness_committer_cls.return_value.commit.side_effect = [
+            CommitNothingStaged(),
+            CommitSuccess(sha="abc123"),
+        ]
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                side_effect=[
-                    ("sid", self._commit_complete_output()),
-                    ("sid", self._commit_complete_output()),
-                ],
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.side_effect = [
-                CommitNothingStaged(),
-                CommitSuccess(sha="abc123"),
-            ]
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         prompt_text = (fido_dir / "prompt").read_text()
@@ -12879,16 +12643,14 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Impossible task")
+        worker._provider_run = lambda *a, **k: (
+            "sid",
+            self._stuck_output("need API credentials"),
+        )
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._stuck_output("need API credentials")),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter"),
             patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
             patch("fido.tasks.Tasks.update") as mock_update,
         ):
@@ -12923,21 +12685,18 @@ class TestExecuteTask:
                 return ("sess-1", self._in_progress_output())
             return ("sess-1", self._commit_complete_output())
 
+        worker._provider_run = capture_session
+        worker._harness_committer_cls.return_value.commit.side_effect = [
+            CommitSuccess(sha="aaa111"),
+            CommitSuccess(sha="bbb222"),
+        ]
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=capture_session),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.side_effect = [
-                CommitSuccess(sha="aaa111"),
-                CommitSuccess(sha="bbb222"),
-            ]
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
         assert len(provider_calls) == 2
@@ -12961,18 +12720,14 @@ class TestExecuteTask:
                 return ("my-session-id", "")  # no sentinel → nudge → resume
             return ("my-session-id", self._commit_complete_output())
 
+        worker._provider_run = capture
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         # First call: session=None (fresh start)
         assert resume_sessions[0] is None
@@ -13000,18 +12755,14 @@ class TestExecuteTask:
                 return ("", "")  # empty session id, no sentinel
             return ("", self._commit_complete_output())
 
+        worker._provider_run = capture
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         # Second call: empty string → None (fresh session)
         assert resume_sessions[1] is None
@@ -13041,28 +12792,22 @@ class TestExecuteTask:
         gh.get_user_identity.return_value = expected_identity
         gh.find_closed_prs_as_context.return_value = []
 
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
+        mock_hc_cls = worker._harness_committer_cls
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch.object(
                 worker, "_snapshot_fido_issue_comment_ids", return_value=set()
             ),
-            patch("fido.worker.build_prompt"),
             patch.object(worker, "_task_still_current", return_value=True),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
             patch.object(worker, "_yield_for_untriaged"),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
             patch.object(worker, "_delete_leaked_task_comments"),
             patch.object(worker, "_git", self._simple_git_mock()),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
             mock_hc_cls.return_value.commit.assert_called_once()
             _, kwargs = mock_hc_cls.return_value.commit.call_args
@@ -13075,28 +12820,22 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Implement feature")
 
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
+        mock_hc_cls = worker._harness_committer_cls
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch.object(
                 worker, "_snapshot_fido_issue_comment_ids", return_value=set()
             ),
-            patch("fido.worker.build_prompt"),
             patch.object(worker, "_task_still_current", return_value=True),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
             patch.object(worker, "_yield_for_untriaged"),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
             patch.object(worker, "_delete_leaked_task_comments"),
             patch.object(worker, "_git", self._simple_git_mock()),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
             _, kwargs = mock_hc_cls.return_value.commit.call_args
             assert kwargs["helped_by"] == []
@@ -13125,28 +12864,22 @@ class TestExecuteTask:
         gh.get_user_identity.side_effect = requests.RequestException("404 Not Found")
         gh.find_closed_prs_as_context.return_value = []
 
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
+        mock_hc_cls = worker._harness_committer_cls
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch.object(
                 worker, "_snapshot_fido_issue_comment_ids", return_value=set()
             ),
-            patch("fido.worker.build_prompt"),
             patch.object(worker, "_task_still_current", return_value=True),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
             patch.object(worker, "_yield_for_untriaged"),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
             patch.object(worker, "_delete_leaked_task_comments"),
             patch.object(worker, "_git", self._simple_git_mock()),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
             _, kwargs = mock_hc_cls.return_value.commit.call_args
             assert kwargs["helped_by"] == []
@@ -13161,13 +12894,20 @@ class TestYieldForUntriaged:
     ) -> tuple[Worker, MagicMock, MagicMock]:
         gh = MagicMock()
         gh.find_closed_prs_as_context.return_value = []
+        gh.fetch_closed_sub_issues.return_value = []
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
+        mock_hc_cls = MagicMock()
+        mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
         worker = Worker(
             tmp_path,
             gh,
             repo_name="owner/repo",
             registry=registry,
+            _provider_run=lambda *a, **k: ("", ""),
+            _build_prompt=lambda *a, **k: None,
+            _harness_committer_cls=mock_hc_cls,
+            _sync_tasks=lambda *a, **k: None,
         )
         return worker, gh, registry
 
@@ -13255,24 +12995,19 @@ class TestYieldForUntriaged:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task()
 
+        worker._provider_run = MagicMock(
+            side_effect=[
+                ("sid", ""),  # no sentinel → nudge loop
+                ("sid", self._commit_complete_output()),  # complete
+            ]
+        )
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                side_effect=[
-                    ("sid", ""),  # no sentinel → nudge loop
-                    ("sid", self._commit_complete_output()),  # complete
-                ],
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
 
         registry.wait_for_inbox_drain.assert_any_call("owner/repo", timeout=30.0)
@@ -13287,21 +13022,14 @@ class TestYieldForUntriaged:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task()
 
+        worker._provider_run = lambda *a, **k: ("sid", self._commit_complete_output())
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                return_value=("sid", self._commit_complete_output()),
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
 
         registry.wait_for_inbox_drain.assert_not_called()
@@ -13318,27 +13046,23 @@ class TestYieldForUntriaged:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task()
 
+        worker._provider_run = MagicMock(
+            side_effect=[
+                ("sess-1", self._in_progress_output()),  # partial → continue
+                ("sess-1", self._commit_complete_output()),  # done
+            ]
+        )
+        worker._harness_committer_cls.return_value.commit.side_effect = [
+            CommitSuccess(sha="aaa111"),  # in-progress commit
+            CommitSuccess(sha="bbb222"),  # final commit
+        ]
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_run",
-                side_effect=[
-                    ("sess-1", self._in_progress_output()),  # partial → continue
-                    ("sess-1", self._commit_complete_output()),  # done
-                ],
-            ),
             patch.object(worker, "_git", self._simple_git_mock()),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
         ):
-            mock_hc_cls.return_value.commit.side_effect = [
-                CommitSuccess(sha="aaa111"),  # in-progress commit
-                CommitSuccess(sha="bbb222"),  # final commit
-            ]
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
 
         # Called at least once inside the loop after the in-progress turn
@@ -13548,30 +13272,38 @@ class TestAdmitWorkerTurn:
     ) -> None:
         _enqueue_pr_comment(tmp_path, pr_number=2)
         gh = MagicMock()
+        gh.fetch_closed_sub_issues.return_value = []
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
         registry.has_untriaged.return_value = False
-        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        mock_hc_cls = MagicMock()
+        mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+        sentinel = '{"turn_outcome":"commit-task-complete","summary":"Do work"}'
+        worker = Worker(
+            tmp_path,
+            gh,
+            repo_name="owner/repo",
+            registry=registry,
+            _provider_run=lambda *a, **k: ("session-1", sentinel),
+            _build_prompt=lambda *a, **k: None,
+            _harness_committer_cls=mock_hc_cls,
+            _sync_tasks=lambda *a, **k: None,
+        )
         task = {"id": "t1", "title": "Do work", "status": "pending", "type": "spec"}
 
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True, exist_ok=True)
-        sentinel = '{"turn_outcome":"commit-task-complete","summary":"Do work"}'
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch.object(
                 worker, "_snapshot_fido_issue_comment_ids", return_value=set()
             ),
-            patch("fido.worker.build_prompt"),
             patch.object(worker, "_task_still_current", return_value=True),
-            patch("fido.worker.provider_run", return_value=("session-1", sentinel)),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
             patch.object(worker, "_yield_for_untriaged"),
-            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("fido.tasks.Tasks.complete_with_resolve"),
-            patch("fido.tasks.sync_tasks"),
             patch.object(worker, "_delete_leaked_task_comments"),
             patch.object(
                 worker,
@@ -13585,7 +13317,6 @@ class TestAdmitWorkerTurn:
                 ),
             ),
         ):
-            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
             result = worker.execute_task(
                 fido_dir,
                 RepoContext(

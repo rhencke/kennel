@@ -1013,9 +1013,13 @@ class CopilotCLISession(OwnedSession):
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
         session_id: str | None = None,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
+        _get_talker: Callable[[str], "provider.SessionTalker | None"] | None = None,
     ) -> None:
         self._work_dir = Path(work_dir)
         self._repo_name = repo_name
+        self._get_talker = (
+            _get_talker if _get_talker is not None else provider.get_talker
+        )
         try:
             self._base_system_prompt = system_file.read_text()
         except OSError:
@@ -1046,7 +1050,7 @@ class CopilotCLISession(OwnedSession):
     def owner(self) -> str | None:
         if self._repo_name is None:
             return None
-        talker = provider.get_talker(self._repo_name)
+        talker = self._get_talker(self._repo_name)
         if talker is None or talker.kind != "worker":
             return None
         for t in threading.enumerate():
