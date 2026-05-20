@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
-from fido.color import _CODES
+from fido.color import _CODES, Color
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import (
     ProviderID,
@@ -2362,23 +2362,23 @@ class TestFormatStatusColor:
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
-    def _color_env(self) -> dict[str, str]:
-        return {"FORCE_COLOR": "1"}
+    def _color_env(self) -> Color:
+        return Color({"FORCE_COLOR": "1"})
 
     def test_fido_up_header_bold(self) -> None:
         status = FidoStatus(fido_pid=42, fido_uptime=60, repos=[])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert output.startswith(_CODES["bold"])
 
     def test_fido_down_header_bold(self) -> None:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert _CODES["bold"] in output
 
     def test_repo_running_bold(self) -> None:
         repo = self._repo(fido_running=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
         assert _CODES["bold"] in header
 
@@ -2391,7 +2391,7 @@ class TestFormatStatusColor:
         """
         repo = self._repo(fido_running=False)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
         # 24-bit brown background (60, 30, 5) — the "fido is down" highlight.
         assert "\x1b[48;2;60;30;5m" in header
@@ -2399,19 +2399,19 @@ class TestFormatStatusColor:
     def test_issue_number_cyan(self) -> None:
         repo = self._repo(issue=42)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['cyan']}#42" in output
 
     def test_pr_number_magenta(self) -> None:
         repo = self._repo(issue=1, pr_number=99)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['magenta']}#99" in output
 
     def test_elapsed_dim(self) -> None:
         repo = self._repo(issue=1, issue_elapsed_seconds=120)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}(elapsed 2m)" in output
         assert f"  {_CODES['dim']}(elapsed 2m)" not in output
         assert f" {_CODES['dim']}(elapsed 2m)" in output
@@ -2419,7 +2419,7 @@ class TestFormatStatusColor:
     def test_busy_red(self) -> None:
         repo = self._repo(worker_stuck=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['red']}BUSY" in output
 
     def test_provider_warning_dim(self) -> None:
@@ -2434,7 +2434,7 @@ class TestFormatStatusColor:
             repos=[repo],
             provider_statuses=[provider_status],
         )
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}claude-code 90%" in output
 
     def test_provider_pause_dark_gray(self) -> None:
@@ -2449,7 +2449,7 @@ class TestFormatStatusColor:
             repos=[repo],
             provider_statuses=[provider_status],
         )
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dark_gray']}claude-code 95%" in output
 
     def test_provider_ok_has_no_warning_color(self) -> None:
@@ -2463,14 +2463,14 @@ class TestFormatStatusColor:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}claude-code 50%" not in output
         assert f"{_CODES['dark_gray']}claude-code 50%" not in output
 
     def test_crash_red_bold(self) -> None:
         repo = self._repo(crash_count=2, last_crash_error="RuntimeError: boom")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['red_bold']}crashes 2" in output
         assert f"{_CODES['red_bold']}last crash: RuntimeError: boom" in output
 
@@ -2483,7 +2483,7 @@ class TestFormatStatusColor:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['bold']}task 2/5" in output
 
     def test_worker_label_green_when_talker(self) -> None:
@@ -2497,7 +2497,7 @@ class TestFormatStatusColor:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
@@ -2516,7 +2516,7 @@ class TestFormatStatusColor:
             worker_what="waiting",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert _CODES["green_bg"] in worker_line
 
@@ -2528,7 +2528,7 @@ class TestFormatStatusColor:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
@@ -2545,7 +2545,7 @@ class TestFormatStatusColor:
             # No claude_talker, no session_owner — purely between-turn state.
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
@@ -2563,7 +2563,7 @@ class TestFormatStatusColor:
             worker_what="waiting for work",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert "Worker:" not in output, output
 
     def test_webhook_label_yellow_when_talker(self) -> None:
@@ -2581,7 +2581,7 @@ class TestFormatStatusColor:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
         assert f"{_CODES['yellow_bg']}webhook:" in wh_line
 
@@ -2595,14 +2595,14 @@ class TestFormatStatusColor:
             ],
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
         assert _CODES["yellow_bg"] not in wh_line
 
     def test_session_idle_dim(self) -> None:
         repo = self._repo(issue=1, claude_pid=999, session_alive=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}session idle" in output
 
     def test_session_idle_hidden_while_worker_owns_agent(self) -> None:
@@ -2613,19 +2613,19 @@ class TestFormatStatusColor:
             session_owner="worker-orly",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert "session idle" not in output
 
     def test_claude_running_uptime_dim(self) -> None:
         repo = self._repo(issue=1, claude_pid=999, claude_uptime=120)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env=self._color_env())
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}running 2m" in output
 
     def test_no_color_env_suppresses_ansi(self) -> None:
         repo = self._repo(fido_running=True, issue=42, worker_stuck=True)
         status = FidoStatus(fido_pid=1, fido_uptime=60, repos=[repo])
-        output = format_status(status, env={"NO_COLOR": ""})
+        output = format_status(status, color=Color({"NO_COLOR": ""}))
         assert "\033[" not in output
 
 
@@ -2667,7 +2667,7 @@ class TestProviderColoredStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"NO_COLOR": ""})
+        output = format_status(status, color=Color({"NO_COLOR": ""}))
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
         assert worker_lines[0].startswith("* "), worker_lines[0]
@@ -2682,7 +2682,7 @@ class TestProviderColoredStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        output = format_status(status, color=Color({"FORCE_COLOR": "1"}))
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
         # Strip ANSI codes to check prefix cleanly.
@@ -2709,13 +2709,12 @@ class TestProviderColoredStatus:
             worker_what="waiting",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"NO_COLOR": ""})
+        output = format_status(status, color=Color({"NO_COLOR": ""}))
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
         assert worker_lines[0].startswith("* Worker:"), worker_lines[0]
 
     def test_limits_line_colors_claude_code_token_when_color_enabled(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
         # pressure=0.50 keeps the status healthy — no warning/paused
@@ -2731,14 +2730,14 @@ class TestProviderColoredStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected_prefix = rgb_fg(*palette.bright_fg) + "claude-code"
+        expected_prefix = _c.rgb_fg(*palette.bright_fg) + "claude-code"
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
         assert expected_prefix in limits_line
 
     def test_limits_line_highlights_copilot_token(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
         provider_status = ProviderPressureStatus(provider=ProviderID.COPILOT_CLI)
@@ -2752,9 +2751,10 @@ class TestProviderColoredStatus:
             ],
             provider_statuses=[provider_status],
         )
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.COPILOT_CLI]
-        expected_prefix = rgb_fg(*palette.bright_fg) + "copilot-cli"
+        expected_prefix = _c.rgb_fg(*palette.bright_fg) + "copilot-cli"
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
         assert expected_prefix in limits_line
 
@@ -2772,20 +2772,20 @@ class TestProviderColoredStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        output = format_status(status, color=Color({"FORCE_COLOR": "1"}))
         # DARK_GRAY code is \033[90m — must be present; truecolor provider
         # prefix must NOT be (identity color suppressed while paused).
         assert "\033[90m" in output
 
     def test_repo_section_lines_get_provider_bg_when_color_enabled(self) -> None:
-        from fido.color import rgb_bg
         from fido.provider import PROVIDER_PALETTES
 
         repo = self._repo(fido_running=True, issue=7, issue_title="do thing")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected_bg = rgb_bg(*palette.dim_bg)
+        expected_bg = _c.rgb_bg(*palette.dim_bg)
         repo_lines = [
             ln for ln in output.splitlines() if "owner/repo" in ln or "Issue:" in ln
         ]
@@ -2794,14 +2794,14 @@ class TestProviderColoredStatus:
             assert expected_bg in line, f"bg missing from: {line!r}"
 
     def test_repo_section_lines_get_codex_provider_bg_when_color_enabled(self) -> None:
-        from fido.color import rgb_bg
         from fido.provider import PROVIDER_PALETTES
 
         repo = self._repo(provider=ProviderID.CODEX, fido_running=True, issue=7)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CODEX]
-        expected_bg = rgb_bg(*palette.dim_bg)
+        expected_bg = _c.rgb_bg(*palette.dim_bg)
         repo_lines = [
             ln for ln in output.splitlines() if "owner/repo" in ln or "Issue:" in ln
         ]
@@ -2810,7 +2810,6 @@ class TestProviderColoredStatus:
             assert expected_bg in line, f"bg missing from: {line!r}"
 
     def test_limits_line_highlights_codex_token(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
         provider_status = ProviderPressureStatus(
@@ -2826,16 +2825,16 @@ class TestProviderColoredStatus:
             ],
             provider_statuses=[provider_status],
         )
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CODEX]
-        expected_prefix = rgb_fg(*palette.bright_fg) + "codex"
+        expected_prefix = _c.rgb_fg(*palette.bright_fg) + "codex"
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
         assert expected_prefix in limits_line
 
     def test_repo_header_colors_provider_name_with_bright_fg(self) -> None:
         # The provider token in the repo header stats line gets the provider's
         # bright_fg color, matching the visual identity on the global limits line.
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
         provider_status = ProviderPressureStatus(
@@ -2845,9 +2844,10 @@ class TestProviderColoredStatus:
         )
         repo = self._repo(provider_status=provider_status)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected = rgb_fg(*palette.bright_fg) + "claude-code"
+        expected = _c.rgb_fg(*palette.bright_fg) + "claude-code"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
 
@@ -2862,34 +2862,34 @@ class TestProviderColoredStatus:
         )
         repo = self._repo(provider_status=provider_status)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        output = format_status(status, color=Color({"FORCE_COLOR": "1"}))
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         # DARK_GRAY code (\033[90m) must be present on the header for the paused state.
         assert "\033[90m" in header_line
 
     def test_repo_header_codex_provider_name_colored(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
         repo = self._repo(provider=ProviderID.CODEX)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CODEX]
-        expected = rgb_fg(*palette.bright_fg) + "codex"
+        expected = _c.rgb_fg(*palette.bright_fg) + "codex"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
 
     def test_repo_header_provider_name_colored_when_no_provider_status(self) -> None:
         # Even without a provider_status, the provider name gets bright_fg color
         # from the palette when the palette exists.
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
         repo = self._repo(provider=ProviderID.CLAUDE_CODE, provider_status=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status, env={"FORCE_COLOR": "1"})
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected = rgb_fg(*palette.bright_fg) + "claude-code"
+        expected = _c.rgb_fg(*palette.bright_fg) + "claude-code"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
 
