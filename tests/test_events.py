@@ -5234,7 +5234,9 @@ class TestBackgroundRescopeTrigger:
             mock_gh,
             repo_cfg=repo_cfg,
             registry=MagicMock(spec=ActivityReporter),
-            _reorder_fn=fake_reorder,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            reorderer=fake_reorder,
         )
         trigger.trigger_rescope(intent)
 
@@ -5261,7 +5263,9 @@ class TestBackgroundRescopeTrigger:
             mock_gh,
             repo_cfg=repo_cfg,
             registry=MagicMock(spec=ActivityReporter),
-            _reorder_fn=fake_reorder,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            reorderer=fake_reorder,
         )
         trigger.trigger_rescope(intent)
 
@@ -5284,7 +5288,9 @@ class TestBackgroundRescopeTrigger:
             mock_gh,
             repo_cfg=repo_cfg,
             registry=MagicMock(spec=ActivityReporter),
-            _reorder_fn=fake_reorder,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            reorderer=fake_reorder,
         )
         trigger.trigger_rescope(self._make_intent("Refactor the parser"))
 

@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
@@ -54,6 +54,24 @@ log = logging.getLogger(__name__)
 FIDO_LOGINS = frozenset({"fidocancode", "fido-can-code"})
 
 
+class _BackgroundReorderer(Protocol):
+    """Callable that triggers a background reorder of the pending task list."""
+
+    def __call__(
+        self,
+        work_dir: Path,
+        commit_summary: str,
+        config: Config,
+        gh: GitHub,
+        repo_cfg: RepoConfig,
+        registry: ActivityReporter,
+        *,
+        agent: ProviderAgent | None,
+        prompts: "Prompts | None",
+        intents: list[RescopeIntent],
+    ) -> None: ...
+
+
 class _BackgroundRescopeTrigger:
     """RescopeTrigger implementation backed by :func:`_reorder_tasks_background`.
 
@@ -76,9 +94,10 @@ class _BackgroundRescopeTrigger:
         gh: GitHub,
         repo_cfg: RepoConfig,
         registry: ActivityReporter,
-        agent: ProviderAgent | None = None,
-        prompts: Prompts | None = None,
-        _reorder_fn: Callable[..., None] | None = None,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts,
+        reorderer: _BackgroundReorderer,
     ) -> None:
         self._work_dir = work_dir
         self._config = config
@@ -87,7 +106,7 @@ class _BackgroundRescopeTrigger:
         self._registry = registry
         self._agent = agent
         self._prompts = prompts
-        self._reorder_fn = _reorder_fn
+        self._reorderer = reorderer
 
     def trigger_rescope(self, intent: RescopeIntent) -> None:
         """Trigger :func:`_reorder_tasks_background` with the given rescope intent.
@@ -103,12 +122,7 @@ class _BackgroundRescopeTrigger:
             intent.comment_id,
             intent.change_request[:80],
         )
-        reorder = (
-            self._reorder_fn
-            if self._reorder_fn is not None
-            else _reorder_tasks_background
-        )
-        reorder(
+        self._reorderer(
             self._work_dir,
             intent.change_request,
             self._config,
@@ -1650,6 +1664,7 @@ def reply_to_comment(
         registry,
         agent=agent,
         prompts=prompts,
+        reorderer=_reorder_tasks_background,
     )
     executor = (
         _executor
@@ -1969,6 +1984,7 @@ def reply_to_issue_comment(
         registry,
         agent=agent,
         prompts=prompts,
+        reorderer=_reorder_tasks_background,
     )
     executor = (
         _executor
