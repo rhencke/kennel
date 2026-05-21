@@ -37,9 +37,6 @@ from fido.provider_factory import DefaultProviderFactory
 from fido.state import State
 from fido.tasks import Tasks
 
-# Module-level default Color instance (no-color when no env override is active).
-_DEFAULT_COLOR = Color()
-
 
 @dataclass
 class WebhookActivityInfo:
@@ -190,7 +187,7 @@ def _format_percent(used: int, total: int) -> str:
 def _format_resource_line(
     resources: SystemResourceInfo | None,
     *,
-    c: Color = _DEFAULT_COLOR,
+    c: Color,
 ) -> str | None:
     if resources is None:
         return None
@@ -864,7 +861,7 @@ _WEBHOOK_DISPLAY_CAP: int = 5
 """Max webhook lines to print per repo; overflow rolled into a +N-more line."""
 
 
-def _format_agent_line(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> str | None:
+def _format_agent_line(repo: RepoStatus, *, c: Color) -> str | None:
     """Dedicated first body line showing agent session state.
 
     Returns None when there is nothing to display (no pid, session not alive).
@@ -949,7 +946,7 @@ def _format_rate_limit_window(
     window: RateLimitWindowInfo,
     label: str,
     *,
-    c: Color = _DEFAULT_COLOR,
+    c: Color,
 ) -> str:
     """Format one rate-limit window as ``LABEL used/limit (Xh Ym to reset)``
     with color coding by remaining percentage."""
@@ -963,7 +960,7 @@ def _format_rate_limit_window(
 def _format_rate_limit_line(
     rate_limit: RateLimitInfo | None,
     *,
-    c: Color = _DEFAULT_COLOR,
+    c: Color,
 ) -> str | None:
     """Top-of-status one-liner for the GitHub rate-limit snapshot.
 
@@ -982,7 +979,7 @@ def _format_rate_limit_line(
 def _format_cache_line(
     repo: RepoStatus,
     *,
-    c: Color = _DEFAULT_COLOR,
+    c: Color,
 ) -> str | None:
     """One-line picker-cache summary (#812).
 
@@ -1036,7 +1033,7 @@ def _provider_status_summary(status: ProviderPressureStatus) -> str:
 def _styled_provider_status(
     status: ProviderPressureStatus,
     *,
-    c: Color = _DEFAULT_COLOR,
+    c: Color,
     _palette_for: Callable[..., ProviderPalette | None] | None = None,
 ) -> str:
     base_style = _provider_status_style(status)
@@ -1061,7 +1058,7 @@ def _styled_provider_status(
 def _styled_repo_provider(
     repo: RepoStatus,
     *,
-    c: Color = _DEFAULT_COLOR,
+    c: Color,
     _palette_for: Callable[..., ProviderPalette | None] | None = None,
 ) -> str:
     """Render the repo's provider label without repeating global limits details."""
@@ -1082,7 +1079,7 @@ def _styled_repo_provider(
 def _format_provider_summary_line(
     statuses: list[ProviderPressureStatus],
     *,
-    c: Color = _DEFAULT_COLOR,
+    c: Color,
 ) -> str | None:
     if not statuses:
         return None
@@ -1091,7 +1088,7 @@ def _format_provider_summary_line(
     return f"{c.color(BOLD, 'limits:')} {rendered}"
 
 
-def _format_repo_header(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> str:
+def _format_repo_header(repo: RepoStatus, *, c: Color) -> str:
     """Top line per repo: ``<name>: <stats>``.
 
     Stats list is comma-separated and only shows what matters right now:
@@ -1117,7 +1114,7 @@ def _format_repo_header(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> str:
     return header
 
 
-def _format_repo_body(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> list[str]:
+def _format_repo_body(repo: RepoStatus, *, c: Color) -> list[str]:
     """Per-repo body lines in fixed order:
 
     1. ``{provider}: pid N (running Xm, session idle)`` — agent session state,
@@ -1196,7 +1193,7 @@ def _should_show_worker_line(repo: RepoStatus) -> bool:
     return False
 
 
-def _format_worker_thread_line(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> str:
+def _format_worker_thread_line(repo: RepoStatus, *, c: Color) -> str:
     """Worker-thread state line, background-highlighted whenever the worker
     is assigned to a task.
 
@@ -1226,7 +1223,7 @@ def _format_worker_thread_line(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -
     return line
 
 
-def _worker_thread_state(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> str:
+def _worker_thread_state(repo: RepoStatus, *, c: Color) -> str:
     """Compact string describing what the worker thread itself is doing.
 
     Prefers the richest descriptor available: current task (with position
@@ -1257,7 +1254,7 @@ def _worker_thread_state(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> str:
     return "waiting for work"
 
 
-def _format_webhook_lines(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> list[str]:
+def _format_webhook_lines(repo: RepoStatus, *, c: Color) -> list[str]:
     """Render up to :data:`_WEBHOOK_DISPLAY_CAP` webhook lines with the
     talker sorted to the top.  Returns ``[]`` when there are no webhooks.
     """
@@ -1293,9 +1290,9 @@ def _format_webhook_lines(repo: RepoStatus, *, c: Color = _DEFAULT_COLOR) -> lis
     return lines
 
 
-def format_status(status: FidoStatus, *, color: Color | None = None) -> str:
+def format_status(status: FidoStatus, *, color: Color) -> str:
     """Format a FidoStatus as a human-readable string."""
-    c = color if color is not None else _DEFAULT_COLOR
+    c = color
     lines: list[str] = []
 
     if status.fido_pid is not None:

@@ -533,11 +533,11 @@ class TestSystemResources:
 
         assert _format_gib(1536 * 1024**2) == "1.5GiB"
         assert _format_percent(1, 0) == "n/a"
-        assert _format_resource_line(resources) == (
+        assert _format_resource_line(resources, c=Color()) == (
             "host: cpu load 1.25/4 (0.50, 0.25), "
             "mem 6.0GiB/8.0GiB (75%), disk / 75.0GiB/100.0GiB (75%)"
         )
-        assert _format_resource_line(None) is None
+        assert _format_resource_line(None, c=Color()) is None
 
 
 class TestCollectWebhookPropagation:
@@ -1620,35 +1620,35 @@ class TestFormatAgentLine:
 
     def test_returns_none_when_no_pid_and_session_not_alive(self) -> None:
         repo = self._repo(claude_pid=None, session_alive=False)
-        assert _format_agent_line(repo) is None
+        assert _format_agent_line(repo, c=Color()) is None
 
     def test_returns_line_when_pid_present(self) -> None:
         repo = self._repo(claude_pid=1234)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "pid 1234" in line
 
     def test_returns_line_when_session_alive_no_pid(self) -> None:
         repo = self._repo(claude_pid=None, session_alive=True)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "agent" in line
 
     def test_includes_uptime_when_present(self) -> None:
         repo = self._repo(claude_pid=42, claude_uptime=90)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "running 1m" in line
 
     def test_omits_uptime_when_absent(self) -> None:
         repo = self._repo(claude_pid=42, claude_uptime=None)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "running" not in line
 
     def test_includes_session_idle_when_alive_and_no_talker(self) -> None:
         repo = self._repo(claude_pid=42, session_alive=True, claude_talker=None)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "session idle" in line
 
@@ -1658,19 +1658,19 @@ class TestFormatAgentLine:
             session_alive=True,
             session_owner="worker-orly",
         )
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "session idle" not in line
 
     def test_includes_dropped_count_singular(self) -> None:
         repo = self._repo(claude_pid=42, session_dropped_count=1)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "dropped session 1" in line
 
     def test_includes_dropped_count_plural(self) -> None:
         repo = self._repo(claude_pid=42, session_dropped_count=3)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "dropped sessions 3" in line
 
@@ -1678,13 +1678,13 @@ class TestFormatAgentLine:
         from fido.provider import ProviderID
 
         repo = self._repo(claude_pid=42, provider=ProviderID.COPILOT_CLI)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "copilot-cli" in line
 
     def test_indented_with_two_spaces(self) -> None:
         repo = self._repo(claude_pid=42)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert line.startswith("  ")
 
@@ -1692,26 +1692,26 @@ class TestFormatAgentLine:
         repo = self._repo(
             claude_pid=42, session_sent_count=5, session_received_count=12
         )
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "5 sent, 12 received" in line
 
     def test_omits_sent_and_received_counts_when_both_zero(self) -> None:
         repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=0)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "sent" not in line
         assert "received" not in line
 
     def test_includes_counts_when_only_sent_is_nonzero(self) -> None:
         repo = self._repo(claude_pid=42, session_sent_count=3, session_received_count=0)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "3 sent, 0 received" in line
 
     def test_includes_counts_when_only_received_is_nonzero(self) -> None:
         repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=7)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "0 sent, 7 received" in line
 
@@ -1737,7 +1737,7 @@ class TestFormatStatus:
 
     def test_fido_up_with_uptime(self) -> None:
         status = FidoStatus(fido_pid=12345, fido_uptime=7980, repos=[])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert output == "fido: UP (pid 12345, uptime 2h13m)"
 
     def test_includes_host_resources(self) -> None:
@@ -1758,7 +1758,7 @@ class TestFormatStatus:
             ),
         )
 
-        output = format_status(status)
+        output = format_status(status, color=Color())
 
         assert "host: cpu load 0.25/2 (0.50, 0.75)" in output
         assert "mem 3.0GiB/4.0GiB (75%)" in output
@@ -1776,7 +1776,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "limits: claude-code 91% (five hour)" in output
         assert "owner/repo: claude-code" in output
         assert "owner/repo: claude-code 91% (five hour)" not in output
@@ -1794,7 +1794,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "resets 2026-04-16 07:00 UTC" in output
 
     def test_includes_provider_unavailable_summary(self) -> None:
@@ -1808,7 +1808,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "claude-code unavailable" in output
 
     def test_includes_provider_unknown_summary(self) -> None:
@@ -1819,7 +1819,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "claude-code limits unknown" in output
         assert "owner/repo: claude-code" in output
         assert "owner/repo: claude-code limits unknown" not in output
@@ -1836,19 +1836,19 @@ class TestFormatStatus:
             ],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "copilot-cli limits unknown" in output
         assert "owner/repo: copilot-cli" in output
         assert "owner/repo: copilot-cli limits unknown" not in output
 
     def test_fido_up_no_uptime(self) -> None:
         status = FidoStatus(fido_pid=12345, fido_uptime=None, repos=[])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert output == "fido: UP (pid 12345)"
 
     def test_fido_down(self) -> None:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert output == "fido: DOWN"
 
     def test_repo_fido_idle_no_issue(self) -> None:
@@ -1857,7 +1857,7 @@ class TestFormatStatus:
             fido_uptime=None,
             repos=[self._repo(name="owner/myrepo")],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "owner/myrepo: claude-code" in output
         assert "no assigned issues" in output
 
@@ -1867,7 +1867,7 @@ class TestFormatStatus:
             fido_uptime=None,
             repos=[self._repo(fido_running=True)],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "owner/repo: claude-code" in output
 
     def test_repo_with_issue_and_task(self) -> None:
@@ -1884,7 +1884,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #42 — Add widget" in output
         assert "Worker: task 1/1 — Do the thing" in output
 
@@ -1907,7 +1907,7 @@ class TestFormatStatus:
             repos=[repo],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Worker: paused for claude-code reset" in output
 
     def test_task_count_shows_question_mark_when_rescoping(self) -> None:
@@ -1920,7 +1920,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "task 2/5?" in output
 
     def test_task_count_no_question_mark_when_not_rescoping(self) -> None:
@@ -1933,7 +1933,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "task 2/5" in output
         assert "task 2/5?" not in output
 
@@ -1947,14 +1947,14 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #5" in output
         assert "Worker: task 1/2" in output
 
     def test_repo_issue_no_tasks(self) -> None:
         repo = self._repo(issue=3)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #3" in output
         # No worker running → Worker line hidden entirely
         assert "Worker:" not in output
@@ -1962,7 +1962,7 @@ class TestFormatStatus:
     def test_repo_issue_no_tasks_with_running_worker(self) -> None:
         repo = self._repo(issue=3, worker_what="waiting for work")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #3" in output
         # Worker is running but has no task → hidden (idle workers are noise)
         assert "Worker:" not in output
@@ -1971,7 +1971,7 @@ class TestFormatStatus:
         """Agent info appears on a dedicated body line, not as a header suffix."""
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=185)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "pid 9999" in output
         assert "running 3m" in output
         # Info is on a body line, not the repo header.
@@ -1983,7 +1983,7 @@ class TestFormatStatus:
     def test_claude_pid_no_uptime_on_agent_line(self) -> None:
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "pid 9999" in output
         assert "running" not in output
 
@@ -2003,7 +2003,7 @@ class TestFormatStatus:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Agent line is always present when there's a pid.
         assert "pid 9999" in output
         # Active-agent rows start with "* Worker:" (NO_COLOR-friendly marker);
@@ -2029,7 +2029,7 @@ class TestFormatStatus:
             claude_talker=None,
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Appears on the dedicated agent line, not as a header suffix.
         assert "pid 9999 (running 1m, session idle)" in output
         assert not any(
@@ -2045,7 +2045,7 @@ class TestFormatStatus:
             session_alive=True,
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "agent (session idle)" in output
 
     def test_agent_line_shows_dropped_session_count(self) -> None:
@@ -2056,7 +2056,7 @@ class TestFormatStatus:
             session_dropped_count=2,
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "pid 9999 (running 1m, dropped sessions 2)" in output
 
     def test_multiple_repos(self) -> None:
@@ -2066,7 +2066,7 @@ class TestFormatStatus:
             self._repo(name="c/d"),
         ]
         status = FidoStatus(fido_pid=1, fido_uptime=60, repos=repos)
-        lines = format_status(status).splitlines()
+        lines = format_status(status, color=Color()).splitlines()
         assert lines[0].startswith("fido:")
         assert any(line.startswith("a/b:") for line in lines)
         assert any(line.startswith("c/d:") for line in lines)
@@ -2082,7 +2082,7 @@ class TestFormatStatus:
             fido_running=True, issue=1, worker_what="Working on: #3 add widget"
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Worker:" not in output, output
 
     def test_worker_what_hidden_when_task_present(self) -> None:
@@ -2096,41 +2096,41 @@ class TestFormatStatus:
             worker_what="Working on something",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Working on something" not in output
 
     def test_crash_count_zero_not_shown(self) -> None:
         repo = self._repo(crash_count=0, last_crash_error=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "crashes" not in output
         assert "crash" not in output.lower()
 
     def test_crash_count_nonzero_shown_with_error(self) -> None:
         repo = self._repo(crash_count=3, last_crash_error="RuntimeError: boom")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "crashes 3" in output
         assert "RuntimeError: boom" in output
 
     def test_crash_count_without_error(self) -> None:
         repo = self._repo(crash_count=1, last_crash_error=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "crashes 1" in output
         assert "last crash" not in output
 
     def test_worker_uptime_shown_in_header(self) -> None:
         repo = self._repo(fido_running=True, worker_uptime=7320)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # 7320s = 2h02m
         assert "up 2h2m" in output
 
     def test_issue_elapsed_shown_in_body(self) -> None:
         repo = self._repo(issue=1, issue_elapsed_seconds=3900)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # 3900s = 1h05m
         assert "elapsed 1h5m" in output
 
@@ -2141,13 +2141,13 @@ class TestFormatStatus:
             pr_title="Refactor widget",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "PR:     #42 — Refactor widget" in output
 
     def test_pr_line_without_title(self) -> None:
         repo = self._repo(issue=1, pr_number=7, pr_title=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "PR:     #7" in output
 
     def test_current_task_line_without_numbering(self) -> None:
@@ -2159,7 +2159,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Worker line shows the free-form task title.
         assert "Worker: task: Freeform task" in output
 
@@ -2187,7 +2187,9 @@ class TestFormatStatus:
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         webhook_lines = [
-            line for line in format_status(status).splitlines() if "webhook:" in line
+            line
+            for line in format_status(status, color=Color()).splitlines()
+            if "webhook:" in line
         ]
         assert "replying to review" in webhook_lines[0]
         assert "→ pid" not in webhook_lines[0]
@@ -2210,7 +2212,7 @@ class TestFormatStatus:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         worker_line = next(ln for ln in output.splitlines() if "Worker:" in ln)
         assert "<-" not in worker_line
 
@@ -2224,7 +2226,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         worker_line = next(ln for ln in output.splitlines() if "Worker:" in ln)
         assert "<-" not in worker_line
 
@@ -2248,7 +2250,7 @@ class TestFormatStatus:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         webhook_lines = [ln for ln in output.splitlines() if "webhook:" in ln]
         # Active talker (replying to review, tid=2) sorts to top.
         assert "replying to review" in webhook_lines[0]
@@ -2271,7 +2273,7 @@ class TestFormatStatus:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         lines = [
             line
-            for line in format_status(status).splitlines()
+            for line in format_status(status, color=Color()).splitlines()
             if "webhook" in line or "more" in line
         ]
         # 5 shown + 1 overflow summary.
@@ -2290,8 +2292,8 @@ class TestFormatStatus:
             ],
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        assert "+1 more webhook" in format_status(status)
-        assert "+1 more webhooks" not in format_status(status)
+        assert "+1 more webhook" in format_status(status, color=Color())
+        assert "+1 more webhooks" not in format_status(status, color=Color())
 
     def test_webhook_activities_rendered_as_sub_bullets(self) -> None:
         repo = self._repo(
@@ -2310,7 +2312,7 @@ class TestFormatStatus:
             ],
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Webhook lines are plain peer siblings without tree characters.
         assert "webhook: triaging comment on PR #9 (12s)" in output
         assert "webhook: replying to review (3s)" in output
@@ -2320,19 +2322,19 @@ class TestFormatStatus:
     def test_worker_busy_false_not_shown(self) -> None:
         repo = self._repo(worker_stuck=False)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "BUSY" not in output
 
     def test_worker_busy_true_shown(self) -> None:
         repo = self._repo(worker_stuck=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "BUSY" in output
 
     def test_busy_appears_in_header_with_crash(self) -> None:
         repo = self._repo(worker_stuck=True, crash_count=1, last_crash_error="err")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Both appear in the comma-separated top-line stats.
         assert "crashes 1" in output
         assert "BUSY" in output
@@ -2962,7 +2964,7 @@ class TestFormatCacheLine:
         return RepoStatus(**defaults)
 
     def test_returns_none_when_no_cache(self) -> None:
-        assert _format_cache_line(self._repo(issue_cache=None)) is None
+        assert _format_cache_line(self._repo(issue_cache=None), c=Color()) is None
 
     def test_returns_none_when_cache_unloaded(self) -> None:
         info = IssueCacheInfo(
@@ -2974,7 +2976,7 @@ class TestFormatCacheLine:
             last_reconcile_at=None,
             last_reconcile_drift=0,
         )
-        assert _format_cache_line(self._repo(issue_cache=info)) is None
+        assert _format_cache_line(self._repo(issue_cache=info), c=Color()) is None
 
     def test_renders_basic_loaded_cache(self) -> None:
         info = IssueCacheInfo(
@@ -2986,7 +2988,7 @@ class TestFormatCacheLine:
             last_reconcile_at=None,
             last_reconcile_drift=0,
         )
-        line = _format_cache_line(self._repo(issue_cache=info))
+        line = _format_cache_line(self._repo(issue_cache=info), c=Color())
         assert line is not None
         assert "42 open" in line
         assert "applied 7" in line
@@ -3003,7 +3005,7 @@ class TestFormatCacheLine:
             last_reconcile_at=None,
             last_reconcile_drift=0,
         )
-        line = _format_cache_line(self._repo(issue_cache=info))
+        line = _format_cache_line(self._repo(issue_cache=info), c=Color())
         assert line is not None
         assert "stale-dropped 3" in line
 
@@ -3017,7 +3019,7 @@ class TestFormatCacheLine:
             last_reconcile_at=datetime(2026, 4, 19, tzinfo=UTC),
             last_reconcile_drift=2,
         )
-        line = _format_cache_line(self._repo(issue_cache=info))
+        line = _format_cache_line(self._repo(issue_cache=info), c=Color())
         assert line is not None
         assert "reconciled drift 2" in line
 
@@ -3053,14 +3055,14 @@ class TestFormatStatusCacheLineIntegration:
         )
         repo = self._repo(issue_cache=info)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "Cache:" in out
         assert "99 open" in out
 
     def test_format_status_omits_cache_line_when_absent(self) -> None:
         repo = self._repo(issue_cache=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "Cache:" not in out
 
 
@@ -3175,7 +3177,7 @@ class TestRateLimitColor:
 class TestFormatRateLimitWindow:
     def test_includes_label_used_limit_and_reset_text(self) -> None:
         w = _window(used=12, limit=5000)
-        out = _format_rate_limit_window(w, "REST")
+        out = _format_rate_limit_window(w, "REST", c=Color())
         assert "REST" in out
         assert "12/5000" in out
         assert "to reset" in out
@@ -3183,14 +3185,14 @@ class TestFormatRateLimitWindow:
 
 class TestFormatRateLimitLine:
     def test_returns_none_when_no_rate_limit(self) -> None:
-        assert _format_rate_limit_line(None) is None
+        assert _format_rate_limit_line(None, c=Color()) is None
 
     def test_renders_both_windows(self) -> None:
         info = RateLimitInfo(
             rest=_window("core", used=5, limit=5000),
             graphql=_window("graphql", used=10, limit=5000),
         )
-        out = _format_rate_limit_line(info)
+        out = _format_rate_limit_line(info, c=Color())
         assert out is not None
         assert "GitHub:" in out
         assert "REST" in out
@@ -3229,7 +3231,7 @@ class TestFormatStatusRateLimitIntegration:
             repos=[self._repo()],
             rate_limit=info,
         )
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "GitHub:" in out
 
     def test_format_status_omits_github_line_when_absent(self) -> None:
@@ -3239,7 +3241,7 @@ class TestFormatStatusRateLimitIntegration:
             repos=[self._repo()],
             rate_limit=None,
         )
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "GitHub:" not in out
 
 

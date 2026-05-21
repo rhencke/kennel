@@ -24,6 +24,7 @@ from fido.appstate import (
 )
 from fido.atomic import AtomicUpdater, create_atomic
 from fido.claude import ClaudeSession
+from fido.color import Color
 from fido.provider import SnapshotPublisher
 from fido.status import FidoStatus, RepoStatus, format_status
 
@@ -265,7 +266,7 @@ class TestLiveProviderStats:
             session_received_count=received,
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        rendered = format_status(status)
+        rendered = format_status(status, color=Color())
         assert str(sent) in rendered, (
             f"session_sent_count {sent} not found in rendered status output"
         )

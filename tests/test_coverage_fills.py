@@ -24,6 +24,7 @@ from fido.appstate import (
     FidoState,
 )
 from fido.atomic import create_atomic
+from fido.color import Color
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.tasks import (
@@ -358,7 +359,7 @@ class TestStatusFallbacks:
             window_name="hourly",
             pressure=0.5,
         )
-        result = _styled_provider_status(status, _palette_for=lambda p: None)
+        result = _styled_provider_status(status, c=Color(), _palette_for=lambda p: None)
         assert "claude-code" in result
 
     def test_styled_repo_provider_no_palette(self) -> None:
@@ -367,7 +368,7 @@ class TestStatusFallbacks:
         from fido.status import _styled_repo_provider
 
         repo = self._make_repo()
-        result = _styled_repo_provider(repo, _palette_for=lambda p: None)  # type: ignore[arg-type]
+        result = _styled_repo_provider(repo, c=Color(), _palette_for=lambda p: None)  # type: ignore[arg-type]
         assert "claude-code" in result
 
     def test_should_show_worker_line_when_paused(self) -> None:
@@ -395,7 +396,7 @@ class TestStatusFallbacks:
         from fido.status import _format_worker_thread_line
 
         repo = self._make_repo(worker_what=None)
-        line = _format_worker_thread_line(repo)  # type: ignore[arg-type]
+        line = _format_worker_thread_line(repo, c=Color())  # type: ignore[arg-type]
         assert "waiting for work" in line
 
 
