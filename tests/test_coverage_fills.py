@@ -1906,18 +1906,33 @@ class TestEventsCreateTaskExitUntriaged:
         def boom(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
             raise RuntimeError("explode")
 
-        dispatcher = Dispatcher(config, repo_cfg, gh)
+        class _FakeFactory:
+            def create_agent(self, *args: object, **kwargs: object) -> object:
+                return MagicMock()
+
+        dispatcher = Dispatcher(
+            config,
+            repo_cfg,
+            gh,
+            get_commit_summary_fn=lambda wd: "summary",
+            thread_start_fn=boom,
+            reorder_coalesce_state={},
+            sync_fn=lambda *a, **kw: None,
+            provider_factory=_FakeFactory(),  # type: ignore[arg-type]
+        )
         with pytest.raises(RuntimeError, match="explode"):
             dispatcher.create_task(
                 "prompt",
                 thread=thread,
                 registry=registry,
-                _reorder_background_fn=boom,
-                _get_commit_summary_fn=lambda wd: "summary",
                 _tasks=tasks,
             )
         registry.enter_untriaged.assert_called_once_with("test/repo")
-        registry.exit_untriaged.assert_called_once_with("test/repo")
+        # reorder_tasks_background releases the untriaged hold it was given
+        # (_release_untriaged_on_finish=True) on thread-start failure; then
+        # create_task's own except block releases it once more — two calls.
+        assert registry.exit_untriaged.call_count == 2
+        registry.exit_untriaged.assert_called_with("test/repo")
 
 
 class TestWorkerExecuteTaskBranches:

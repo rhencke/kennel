@@ -1124,7 +1124,6 @@ def _write_pr_description(
     *,
     agent: ProviderAgent | None = None,
     pre_baked_description: str = "",
-    _pr_body_lock: Callable[[Path], AbstractContextManager[None]] = tasks.pr_body_lock,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -1228,7 +1227,7 @@ def _write_pr_description(
     new_body = f"{new_desc.strip()}{divider}{rest}"
     # Hold sync.lock during the PATCH so concurrent sync_tasks calls (which
     # also acquire this lock) cannot interleave and overwrite each other.
-    with _pr_body_lock(work_dir):
+    with tasks.pr_body_lock(work_dir):
         gh.edit_pr_body(repo, pr_number, new_body)
     log.info("_write_pr_description: PR #%s description written", pr_number)
 
@@ -4699,7 +4698,6 @@ class Worker:
         prompts: Prompts,
         rewrite_fn: Callable[..., None],
         sync_fn: Callable[[Path, Any], None] | None = None,
-        sync_tasks_fn: Callable[[Path, Any], None] | None = None,
     ) -> dict[str, Any]:
         return self._dispatcher._make_reorder_kwargs(  # pyright: ignore[reportPrivateUsage]
             registry,
@@ -4707,7 +4705,6 @@ class Worker:
             prompts,
             rewrite_fn,
             sync_fn,
-            sync_tasks_fn,
         )
 
     def _reorder_tasks_fn(

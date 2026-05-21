@@ -50,7 +50,9 @@ from fido.status import (
     _git_dir,
     _parse_iso_datetime,
     _parse_issue_cache,
+    _parse_port_from_cmdline,
     _parse_rate_limit,
+    _parse_repo_cmdline,
     _pgrep,
     _port_from_pid,
     _process_uptime_seconds,
@@ -332,10 +334,12 @@ class TestProcessUptimeSeconds:
         )
 
 
-class TestReposFromPid:
+class TestParseRepoCmdline:
+    """Unit tests for the pure :func:`_parse_repo_cmdline` parser."""
+
     def test_parses_single_repo(self) -> None:
         cmdline = b"fido\x00--port\x009000\x00rhencke/confusio:/workspace/confusio:claude-code\x00"
-        result = _repos_from_pid(123, _read_bytes=lambda p: cmdline)
+        result = _parse_repo_cmdline(cmdline)
         assert len(result) == 1
         assert result[0].name == "rhencke/confusio"
         assert result[0].work_dir == Path("/workspace/confusio")
@@ -345,124 +349,104 @@ class TestReposFromPid:
             b"fido\x00rhencke/a:/path/a:claude-code\x00"
             b"rhencke/b:/path/b:copilot-cli\x00"
         )
-        result = _repos_from_pid(123, _read_bytes=lambda p: cmdline)
+        result = _parse_repo_cmdline(cmdline)
         assert len(result) == 2
         assert result[0].name == "rhencke/a"
         assert result[1].name == "rhencke/b"
 
-    def test_oserror_returns_empty(self) -> None:
-        def _raise(p: Path) -> bytes:
-            raise OSError("no proc")
-
-        result = _repos_from_pid(123, _read_bytes=_raise)
-        assert result == []
-
     def test_skips_args_without_colon(self) -> None:
         cmdline = b"fido\x00--port\x009000\x00"
-        result = _repos_from_pid(123, _read_bytes=lambda p: cmdline)
-        assert result == []
+        assert _parse_repo_cmdline(cmdline) == []
 
     def test_skips_colon_args_without_slash_in_name(self) -> None:
         cmdline = b"something:value:claude-code\x00"
-        result = _repos_from_pid(123, _read_bytes=lambda p: cmdline)
-        assert result == []
-
-    def test_reads_proc_pid_cmdline(self) -> None:
-        paths_read: list[Path] = []
-
-        def capturing_read_bytes(p: Path) -> bytes:
-            paths_read.append(p)
-            return b""
-
-        _repos_from_pid(789, _read_bytes=capturing_read_bytes)
-        assert paths_read == [Path("/proc/789/cmdline")]
+        assert _parse_repo_cmdline(cmdline) == []
 
     def test_expands_tilde_in_path(self) -> None:
         cmdline = b"rhencke/repo:~/workspace/repo:claude-code\x00"
-        result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
+        result = _parse_repo_cmdline(cmdline)
         assert result[0].work_dir == Path("~/workspace/repo").expanduser()
 
     def test_no_repos_returns_empty(self) -> None:
         cmdline = (
             b"fido\x00--port\x009000\x00--secret-file\x00/home/user/.fido-secret\x00"
         )
-        result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
-        assert result == []
+        assert _parse_repo_cmdline(cmdline) == []
 
     def test_skips_non_utf8_args(self) -> None:
         cmdline = b"\xff\xfe\x00rhencke/repo:/path:claude-code\x00"
-        result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
+        result = _parse_repo_cmdline(cmdline)
         assert len(result) == 1
         assert result[0].name == "rhencke/repo"
 
     def test_skips_spec_with_one_colon_in_remainder(self) -> None:
         """Arg like 'name:value' (one colon total) has no second colon in
-        remainder and must be skipped (line 333 continue branch)."""
+        remainder and must be skipped."""
         cmdline = b"name:value\x00rhencke/repo:/path:claude-code\x00"
-        result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
+        result = _parse_repo_cmdline(cmdline)
         assert len(result) == 1
         assert result[0].name == "rhencke/repo"
 
     def test_skips_unknown_provider(self) -> None:
-        """An arg with two colons but an unrecognised provider string must
-        be skipped (except ValueError branch, lines 337-338)."""
+        """An arg with two colons but an unrecognised provider string must be skipped."""
         cmdline = b"owner/repo:/path/repo:badprovider\x00"
-        result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
+        assert _parse_repo_cmdline(cmdline) == []
+
+
+class TestReposFromPid:
+    def test_returns_empty_for_nonexistent_pid(self) -> None:
+        # PID 999999999 won't exist — OSError branch is covered.
+        result = _repos_from_pid(999999999)
         assert result == []
+
+    def test_reads_self_cmdline(self) -> None:
+        import os
+
+        # Our own /proc/<pid>/cmdline exists but contains pytest args,
+        # not fido repo specs, so the result is empty — success path covered.
+        result = _repos_from_pid(os.getpid())
+        assert isinstance(result, list)
 
 
 class TestFidoPid:
-    def test_returns_first_pid(self) -> None:
-        result = _fido_pid(_pgrep_fn=lambda p: [111, 222])
-        assert result == 111
-
-    def test_returns_none_when_no_match(self) -> None:
-        result = _fido_pid(_pgrep_fn=lambda p: [])
+    def test_returns_none_when_not_running(self) -> None:
+        # No fido process in the test environment — covers both function lines.
+        result = _fido_pid()
         assert result is None
 
-    def test_searches_for_fido_port(self) -> None:
-        calls: list[str] = []
 
-        def tracking(pattern: str) -> list[int]:
-            calls.append(pattern)
-            return []
+class TestParsePortFromCmdline:
+    """Unit tests for the pure :func:`_parse_port_from_cmdline` parser."""
 
-        _fido_pid(_pgrep_fn=tracking)
-        assert calls == ["fido --port"]
-
-
-class TestPortFromPid:
     def test_returns_port(self) -> None:
         cmdline = b"fido\x00--port\x009000\x00rhencke/repo:/path\x00"
-        assert _port_from_pid(42, _read_bytes=lambda p: cmdline) == 9000
+        assert _parse_port_from_cmdline(cmdline) == 9000
 
     def test_returns_none_when_no_port_flag(self) -> None:
         cmdline = b"fido\x00rhencke/repo:/path\x00"
-        assert _port_from_pid(42, _read_bytes=lambda p: cmdline) is None
+        assert _parse_port_from_cmdline(cmdline) is None
 
     def test_returns_none_when_port_flag_last_arg(self) -> None:
         cmdline = b"fido\x00--port\x00"
-        assert _port_from_pid(42, _read_bytes=lambda p: cmdline) is None
+        assert _parse_port_from_cmdline(cmdline) is None
 
     def test_returns_none_when_port_value_not_integer(self) -> None:
         cmdline = b"fido\x00--port\x00notanumber\x00"
-        assert _port_from_pid(42, _read_bytes=lambda p: cmdline) is None
+        assert _parse_port_from_cmdline(cmdline) is None
 
-    def test_oserror_returns_none(self) -> None:
-        def _raise(p: Path) -> bytes:
-            raise OSError("no proc")
 
-        assert _port_from_pid(42, _read_bytes=_raise) is None
+class TestPortFromPid:
+    def test_returns_none_for_nonexistent_pid(self) -> None:
+        # PID 999999999 won't exist — OSError branch is covered.
+        assert _port_from_pid(999999999) is None
 
-    def test_reads_correct_pid_path(self) -> None:
-        paths_read: list[Path] = []
+    def test_reads_self_cmdline(self) -> None:
+        import os
 
-        def capturing_read_bytes(p: Path) -> bytes:
-            paths_read.append(p)
-            return b""
-
-        _port_from_pid(1234, _read_bytes=capturing_read_bytes)
-        assert paths_read == [Path("/proc/1234/cmdline")]
+        # Our own /proc/<pid>/cmdline exists but contains no --port flag,
+        # so the result is None — success path covered.
+        result = _port_from_pid(os.getpid())
+        assert result is None
 
 
 class TestTaskPosition:

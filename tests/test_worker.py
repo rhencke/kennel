@@ -4828,6 +4828,12 @@ class TestExtractBody:
 class TestWritePrDescription:
     """Tests for the module-level _write_pr_description function."""
 
+    @pytest.fixture(autouse=True)
+    def _git_work_dir(self, tmp_path: Path) -> None:
+        """Initialise a bare git repo so pr_body_lock can resolve .git."""
+        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+        self._work_dir = tmp_path
+
     def _pending_task(self, title: str, task_type: str = "spec") -> dict:
         return {"id": "1", "title": title, "status": "pending", "type": task_type}
 
@@ -4841,11 +4847,9 @@ class TestWritePrDescription:
         pr_number: int = 42,
         work_dir: Path | None = None,
     ) -> object:
-        from contextlib import nullcontext
-
         mock_cc = _client(print_return)
         result = _write_pr_description(
-            work_dir or Path("/tmp"),
+            work_dir or self._work_dir,
             gh,
             "owner/repo",
             pr_number,
@@ -4853,7 +4857,6 @@ class TestWritePrDescription:
             task_list or [],
             existing_body,
             agent=mock_cc,
-            _pr_body_lock=lambda _: nullcontext(),
         )
         return result, mock_cc
 
@@ -4861,23 +4864,6 @@ class TestWritePrDescription:
         gh = MagicMock()
         self._call(gh)
         gh.edit_pr_body.assert_called_once()
-
-    def test_acquires_pr_body_lock_when_writing(self) -> None:
-        from contextlib import nullcontext
-
-        gh = MagicMock()
-        lock_spy = MagicMock(return_value=nullcontext())
-        _write_pr_description(
-            Path("/tmp"),
-            gh,
-            "owner/repo",
-            42,
-            1,
-            [],
-            agent=_client("<body>Desc.\n\nFixes #1.</body>"),
-            _pr_body_lock=lock_spy,
-        )
-        lock_spy.assert_called_once_with(Path("/tmp"))
 
     def test_raises_when_provider_returns_empty(self) -> None:
         gh = MagicMock()
@@ -5091,8 +5077,6 @@ class TestWritePrDescription:
     def test_pre_baked_description_skips_provider(self, tmp_path: Path) -> None:
         """When pre_baked_description is provided, the LLM call is skipped
         and the supplied text is used directly."""
-        from contextlib import nullcontext
-
         gh = MagicMock()
         agent = MagicMock()
         agent.print_prompt_from_file = MagicMock()
@@ -5105,7 +5089,6 @@ class TestWritePrDescription:
             [{"title": "x", "status": "pending"}],
             agent=agent,
             pre_baked_description="## Summary\n\n- thing\n\nFixes #42.",
-            _pr_body_lock=lambda _: nullcontext(),
         )
         agent.print_prompt_from_file.assert_not_called()
         body = gh.edit_pr_body.call_args[0][2]
@@ -5117,8 +5100,6 @@ class TestWritePrDescription:
 
     def test_pre_baked_works_without_agent(self, tmp_path: Path) -> None:
         """pre_baked_description alone (no agent) is sufficient."""
-        from contextlib import nullcontext
-
         gh = MagicMock()
         _write_pr_description(
             tmp_path,
@@ -5128,7 +5109,6 @@ class TestWritePrDescription:
             42,
             [{"title": "x", "status": "pending"}],
             pre_baked_description="## Summary\n\nbody.",
-            _pr_body_lock=lambda _: nullcontext(),
         )
         body = gh.edit_pr_body.call_args[0][2]
         assert "body." in body
@@ -5137,8 +5117,6 @@ class TestWritePrDescription:
     def test_pre_baked_strips_llm_emitted_fixes_trailer(self, tmp_path: Path) -> None:
         """If the LLM included Fixes #N anyway, the harness strips it and
         re-appends the canonical form so the body ends with exactly one."""
-        from contextlib import nullcontext
-
         gh = MagicMock()
         _write_pr_description(
             tmp_path,
@@ -5148,7 +5126,6 @@ class TestWritePrDescription:
             42,
             [{"title": "x", "status": "pending"}],
             pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
-            _pr_body_lock=lambda _: nullcontext(),
         )
         body = gh.edit_pr_body.call_args[0][2]
         assert body.count("Fixes #42.") == 1
@@ -5158,8 +5135,6 @@ class TestWritePrDescription:
 
     def test_pre_baked_strips_period_less_fixes(self, tmp_path: Path) -> None:
         """Fixes #N without trailing period also gets stripped + re-appended."""
-        from contextlib import nullcontext
-
         gh = MagicMock()
         _write_pr_description(
             tmp_path,
@@ -5169,7 +5144,6 @@ class TestWritePrDescription:
             42,
             [{"title": "x", "status": "pending"}],
             pre_baked_description="## Summary\n\nbody.\n\nFixes #42",
-            _pr_body_lock=lambda _: nullcontext(),
         )
         body = gh.edit_pr_body.call_args[0][2]
         before_divider = body.split("\n\n---\n\n")[0]
@@ -5184,11 +5158,7 @@ class TestWritePrDescription:
 
         Exercises the delegation body directly so coverage does not require
         a full TestFindOrCreatePr scenario (where the method is always mocked).
-        Initialises a bare git repo so pr_body_lock can resolve .git.
         """
-        import subprocess
-
-        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
         gh = MagicMock()
         gh.get_pr.return_value = {"body": ""}
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))

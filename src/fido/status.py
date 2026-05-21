@@ -310,18 +310,10 @@ def _system_resources(
         return None
 
 
-def _repos_from_pid(
-    pid: int,
-    *,
-    _read_bytes: Callable[[Path], bytes] = Path.read_bytes,
-) -> list[RepoConfig]:
-    """Read repo specs from /proc/<pid>/cmdline, returning [] if unavailable."""
-    try:
-        cmdline = _read_bytes(Path(f"/proc/{pid}/cmdline"))
-    except OSError:
-        return []
+def _parse_repo_cmdline(data: bytes) -> list[RepoConfig]:
+    """Parse repo specs from /proc/<pid>/cmdline bytes. Pure — no I/O."""
     repos = []
-    for arg in cmdline.rstrip(b"\x00").split(b"\x00"):
+    for arg in data.rstrip(b"\x00").split(b"\x00"):
         try:
             spec = arg.decode()
         except UnicodeDecodeError:
@@ -348,9 +340,18 @@ def _repos_from_pid(
     return repos
 
 
-def _fido_pid(*, _pgrep_fn: Callable[[str], list[int]] = _pgrep) -> int | None:
+def _repos_from_pid(pid: int) -> list[RepoConfig]:
+    """Read repo specs from /proc/<pid>/cmdline, returning [] if unavailable."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return _parse_repo_cmdline(cmdline)
+
+
+def _fido_pid() -> int | None:
     """Return the PID of the running fido server, or None."""
-    pids = _pgrep_fn("fido --port")
+    pids = _pgrep("fido --port")
     return pids[0] if pids else None
 
 
@@ -485,17 +486,9 @@ def _parse_issue_cache(raw: object) -> IssueCacheInfo | None:
     )
 
 
-def _port_from_pid(
-    pid: int,
-    *,
-    _read_bytes: Callable[[Path], bytes] = Path.read_bytes,
-) -> int | None:
-    """Extract the --port value from fido's /proc/<pid>/cmdline, or None."""
-    try:
-        cmdline = _read_bytes(Path(f"/proc/{pid}/cmdline"))
-    except OSError:
-        return None
-    args = cmdline.rstrip(b"\x00").split(b"\x00")
+def _parse_port_from_cmdline(data: bytes) -> int | None:
+    """Extract the --port value from /proc/<pid>/cmdline bytes. Pure — no I/O."""
+    args = data.rstrip(b"\x00").split(b"\x00")
     for i, arg in enumerate(args):
         if arg == b"--port" and i + 1 < len(args):
             try:
@@ -503,6 +496,15 @@ def _port_from_pid(
             except ValueError:
                 return None
     return None
+
+
+def _port_from_pid(pid: int) -> int | None:
+    """Extract the --port value from fido's /proc/<pid>/cmdline, or None."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return _parse_port_from_cmdline(cmdline)
 
 
 def _fetch_activities(

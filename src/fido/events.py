@@ -887,10 +887,31 @@ class Dispatcher:
         config: Config,
         repo_cfg: RepoConfig,
         gh: GitHub,
+        *,
+        call_synthesis_fn: Callable[..., Any] = call_synthesis,
+        call_failure_explanation_fn: Callable[..., Any] = call_failure_explanation,
+        provider_factory: "DefaultProviderFactory | None" = None,
+        backfill_reply_fn: "Callable[..., tuple[str, list[str]]] | None" = None,
+        thread_start_fn: Callable[[threading.Thread], None] = threading.Thread.start,
+        reorder_fn: "Callable[..., None] | None" = None,
+        rewrite_fn: "Callable[..., None] | None" = None,
+        sync_fn: "Callable[[Path, Any], None] | None" = None,
+        reorder_coalesce_state: "dict[str, Any] | None" = None,
+        get_commit_summary_fn: "Callable[[Path], str] | None" = None,
     ) -> None:
         self._config = config
         self._repo_cfg = repo_cfg
         self._gh = gh
+        self._call_synthesis_fn = call_synthesis_fn
+        self._call_failure_explanation_fn = call_failure_explanation_fn
+        self._provider_factory = provider_factory
+        self._backfill_reply_fn = backfill_reply_fn
+        self._thread_start_fn = thread_start_fn
+        self._reorder_fn = reorder_fn
+        self._rewrite_fn = rewrite_fn
+        self._sync_fn = sync_fn
+        self._reorder_coalesce_state = reorder_coalesce_state
+        self._get_commit_summary_fn = get_commit_summary_fn
 
     def dispatch(
         self,
@@ -1148,7 +1169,6 @@ class Dispatcher:
         registry: ActivityReporter,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
-        _reply_fn: Callable[..., Any] | None = None,
     ) -> int:
         """Replay ``issue_comment`` webhooks we may have missed while fido was
         down (fix for #794).  Returns the number of comments inspected.
@@ -1215,10 +1235,12 @@ class Dispatcher:
                 comment=c,
             )
             try:
-                _reply_fn_to_use = (
-                    _reply_fn if _reply_fn is not None else self.reply_to_issue_comment
+                _backfill_reply = (
+                    self._backfill_reply_fn
+                    if self._backfill_reply_fn is not None
+                    else self.reply_to_issue_comment
                 )
-                _reply_fn_to_use(
+                _backfill_reply(
                     action,
                     registry,
                     agent=agent,
@@ -1232,11 +1254,11 @@ class Dispatcher:
         log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
         return len(comments)
 
-    def launch_sync(self, *, _sync_fn: Callable[..., None] | None = None) -> None:
+    def launch_sync(self) -> None:
         """Sync tasks.json → PR body in a background thread."""
         from fido.tasks import sync_tasks_background
 
-        sync_fn = _sync_fn if _sync_fn is not None else sync_tasks_background
+        sync_fn = self._sync_fn if self._sync_fn is not None else sync_tasks_background
         sync_fn(self._repo_cfg.work_dir, self._gh)
         log.info("sync-tasks launched")
 
@@ -1250,7 +1272,6 @@ class Dispatcher:
         thread: dict[str, Any] | None,
         is_bot: bool = False,
         registry: Any = None,  # noqa: ANN401  # WorkerRegistry-or-ActivityReporter; either works
-        create_task_fn: Callable[..., object] | None = None,
     ) -> int:
         """Create any tasks implied by a reply outcome.
 
@@ -1258,17 +1279,14 @@ class Dispatcher:
         """
         if not reply_outcome_creates_tasks(category, thread=thread, is_bot=is_bot):
             return 0
-        task_fn = self.create_task if create_task_fn is None else create_task_fn
         created = 0
         for title in titles:
-            task = task_fn(
+            task = self.create_task(
                 title,
                 thread=thread,
                 registry=registry,
             )
-            if not (
-                isinstance(task, dict) and task.get("status") == "skipped_resolved"
-            ):
+            if task.get("status") != "skipped_resolved":
                 created += 1
         return created
 
@@ -1278,8 +1296,6 @@ class Dispatcher:
         titles: list[str],
         thread: dict[str, Any] | None,
         registry: ActivityReporter,
-        *,
-        _create_task_fn: Callable[..., Any] | None = None,
     ) -> None:
         """Apply task side effects from a recovered reply."""
         self.queue_reply_tasks(
@@ -1287,7 +1303,6 @@ class Dispatcher:
             titles,
             thread=thread,
             registry=registry,
-            create_task_fn=_create_task_fn,
         )
 
     def recover_reply_promises(
@@ -1298,10 +1313,6 @@ class Dispatcher:
         *,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
-        _call_synthesis_fn: Callable[..., Any] | None = None,
-        _reply_to_issue_comment_fn: Callable[..., Any] | None = None,
-        _reply_to_comment_fn: Callable[..., Any] | None = None,
-        _create_task_fn: Callable[..., Any] | None = None,
     ) -> bool:
         """Recover queued webhook replies for the current PR from SQLite promises."""
         repo_cfg = self._repo_cfg
@@ -1399,17 +1410,11 @@ class Dispatcher:
                 "reply_promise_ids": [promise_id for promise_id, _ in group],
             }
             try:
-                _issue_fn = (
-                    _reply_to_issue_comment_fn
-                    if _reply_to_issue_comment_fn is not None
-                    else self.reply_to_issue_comment
-                )
-                category, titles = _issue_fn(
+                category, titles = self.reply_to_issue_comment(
                     action,
                     registry,
                     agent=agent,
                     prompts=prompts,
-                    _call_synthesis_fn=_call_synthesis_fn,
                 )
             except Exception:
                 _mark_promises_failed(store, (promise_id for promise_id, _ in group))
@@ -1419,7 +1424,6 @@ class Dispatcher:
                 titles,
                 action.thread,
                 registry,
-                _create_task_fn=_create_task_fn,
             )
             _ack_promises(store, (promise_id for promise_id, _ in group))
             processed_any = True
@@ -1470,17 +1474,11 @@ class Dispatcher:
                 ],
             }
             try:
-                _pull_fn = (
-                    _reply_to_comment_fn
-                    if _reply_to_comment_fn is not None
-                    else self.reply_to_comment
-                )
-                category, titles = _pull_fn(
+                category, titles = self.reply_to_comment(
                     action,
                     registry,
                     agent=agent,
                     prompts=prompts,
-                    _call_synthesis_fn=_call_synthesis_fn,
                 )
             except Exception:
                 _mark_promises_failed(
@@ -1492,7 +1490,6 @@ class Dispatcher:
                 titles,
                 thread=action.reply_to,
                 registry=registry,
-                _create_task_fn=_create_task_fn,
             )
             _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
             processed_any = True
@@ -1506,9 +1503,6 @@ class Dispatcher:
         *,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
-        _factory: "DefaultProviderFactory | None" = None,
-        _call_synthesis_fn: Callable[..., Any] | None = None,
-        _call_failure_explanation_fn: Callable[..., Any] | None = None,
         _executor: "SynthesisExecutor | None" = None,
     ) -> tuple[str, list[str]]:
         """Handle a review comment via the synthesis LLM call, post reply.
@@ -1526,17 +1520,11 @@ class Dispatcher:
         repo_cfg = self._repo_cfg
         gh = self._gh
         if agent is None:
-            agent = _configured_agent(config, repo_cfg, _factory=_factory)
+            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
-        _synthesis_fn = (
-            _call_synthesis_fn if _call_synthesis_fn is not None else call_synthesis
-        )
-        _failure_fn = (
-            _call_failure_explanation_fn
-            if _call_failure_explanation_fn is not None
-            else call_failure_explanation
-        )
+        _synthesis_fn = self._call_synthesis_fn
+        _failure_fn = self._call_failure_explanation_fn
         info = action.reply_to
         if not info or not action.comment_body:
             return ("ACT", [action.comment_body or action.prompt])
@@ -1772,9 +1760,6 @@ class Dispatcher:
         *,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
-        _factory: "DefaultProviderFactory | None" = None,
-        _call_synthesis_fn: Callable[..., Any] | None = None,
-        _call_failure_explanation_fn: Callable[..., Any] | None = None,
         _executor: "SynthesisExecutor | None" = None,
     ) -> tuple[str, list[str]]:
         """Handle a top-level PR comment via the synthesis LLM call, post reply.
@@ -1789,17 +1774,11 @@ class Dispatcher:
         repo_cfg = self._repo_cfg
         gh = self._gh
         if agent is None:
-            agent = _configured_agent(config, repo_cfg, _factory=_factory)
+            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
-        _synthesis_fn = (
-            _call_synthesis_fn if _call_synthesis_fn is not None else call_synthesis
-        )
-        _failure_fn = (
-            _call_failure_explanation_fn
-            if _call_failure_explanation_fn is not None
-            else call_failure_explanation
-        )
+        _synthesis_fn = self._call_synthesis_fn
+        _failure_fn = self._call_failure_explanation_fn
         comment = action.comment_body or ""
         context = dict(action.context) if action.context else {}
         direct_promise = None
@@ -1992,7 +1971,6 @@ class Dispatcher:
         result: list[dict[str, Any]],
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
-        _factory: "DefaultProviderFactory | None" = None,
     ) -> None:
         """Post a per-intent reply per the INV-F reply-back rule.
 
@@ -2030,7 +2008,7 @@ class Dispatcher:
             return
 
         if agent is None:
-            agent = _configured_agent(config, repo_cfg, _factory=_factory)
+            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
 
@@ -2120,7 +2098,6 @@ class Dispatcher:
         prompts: Prompts,
         rewrite_fn: Callable[..., None],
         sync_fn: Callable[[Path, Any], None] | None = None,
-        sync_tasks_fn: Callable[[Path, Any], None] | None = None,
     ) -> dict[str, Any]:
         """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
         from fido.tasks import sync_tasks as _real_sync_tasks
@@ -2129,13 +2106,9 @@ class Dispatcher:
         gh = self._gh
         work_dir = repo_cfg.work_dir
 
-        _effective_sync: Callable[[Path, Any], None]
-        if sync_fn is not None:
-            _effective_sync = sync_fn
-        else:
-            _effective_sync = (
-                sync_tasks_fn if sync_tasks_fn is not None else _real_sync_tasks
-            )
+        _effective_sync: Callable[[Path, Any], None] = (
+            sync_fn if sync_fn is not None else _real_sync_tasks
+        )
 
         def on_done() -> None:
             _effective_sync(work_dir, gh)
@@ -2271,14 +2244,8 @@ class Dispatcher:
         registry: ActivityReporter,
         *,
         intents: list[RescopeIntent] | None = None,
-        _start: Callable[[threading.Thread], None] = threading.Thread.start,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
-        _rewrite_fn: Callable[..., None] | None = None,
-        _reorder_fn: Callable[..., None] | None = None,
-        _sync_fn: Callable[[Path, Any], None] | None = None,
-        _sync_tasks_fn: Callable[[Path, Any], None] | None = None,
-        _coalesce_state: dict[str, Any] | None = None,
         _release_untriaged_on_finish: bool = False,
     ) -> None:
         """Run :func:`~fido.tasks.reorder_tasks` in a daemon background thread.
@@ -2314,11 +2281,19 @@ class Dispatcher:
         repo_cfg = self._repo_cfg
         work_dir = repo_cfg.work_dir
 
-        reorder = _reorder_fn if _reorder_fn is not None else _reorder_tasks
-        rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
-        state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
+        reorder = self._reorder_fn if self._reorder_fn is not None else _reorder_tasks
+        rewrite_fn = (
+            self._rewrite_fn
+            if self._rewrite_fn is not None
+            else _rewrite_pr_description
+        )
+        state = (
+            self._reorder_coalesce_state
+            if self._reorder_coalesce_state is not None
+            else _reorder_coalesce
+        )
         if agent is None:
-            agent = _configured_agent(config, repo_cfg)
+            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
 
@@ -2328,8 +2303,7 @@ class Dispatcher:
             agent,
             prompts,
             rewrite_fn,
-            _sync_fn,
-            _sync_tasks_fn,
+            self._sync_fn,
         )
 
         with _reorder_coalesce_lock:
@@ -2437,7 +2411,7 @@ class Dispatcher:
             daemon=True,
         )
         try:
-            _start(t)
+            self._thread_start_fn(t)
         except Exception:
             release_untriaged = 0
             with _reorder_coalesce_lock:
@@ -2461,8 +2435,6 @@ class Dispatcher:
         thread: dict[str, Any] | None = None,
         registry: ActivityReporter | None = None,
         *,
-        _get_commit_summary_fn: Callable[[Path], str] | None = None,
-        _reorder_background_fn: Callable[..., None] | None = None,
         _tasks: Tasks | None = None,
     ) -> dict[str, Any]:
         """Write a task to the shared task file, then trigger sync.
@@ -2555,8 +2527,8 @@ class Dispatcher:
         self.launch_sync()
         if thread:
             _cs_fn = (
-                _get_commit_summary_fn
-                if _get_commit_summary_fn is not None
+                self._get_commit_summary_fn
+                if self._get_commit_summary_fn is not None
                 else _get_commit_summary
             )
             commit_summary = _cs_fn(repo_cfg.work_dir)
@@ -2570,14 +2542,9 @@ class Dispatcher:
                     "skipping background rescope (#1336)",
                 )
             else:
-                reorder_fn = (
-                    _reorder_background_fn
-                    if _reorder_background_fn is not None
-                    else self.reorder_tasks_background
-                )
                 registry.enter_untriaged(repo_cfg.name)
                 try:
-                    reorder_fn(
+                    self.reorder_tasks_background(
                         commit_summary,
                         registry,
                         _release_untriaged_on_finish=True,
