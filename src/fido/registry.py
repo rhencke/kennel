@@ -25,10 +25,11 @@ from fido.appstate import (
     zero_repo_state,
 )
 from fido.atomic import AtomicUpdater
-from fido.config import Config, RepoConfig
+from fido.config import Config, RepoConfig, default_sub_dir
 from fido.github import GitHub
 from fido.issue_cache import CacheMetrics, IssueCache
 from fido.provider import PromptSession, Provider
+from fido.provider_factory import DefaultProviderFactory
 from fido.repo import Repo
 from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
@@ -942,14 +943,17 @@ def _make_thread(
         repo_cfg.name,
         gh,
         registry,
-        repo_cfg.membership,
         provider=provider,
         session_issue=session_issue,
         config=config,
         repo_cfg=repo_cfg,
+        state_updater=state_updater,
+        membership=repo_cfg.membership,
+        provider_factory=DefaultProviderFactory(
+            session_system_file=default_sub_dir() / "persona.md"
+        ),
         dispatcher=dispatchers[repo_cfg.name],
         issue_cache=registry.get_issue_cache(repo_cfg.name),
-        state_updater=state_updater,
     )
 
 

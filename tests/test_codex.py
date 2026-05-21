@@ -136,25 +136,134 @@ class _FakeAppServer:
         self.alive = False
 
 
+# ---------------------------------------------------------------------------
+# Typed fake collaborators for Protocol-based DI
+# ---------------------------------------------------------------------------
+
+
+class _FakeRunner:
+    """Typed fake for :class:`fido.infra.ProcessRunner`."""
+
+    def __init__(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.result = result
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def run(
+        self,
+        cmd: list[str],
+        *,
+        check: bool = True,  # noqa: ARG002
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append((cmd, dict(kwargs)))
+        return self.result
+
+
+class _FakeAppServerSpawner:
+    """Typed fake for :class:`fido.codex.AppServerSpawner`."""
+
+    def __init__(self, process: object) -> None:
+        self._process = process
+        self.spawned_cwd: object = None
+
+    def spawn(self, *, cwd: object = None) -> object:
+        self.spawned_cwd = cwd
+        return self._process
+
+
+class _FakeAppServerFactory:
+    """Typed fake for :class:`fido.codex.AppServerFactory`."""
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+        self.created_cwd: object = None
+
+    def create(self, *, cwd: object = None) -> object:
+        self.created_cwd = cwd
+        return self._client
+
+
+class _PopAppServerFactory:
+    """Typed fake for :class:`fido.codex.AppServerFactory` that pops from a list."""
+
+    def __init__(self, clients: list) -> None:
+        self._clients = clients
+
+    def create(self, *, cwd: object = None) -> object:  # noqa: ARG002
+        return self._clients.pop(0)
+
+
+class _FakeClock:
+    """Typed fake for :class:`fido.infra.Clock` with a fixed time."""
+
+    def __init__(self, t: float = 0.0) -> None:
+        self._t = t
+
+    def sleep(self, secs: float) -> None:  # noqa: ARG002
+        pass
+
+    def monotonic(self) -> float:
+        return self._t
+
+
+class _AdvancingClock:
+    """Typed fake for :class:`fido.infra.Clock` whose monotonic value advances
+    by the duration each time :meth:`advance` is called."""
+
+    def __init__(self) -> None:
+        self._t = 0.0
+
+    def sleep(self, secs: float) -> None:  # noqa: ARG002
+        pass
+
+    def monotonic(self) -> float:
+        return self._t
+
+    def advance(self, secs: float) -> None:
+        self._t += secs
+
+
+class _FakeSessionFactory:
+    """Typed fake for :class:`fido.codex.SessionFactory`."""
+
+    def __init__(self, session: object) -> None:
+        self._session = session
+        self.calls: list[dict] = []
+
+    def create(self, system_file: object, **kwargs: object) -> object:
+        self.calls.append({"system_file": system_file, **kwargs})
+        return self._session
+
+
+class _FakeSessionResolver:
+    """Typed fake for :class:`fido.codex.SessionResolver`."""
+
+    def __init__(self, session: object) -> None:
+        self._session = session
+
+    def resolve(self) -> object:
+        return self._session
+
+
 class TestCodexHelper:
     def test_calls_subprocess_run_with_prompt_and_cwd(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=_completed("out"))
+        runner = _FakeRunner(_completed("out"))
         result = _codex(
             "exec",
             "--json",
             prompt="input",
             timeout=5,
             cwd=tmp_path,
-            runner=mock_run,
+            runner=runner,
         )
-        mock_run.assert_called_once_with(
-            ["codex", "exec", "--json"],
-            input="input",
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=tmp_path,
-        )
+        assert len(runner.calls) == 1
+        cmd, kwargs = runner.calls[0]
+        assert cmd == ["codex", "exec", "--json"]
+        assert kwargs["input"] == "input"
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["timeout"] == 5
+        assert kwargs["cwd"] == tmp_path
         assert result.stdout == "out"
 
 
@@ -214,17 +323,17 @@ class TestCodexProviderErrors:
 
 class TestRunCodexExec:
     def test_builds_stable_json_exec_command(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
+        runner = _FakeRunner(_completed(_fixture("normal.jsonl")))
         output = run_codex_exec(
             "hello",
             model=ProviderModel("gpt-5.5", "xhigh"),
             timeout=17,
             cwd=tmp_path,
-            runner=mock_run,
+            runner=runner,
         )
         assert extract_result_text(output) == "final reply"
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args.args[0]
+        assert len(runner.calls) == 1
+        cmd, kwargs = runner.calls[0]
         assert cmd == [
             "codex",
             "exec",
@@ -240,23 +349,23 @@ class TestRunCodexExec:
             str(tmp_path),
             "-",
         ]
-        assert mock_run.call_args.kwargs["input"] == "hello"
-        assert mock_run.call_args.kwargs["timeout"] == 17
-        assert mock_run.call_args.kwargs["cwd"] == tmp_path.resolve()
+        assert kwargs["input"] == "hello"
+        assert kwargs["timeout"] == 17
+        assert kwargs["cwd"] == tmp_path.resolve()
 
     def test_handler_phase_uses_read_only_sandbox(self, tmp_path: Path) -> None:
         """Non-persistent exec with allowed_tools set runs read-only (#1672)."""
         from fido.provider import READ_ONLY_ALLOWED_TOOLS
 
-        mock_run = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
+        runner = _FakeRunner(_completed(_fixture("normal.jsonl")))
         run_codex_exec(
             "hello",
             model="gpt-5.5",
             cwd=tmp_path,
-            runner=mock_run,
+            runner=runner,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
         )
-        cmd = mock_run.call_args.args[0]
+        cmd, _ = runner.calls[0]
         assert cmd[cmd.index("--sandbox") + 1] == "read-only"
 
     def test_normalizes_relative_work_dir(
@@ -265,22 +374,23 @@ class TestRunCodexExec:
         work_dir = tmp_path / "work"
         work_dir.mkdir()
         monkeypatch.chdir(tmp_path)
-        mock_run = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
-        run_codex_exec("hello", model="gpt-5.5", cwd="work", runner=mock_run)
-        assert mock_run.call_args.args[0][-2] == str(work_dir)
-        assert mock_run.call_args.kwargs["cwd"] == work_dir
+        runner = _FakeRunner(_completed(_fixture("normal.jsonl")))
+        run_codex_exec("hello", model="gpt-5.5", cwd="work", runner=runner)
+        cmd, kwargs = runner.calls[0]
+        assert cmd[-2] == str(work_dir)
+        assert kwargs["cwd"] == work_dir
 
     def test_raises_cli_error_on_nonzero_exit(self) -> None:
-        mock_run = MagicMock(return_value=_completed(returncode=2, stderr="bad flags"))
+        runner = _FakeRunner(_completed(returncode=2, stderr="bad flags"))
         with pytest.raises(CodexCLIError) as exc_info:
-            run_codex_exec("hello", model="gpt-5.5", runner=mock_run)
+            run_codex_exec("hello", model="gpt-5.5", runner=runner)
         assert exc_info.value.returncode == 2
         assert exc_info.value.stderr == "bad flags"
 
     def test_raises_provider_error_from_successful_process_output(self) -> None:
-        mock_run = MagicMock(return_value=_completed(_fixture("rate-limit.jsonl")))
+        runner = _FakeRunner(_completed(_fixture("rate-limit.jsonl")))
         with pytest.raises(CodexProviderError) as exc_info:
-            run_codex_exec("hello", model="gpt-5.5", runner=mock_run)
+            run_codex_exec("hello", model="gpt-5.5", runner=runner)
         assert exc_info.value.kind == "rate_limit"
 
     def test_resume_builds_stable_json_exec_resume_command(
@@ -288,17 +398,17 @@ class TestRunCodexExec:
     ) -> None:
         prompt_file = tmp_path / "prompt.md"
         prompt_file.write_text("continue")
-        mock_run = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
+        runner = _FakeRunner(_completed(_fixture("normal.jsonl")))
         output = run_codex_exec_resume(
             "sess-1",
             prompt_file.read_text(),
             model=ProviderModel("gpt-5.5", "medium"),
             timeout=19,
             cwd=tmp_path,
-            runner=mock_run,
+            runner=runner,
         )
         assert extract_result_text(output) == "final reply"
-        cmd = mock_run.call_args.args[0]
+        cmd, kwargs = runner.calls[0]
         assert cmd == [
             "codex",
             "exec",
@@ -314,9 +424,9 @@ class TestRunCodexExec:
             "sess-1",
             "-",
         ]
-        assert mock_run.call_args.kwargs["input"] == "continue"
-        assert mock_run.call_args.kwargs["timeout"] == 19
-        assert mock_run.call_args.kwargs["cwd"] == tmp_path.resolve()
+        assert kwargs["input"] == "continue"
+        assert kwargs["timeout"] == 19
+        assert kwargs["cwd"] == tmp_path.resolve()
 
 
 class TestCodexAppServerClient:
@@ -325,7 +435,7 @@ class TestCodexAppServerClient:
             '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
             '{"id":2,"result":{"ok":true}}\n'
         )
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         assert client.request("example/method") == {"ok": True}
         written = process.stdin.getvalue().splitlines()
         assert '"method":"initialize"' in written[0]
@@ -336,21 +446,21 @@ class TestCodexAppServerClient:
     def test_invalid_json_fails_loudly(self) -> None:
         process = _FakeProcess("not-json\n")
         with pytest.raises(CodexProtocolError, match="invalid JSON"):
-            CodexAppServerClient(process_factory=lambda **_: process)
+            CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         assert process.terminated
 
     def test_oversized_line_fails_loudly(self) -> None:
         process = _FakeProcess('{"id":1,"result":{}}\n')
         with pytest.raises(CodexProtocolError, match="line too large"):
             CodexAppServerClient(
-                process_factory=lambda **_: process,
+                process_factory=_FakeAppServerSpawner(process),
                 max_line_bytes=1,
             )
         assert process.terminated
 
     def test_pid_returns_process_pid(self) -> None:
         process = _FakeProcess('{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n')
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         assert client.pid == process.pid
         client.stop()
 
@@ -359,7 +469,7 @@ class TestCodexAppServerClient:
             '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
             '{"id":2,"error":{"code":-32603,"message":"server is sad"}}\n'
         )
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         with pytest.raises(Exception) as excinfo:
             client.request("explode")
         assert "server is sad" in str(excinfo.value)
@@ -408,7 +518,7 @@ class TestCodexAppServerClient:
         process = self._streaming_process(
             '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
         )
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
 
         def feed() -> None:
             lines.put('{"method":"unrelated/event","params":{"x":1}}\n')
@@ -425,7 +535,7 @@ class TestCodexAppServerClient:
         process = self._streaming_process(
             '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
         )
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         lines.put('{"method":"event","params":{"keep":false}}\n')
         lines.put('{"method":"event","params":{"keep":true,"value":7}}\n')
         notif = client.wait_notification(
@@ -440,7 +550,7 @@ class TestCodexAppServerClient:
         process = self._streaming_process(
             '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
         )
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         with pytest.raises(TimeoutError, match="Timed out waiting for Codex"):
             client.wait_notification("never-arrives", timeout=0.1)
         lines.put(None)
@@ -451,7 +561,7 @@ class TestCodexAppServerClient:
         process = self._streaming_process(
             '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
         )
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         lines.put('{"method":"event","params":"not-an-object"}\n')
         with pytest.raises(CodexProtocolError, match="params must be an object"):
             client.wait_notification("event", timeout=2.0)
@@ -463,7 +573,7 @@ class TestCodexAppServerClient:
         process = self._streaming_process(
             '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
         )
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         assert client.is_alive()
         client.stop()
         assert not client.is_alive()
@@ -486,7 +596,7 @@ class TestCodexAppServerClient:
                 self._returncode = -9
 
         process = _Stubborn('{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n')
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+        client = CodexAppServerClient(process_factory=_FakeAppServerSpawner(process))
         client.stop()
         assert process.terminated
         assert process._returncode == -9  # kill() ran via the timeout path
@@ -504,7 +614,9 @@ class TestCodexAPI:
                 }
             ]
         }
-        api = CodexAPI(client_factory=lambda: fake, monotonic=lambda: 1.0)
+        api = CodexAPI(
+            client_factory=_FakeAppServerFactory(fake), clock=_FakeClock(1.0)
+        )
         snapshot = api.get_limit_snapshot()
         assert snapshot.provider == ProviderID.CODEX
         assert [window.name for window in snapshot.windows] == [
@@ -527,7 +639,9 @@ class TestCodexAPI:
                 }
             ]
         }
-        snapshot = CodexAPI(client_factory=lambda: fake).get_limit_snapshot()
+        snapshot = CodexAPI(
+            client_factory=_FakeAppServerFactory(fake)
+        ).get_limit_snapshot()
         assert [window.name for window in snapshot.windows] == ["workspace_credits"]
         assert snapshot.closest_to_exhaustion().pressure == 1.0
 
@@ -544,7 +658,9 @@ class TestCodexAPI:
                 "rateLimitReachedType": None,
             }
         }
-        snapshot = CodexAPI(client_factory=lambda: fake).get_limit_snapshot()
+        snapshot = CodexAPI(
+            client_factory=_FakeAppServerFactory(fake)
+        ).get_limit_snapshot()
         assert [window.name for window in snapshot.windows] == [
             "codex_primary",
             "codex_secondary",
@@ -559,15 +675,16 @@ class TestCodexAPI:
         with pytest.raises(
             ValueError, match="Codex rateLimits must be an object or list"
         ):
-            CodexAPI(client_factory=lambda: fake).get_limit_snapshot()
+            CodexAPI(client_factory=_FakeAppServerFactory(fake)).get_limit_snapshot()
 
     def test_client_factory_failure_is_unavailable_snapshot(self) -> None:
         # OSError is the realistic exception when the subprocess can't be spawned
         # (e.g. binary not found). It is in the narrowed catch set.
-        def fail() -> _FakeAppServer:
-            raise OSError("codex unavailable")
+        class _FailFactory:
+            def create(self, *, cwd: object = None) -> object:  # noqa: ARG002
+                raise OSError("codex unavailable")
 
-        snapshot = CodexAPI(client_factory=fail).get_limit_snapshot()
+        snapshot = CodexAPI(client_factory=_FailFactory()).get_limit_snapshot()
         assert snapshot.provider == ProviderID.CODEX
         assert snapshot.unavailable_reason is not None
         assert "codex unavailable" in snapshot.unavailable_reason
@@ -577,8 +694,8 @@ class TestCodexAPI:
         fake.responses["account/rateLimits/read"] = {
             "rateLimits": [{"limitId": "main", "primary": {"usedPercent": 1}}]
         }
-        now = 1.0
-        api = CodexAPI(client_factory=lambda: fake, monotonic=lambda: now)
+        clock = _FakeClock(1.0)
+        api = CodexAPI(client_factory=_FakeAppServerFactory(fake), clock=clock)
         first = api.get_limit_snapshot()
         second = api.get_limit_snapshot()
         assert first is second
@@ -622,7 +739,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         assert session.session_id == "thread-new"
         assert session.prompt("hello") == "reply"
@@ -680,7 +797,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         assert session.prompt("hello", allowed_tools=READ_ONLY_ALLOWED_TOOLS) == (
             "reply"
@@ -697,7 +814,7 @@ class TestCodexSession:
             work_dir=tmp_path,
             model="gpt-5.5",
             session_id="persisted",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         assert session.session_id == "persisted"
         assert fake.requests[0] == (
@@ -725,7 +842,7 @@ class TestCodexSession:
             work_dir=tmp_path,
             model="gpt-5.5",
             session_id="stale",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         assert session.session_id == "thread-new"
         assert session.dropped_session_count == 1
@@ -753,7 +870,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         session.send("work")
         session._fire_worker_cancel()
@@ -776,7 +893,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         session.send("work")
 
@@ -806,7 +923,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         session.send("work")
         with pytest.raises(CodexProviderError) as exc_info:
@@ -819,17 +936,9 @@ class TestCodexSession:
         system_file = tmp_path / "system.md"
         system_file.write_text("")
         fake = _FakeAppServer()
-        now = 0.0
-
-        def clock() -> float:
-            return now
-
-        def advance(timeout: float) -> None:
-            nonlocal now
-            now += timeout
-
+        clock = _AdvancingClock()
         fake.notification_timeouts_before_match = 2
-        fake.on_notification_wait = advance
+        fake.on_notification_wait = clock.advance
         fake.notifications.extend(
             [
                 {
@@ -853,7 +962,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
             turn_idle_timeout=10.0,
             clock=clock,
         )
@@ -867,22 +976,14 @@ class TestCodexSession:
         fake = _FakeAppServer()
         replacement = _FakeAppServer()
         clients = [fake, replacement]
-        now = 0.0
-
-        def clock() -> float:
-            return now
-
-        def advance(timeout: float) -> None:
-            nonlocal now
-            now += timeout
-
+        clock = _AdvancingClock()
         fake.notification_timeouts_before_match = 100
-        fake.on_notification_wait = advance
+        fake.on_notification_wait = clock.advance
         session = CodexSession(
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: clients.pop(0),
+            client_factory=_PopAppServerFactory(clients),
             turn_idle_timeout=2.5,
             clock=clock,
         )
@@ -904,7 +1005,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: clients.pop(0),
+            client_factory=_PopAppServerFactory(clients),
         )
 
         session.send("work")
@@ -936,7 +1037,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         with session._state_lock:
             session._last_turn_cancelled = True
@@ -954,7 +1055,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         boom = BrokenPipeError("codex pipe gone")
         boom.cancel_observed = True  # type: ignore[attr-defined]
@@ -976,7 +1077,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
 
         # Override ``send`` to simulate a peer-fired cancel mid-send.
@@ -1006,7 +1107,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model="gpt-5.5",
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         # Replace _prompt_inner to raise a bare exception (no
         # ``cancel_observed`` attached) — simulates ``__enter__``
@@ -1051,7 +1152,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
             snapshot_publisher=Recorder(),
         )
         assert session.prompt("hello") == "ok"
@@ -1090,7 +1191,7 @@ class TestCodexSession:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FakeAppServerFactory(fake),
         )
         # No publisher — prompt must not raise.
         assert session.prompt("hello") == "ok"
@@ -1112,7 +1213,7 @@ class TestCodexClient:
         system_file = tmp_path / "system.md"
         system_file.write_text("persona")
         session = MagicMock()
-        factory = MagicMock(return_value=session)
+        factory = _FakeSessionFactory(session)
         client = CodexClient(
             session_system_file=system_file,
             work_dir=tmp_path,
@@ -1120,14 +1221,14 @@ class TestCodexClient:
             session_factory=factory,
         )
         client.ensure_session(client.voice_model, session_id="thread-1")
-        factory.assert_called_once_with(
-            system_file,
-            work_dir=tmp_path,
-            model=client.voice_model,
-            repo_name="owner/repo",
-            session_id="thread-1",
-            snapshot_publisher=client,
-        )
+        assert len(factory.calls) == 1
+        call = factory.calls[0]
+        assert call["system_file"] == system_file
+        assert call["work_dir"] == tmp_path
+        assert call["model"] == client.voice_model
+        assert call["repo_name"] == "owner/repo"
+        assert call["session_id"] == "thread-1"
+        assert call["snapshot_publisher"] is client
         assert client.session is session
 
     def test_run_turn_through_fake_codex_session(self, tmp_path: Path) -> None:
@@ -1153,14 +1254,23 @@ class TestCodexClient:
                 },
             ]
         )
+
+        class _WrappingSessionFactory:
+            def create(
+                self,
+                system_file: object,
+                **kwargs: object,
+            ) -> object:
+                return CodexSession(
+                    system_file,  # type: ignore[arg-type]
+                    **kwargs,  # type: ignore[arg-type]
+                    client_factory=_FakeAppServerFactory(fake),
+                )
+
         client = CodexClient(
             session_system_file=system_file,
             work_dir=tmp_path,
-            session_factory=lambda *args, **kwargs: CodexSession(
-                *args,
-                **kwargs,
-                client_factory=lambda **_: fake,
-            ),
+            session_factory=_WrappingSessionFactory(),
         )
         assert client.run_turn("hello", model=client.work_model) == "reply"
         assert [method for method, _ in fake.requests] == ["thread/start", "turn/start"]
@@ -1178,16 +1288,17 @@ class TestCodexClient:
         prompt_file = tmp_path / "prompt.md"
         system_file.write_text("system")
         prompt_file.write_text("prompt")
-        runner = MagicMock(return_value=_completed(_fixture("normal.jsonl")))
+        runner = _FakeRunner(_completed(_fixture("normal.jsonl")))
         client = CodexClient(runner=runner)
 
         assert client.print_prompt_from_file(
             system_file, prompt_file, client.work_model, cwd=tmp_path
         )
-        assert runner.call_args.kwargs["input"] == "system\n\nprompt"
+        assert runner.calls[0][1]["input"] == "system\n\nprompt"
 
+        runner.result = _completed(_fixture("normal.jsonl"))
         client.resume_session("sess-1", prompt_file, client.brief_model, cwd=tmp_path)
-        assert runner.call_args.args[0][-3:] == ["resume", "sess-1", "-"]
+        assert runner.calls[1][0][-3:] == ["resume", "sess-1", "-"]
 
     def test_extract_session_id(self) -> None:
         client = CodexClient(session=MagicMock())

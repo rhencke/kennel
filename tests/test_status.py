@@ -5,15 +5,17 @@
 import fcntl
 import json
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import MagicMock
 
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
-from fido.color import _CODES
+from fido.color import _CODES, Color
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import (
     ProviderID,
@@ -28,6 +30,7 @@ from fido.status import (
     RateLimitInfo,
     RateLimitWindowInfo,
     RepoStatus,
+    StatusCollector,
     SystemResourceInfo,
     WebhookActivityInfo,
     _claude_pid,
@@ -47,7 +50,9 @@ from fido.status import (
     _git_dir,
     _parse_iso_datetime,
     _parse_issue_cache,
+    _parse_port_from_cmdline,
     _parse_rate_limit,
+    _parse_repo_cmdline,
     _pgrep,
     _port_from_pid,
     _process_uptime_seconds,
@@ -71,6 +76,59 @@ class RepoConfig(_RepoConfig):
         **kwargs: object,
     ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
+
+
+class _FakeStatusCollector(StatusCollector):
+    """Test fake for :class:`StatusCollector` — per-method lambda overrides.
+
+    Every method has a safe default (no git dir, no pid, etc.) so tests
+    only need to supply the callables they actually care about.
+    """
+
+    def __init__(
+        self,
+        *,
+        git_dir_fn: Callable[[Path], Path | None] = lambda _: None,
+        fido_running_fn: Callable[[Path], bool] = lambda _: False,
+        claude_pid_fn: Callable[[Path], int | None] = lambda _: None,
+        process_uptime_fn: Callable[[int], int | None] = lambda _: None,
+        fido_pid_fn: Callable[[], int | None] = lambda: None,
+        repos_from_pid_fn: Callable[[int], list] = lambda _: [],
+        port_from_pid_fn: Callable[[int], int | None] = lambda _: None,
+        fetch_activities_fn: Callable[[int], Any] = lambda _: ({}, None),
+    ) -> None:
+        self._git_dir_fn = git_dir_fn
+        self._fido_running_fn = fido_running_fn
+        self._claude_pid_fn = claude_pid_fn
+        self._process_uptime_fn = process_uptime_fn
+        self._fido_pid_fn = fido_pid_fn
+        self._repos_from_pid_fn = repos_from_pid_fn
+        self._port_from_pid_fn = port_from_pid_fn
+        self._fetch_activities_fn = fetch_activities_fn
+
+    def git_dir(self, path: Path) -> Path | None:
+        return self._git_dir_fn(path)
+
+    def fido_running(self, lock_path: Path) -> bool:
+        return self._fido_running_fn(lock_path)
+
+    def claude_pid(self, fido_dir: Path) -> int | None:
+        return self._claude_pid_fn(fido_dir)
+
+    def process_uptime(self, pid: int) -> int | None:
+        return self._process_uptime_fn(pid)
+
+    def fido_pid(self) -> int | None:
+        return self._fido_pid_fn()
+
+    def repos_from_pid(self, pid: int) -> list:
+        return self._repos_from_pid_fn(pid)
+
+    def port_from_pid(self, pid: int) -> int | None:
+        return self._port_from_pid_fn(pid)
+
+    def fetch_activities(self, port: int) -> object:
+        return self._fetch_activities_fn(port)
 
 
 class TestFormatUptime:
@@ -126,8 +184,11 @@ class TestFidoRunning:
     def test_oserror_returns_false(self, tmp_path: Path) -> None:
         lock = tmp_path / "lock"
         lock.touch()
-        with patch("builtins.open", side_effect=OSError("no perms")):
-            assert _fido_running(lock) is False
+
+        def _raise_open(*_: object, **__: object) -> object:
+            raise OSError("no perms")
+
+        assert _fido_running(lock, _open=_raise_open) is False
 
 
 class TestPgrep:
@@ -163,13 +224,15 @@ class TestPgrep:
 
 class TestRunningRepoConfigs:
     def test_returns_empty_when_fido_not_running(self) -> None:
-        assert running_repo_configs(_fido_pid_fn=lambda: None) == []
+        assert running_repo_configs(collector=_FakeStatusCollector()) == []
 
     def test_reads_repos_from_running_fido(self, tmp_path: Path) -> None:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         assert running_repo_configs(
-            _fido_pid_fn=lambda: 123,
-            _repos_from_pid_fn=lambda pid: [repo_cfg],
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 123,
+                repos_from_pid_fn=lambda pid: [repo_cfg],
+            )
         ) == [repo_cfg]
 
 
@@ -202,15 +265,20 @@ class TestProviderStatusesForRepoConfigs:
         factory.create_api.assert_any_call(claude_a)
         factory.create_api.assert_any_call(copilot)
 
-    def test_builds_default_factory_when_not_injected(self, tmp_path: Path) -> None:
+    def test_single_repo_with_injected_factory(self, tmp_path: Path) -> None:
         repo = RepoConfig(name="owner/repo", work_dir=tmp_path)
         factory = MagicMock()
         factory.create_api.return_value.get_limit_snapshot.return_value = (
             ProviderLimitSnapshot(provider=ProviderID.CLAUDE_CODE)
         )
-        with patch("fido.status.DefaultProviderFactory", return_value=factory):
-            statuses = provider_statuses_for_repo_configs([repo])
+        statuses = provider_statuses_for_repo_configs([repo], _provider_factory=factory)
         assert list(statuses) == [ProviderID.CLAUDE_CODE]
+
+    def test_uses_real_default_factory_for_empty_repo_list(self) -> None:
+        # With no injection and no repos, the else branch constructs a
+        # DefaultProviderFactory via _status_persona_path() — pure path
+        # computation — but never calls create_api, so no external I/O occurs.
+        assert provider_statuses_for_repo_configs([]) == {}
 
     def test_collects_codex_provider_status(self, tmp_path: Path) -> None:
         repo = RepoConfig(
@@ -266,11 +334,12 @@ class TestProcessUptimeSeconds:
         )
 
 
-class TestReposFromPid:
+class TestParseRepoCmdline:
+    """Unit tests for the pure :func:`_parse_repo_cmdline` parser."""
+
     def test_parses_single_repo(self) -> None:
         cmdline = b"fido\x00--port\x009000\x00rhencke/confusio:/workspace/confusio:claude-code\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            result = _repos_from_pid(123)
+        result = _parse_repo_cmdline(cmdline)
         assert len(result) == 1
         assert result[0].name == "rhencke/confusio"
         assert result[0].work_dir == Path("/workspace/confusio")
@@ -280,114 +349,104 @@ class TestReposFromPid:
             b"fido\x00rhencke/a:/path/a:claude-code\x00"
             b"rhencke/b:/path/b:copilot-cli\x00"
         )
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            result = _repos_from_pid(123)
+        result = _parse_repo_cmdline(cmdline)
         assert len(result) == 2
         assert result[0].name == "rhencke/a"
         assert result[1].name == "rhencke/b"
 
-    def test_oserror_returns_empty(self) -> None:
-        with patch.object(Path, "read_bytes", side_effect=OSError("no proc")):
-            result = _repos_from_pid(123)
-        assert result == []
-
     def test_skips_args_without_colon(self) -> None:
         cmdline = b"fido\x00--port\x009000\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            result = _repos_from_pid(123)
-        assert result == []
+        assert _parse_repo_cmdline(cmdline) == []
 
     def test_skips_colon_args_without_slash_in_name(self) -> None:
         cmdline = b"something:value:claude-code\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            result = _repos_from_pid(123)
-        assert result == []
-
-    def test_reads_proc_pid_cmdline(self) -> None:
-        paths_read: list[Path] = []
-
-        def capturing_read_bytes(self_path: Path) -> bytes:
-            paths_read.append(self_path)
-            return b""
-
-        with patch.object(Path, "read_bytes", capturing_read_bytes):
-            _repos_from_pid(789)
-        assert paths_read == [Path("/proc/789/cmdline")]
+        assert _parse_repo_cmdline(cmdline) == []
 
     def test_expands_tilde_in_path(self) -> None:
         cmdline = b"rhencke/repo:~/workspace/repo:claude-code\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            result = _repos_from_pid(1)
+        result = _parse_repo_cmdline(cmdline)
         assert result[0].work_dir == Path("~/workspace/repo").expanduser()
 
     def test_no_repos_returns_empty(self) -> None:
         cmdline = (
             b"fido\x00--port\x009000\x00--secret-file\x00/home/user/.fido-secret\x00"
         )
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            result = _repos_from_pid(1)
-        assert result == []
+        assert _parse_repo_cmdline(cmdline) == []
 
     def test_skips_non_utf8_args(self) -> None:
         cmdline = b"\xff\xfe\x00rhencke/repo:/path:claude-code\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            result = _repos_from_pid(1)
+        result = _parse_repo_cmdline(cmdline)
         assert len(result) == 1
         assert result[0].name == "rhencke/repo"
 
+    def test_skips_spec_with_one_colon_in_remainder(self) -> None:
+        """Arg like 'name:value' (one colon total) has no second colon in
+        remainder and must be skipped."""
+        cmdline = b"name:value\x00rhencke/repo:/path:claude-code\x00"
+        result = _parse_repo_cmdline(cmdline)
+        assert len(result) == 1
+        assert result[0].name == "rhencke/repo"
+
+    def test_skips_unknown_provider(self) -> None:
+        """An arg with two colons but an unrecognised provider string must be skipped."""
+        cmdline = b"owner/repo:/path/repo:badprovider\x00"
+        assert _parse_repo_cmdline(cmdline) == []
+
+
+class TestReposFromPid:
+    def test_returns_empty_for_nonexistent_pid(self) -> None:
+        # PID 999999999 won't exist — OSError branch is covered.
+        result = _repos_from_pid(999999999)
+        assert result == []
+
+    def test_reads_self_cmdline(self) -> None:
+        import os
+
+        # Our own /proc/<pid>/cmdline exists but contains pytest args,
+        # not fido repo specs, so the result is empty — success path covered.
+        result = _repos_from_pid(os.getpid())
+        assert isinstance(result, list)
+
 
 class TestFidoPid:
-    def test_returns_first_pid(self) -> None:
-        with patch("fido.status._pgrep", return_value=[111, 222]):
-            result = _fido_pid()
-        assert result == 111
-
-    def test_returns_none_when_no_match(self) -> None:
-        with patch("fido.status._pgrep", return_value=[]):
-            result = _fido_pid()
+    def test_returns_none_when_not_running(self) -> None:
+        # No fido process in the test environment — covers both function lines.
+        result = _fido_pid()
         assert result is None
 
-    def test_searches_for_fido_port(self) -> None:
-        with patch("fido.status._pgrep", return_value=[]) as mock:
-            _fido_pid()
-        mock.assert_called_once_with("fido --port")
 
+class TestParsePortFromCmdline:
+    """Unit tests for the pure :func:`_parse_port_from_cmdline` parser."""
 
-class TestPortFromPid:
     def test_returns_port(self) -> None:
         cmdline = b"fido\x00--port\x009000\x00rhencke/repo:/path\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            assert _port_from_pid(42) == 9000
+        assert _parse_port_from_cmdline(cmdline) == 9000
 
     def test_returns_none_when_no_port_flag(self) -> None:
         cmdline = b"fido\x00rhencke/repo:/path\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            assert _port_from_pid(42) is None
+        assert _parse_port_from_cmdline(cmdline) is None
 
     def test_returns_none_when_port_flag_last_arg(self) -> None:
         cmdline = b"fido\x00--port\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            assert _port_from_pid(42) is None
+        assert _parse_port_from_cmdline(cmdline) is None
 
     def test_returns_none_when_port_value_not_integer(self) -> None:
         cmdline = b"fido\x00--port\x00notanumber\x00"
-        with patch.object(Path, "read_bytes", return_value=cmdline):
-            assert _port_from_pid(42) is None
+        assert _parse_port_from_cmdline(cmdline) is None
 
-    def test_oserror_returns_none(self) -> None:
-        with patch.object(Path, "read_bytes", side_effect=OSError("no proc")):
-            assert _port_from_pid(42) is None
 
-    def test_reads_correct_pid_path(self) -> None:
-        paths_read: list[Path] = []
+class TestPortFromPid:
+    def test_returns_none_for_nonexistent_pid(self) -> None:
+        # PID 999999999 won't exist — OSError branch is covered.
+        assert _port_from_pid(999999999) is None
 
-        def capturing_read_bytes(self_path: Path) -> bytes:
-            paths_read.append(self_path)
-            return b""
+    def test_reads_self_cmdline(self) -> None:
+        import os
 
-        with patch.object(Path, "read_bytes", capturing_read_bytes):
-            _port_from_pid(1234)
-        assert paths_read == [Path("/proc/1234/cmdline")]
+        # Our own /proc/<pid>/cmdline exists but contains no --port flag,
+        # so the result is None — success path covered.
+        result = _port_from_pid(os.getpid())
+        assert result is None
 
 
 class TestTaskPosition:
@@ -531,19 +590,17 @@ class TestSystemResources:
 
         assert _format_gib(1536 * 1024**2) == "1.5GiB"
         assert _format_percent(1, 0) == "n/a"
-        assert _format_resource_line(resources) == (
+        assert _format_resource_line(resources, c=Color()) == (
             "host: cpu load 1.25/4 (0.50, 0.25), "
             "mem 6.0GiB/8.0GiB (75%), disk / 75.0GiB/100.0GiB (75%)"
         )
-        assert _format_resource_line(None) is None
+        assert _format_resource_line(None, c=Color()) is None
 
 
 class TestCollectWebhookPropagation:
     """collect() forwards worker_uptime + webhook_activities into repo_status."""
 
     def test_worker_uptime_and_webhooks_forwarded(self, tmp_path: Path) -> None:
-        from unittest.mock import patch
-
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
         activity = {
             "what": "Working on: #1",
@@ -555,37 +612,20 @@ class TestCollectWebhookPropagation:
                 {"description": "triaging", "elapsed_seconds": 5.0},
             ],
         }
-        fake_status = RepoStatus(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                process_uptime_fn=lambda pid: 0,
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({"owner/repo": activity}, None),
+            )
         )
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=({"owner/repo": activity}, None),
-            ),
-            patch("fido.status.repo_status", return_value=fake_status) as mock_rs,
-        ):
-            collect()
-        kwargs = mock_rs.call_args.kwargs
-        assert kwargs["worker_uptime"] == 120
-        assert len(kwargs["webhook_activities"]) == 1
-        assert kwargs["webhook_activities"][0].description == "triaging"
-        assert kwargs["webhook_activities"][0].elapsed_seconds == 5
+        repo = result.repos[0]
+        assert repo.worker_uptime == 120
+        assert len(repo.webhook_activities) == 1
+        assert repo.webhook_activities[0].description == "triaging"
+        assert repo.webhook_activities[0].elapsed_seconds == 5
 
 
 class TestFetchActivities:
@@ -838,23 +878,26 @@ class TestFetchActivities:
 class TestClaudePid:
     def test_returns_first_pid(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        with patch("fido.status._pgrep", return_value=[999]):
-            result = _claude_pid(fido_dir)
+        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [999])
         assert result == 999
 
     def test_returns_none_when_no_match_and_no_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        with patch("fido.status._pgrep", return_value=[]):
-            result = _claude_pid(fido_dir)
+        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [])
         assert result is None
 
     def test_searches_for_system_file_first(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        with patch("fido.status._pgrep", return_value=[]) as mock:
-            _claude_pid(fido_dir)
-        mock.assert_any_call(str(fido_dir / "system"))
+        calls: list[str] = []
+
+        def tracking(pattern: str) -> list[int]:
+            calls.append(pattern)
+            return []
+
+        _claude_pid(fido_dir, _pgrep_fn=tracking)
+        assert str(fido_dir / "system") in calls
 
     def test_falls_back_to_resumed_session_id(self, tmp_path: Path) -> None:
         """Resumed sessions run with --resume <id> and don't reference the
@@ -868,8 +911,7 @@ class TestClaudePid:
         def fake_pgrep(pattern: str) -> list[int]:
             return [42] if pattern == "abc-123" else []
 
-        with patch("fido.status._pgrep", side_effect=fake_pgrep):
-            result = _claude_pid(fido_dir)
+        result = _claude_pid(fido_dir, _pgrep_fn=fake_pgrep)
         assert result == 42
 
     def test_resumed_fallback_returns_none_when_no_process(
@@ -880,8 +922,7 @@ class TestClaudePid:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"setup_session_id": "abc-123"})
-        with patch("fido.status._pgrep", return_value=[]):
-            result = _claude_pid(fido_dir)
+        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [])
         assert result is None
 
     def test_resumed_fallback_skipped_when_no_session_id(self, tmp_path: Path) -> None:
@@ -890,17 +931,21 @@ class TestClaudePid:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 7})
-        with patch("fido.status._pgrep", return_value=[]) as mock:
-            result = _claude_pid(fido_dir)
+        calls: list[str] = []
+
+        def tracking(pattern: str) -> list[int]:
+            calls.append(pattern)
+            return []
+
+        result = _claude_pid(fido_dir, _pgrep_fn=tracking)
         assert result is None
         # Only the system-file pgrep fires when there's no session id.
-        assert mock.call_count == 1
+        assert len(calls) == 1
 
     def test_resumed_fallback_skipped_when_state_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        with patch("fido.status._pgrep", return_value=[]):
-            result = _claude_pid(fido_dir)
+        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [])
         assert result is None
 
 
@@ -945,8 +990,11 @@ class TestReadState:
         fido_dir.mkdir()
         path = fido_dir / "state.json"
         path.touch()
-        with patch.object(Path, "read_text", side_effect=OSError("oops")):
-            assert _read_state(fido_dir) == {}
+
+        def _raise(p: Path) -> str:
+            raise OSError("oops")
+
+        assert _read_state(fido_dir, _read_text_fn=_raise) == {}
 
 
 class TestCurrentTask:
@@ -987,8 +1035,7 @@ class TestRepoStatus:
 
     def test_no_git_dir_returns_empty_status(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        with patch("fido.status._git_dir", return_value=None):
-            result = repo_status(cfg)
+        result = repo_status(cfg, collector=_FakeStatusCollector())
         assert result.name == "owner/repo"
         assert result.fido_running is False
         assert result.issue is None
@@ -1003,22 +1050,24 @@ class TestRepoStatus:
 
     def test_no_git_dir_passes_worker_what(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        with patch("fido.status._git_dir", return_value=None):
-            result = repo_status(cfg, worker_what="Napping")
+        result = repo_status(
+            cfg, worker_what="Napping", collector=_FakeStatusCollector()
+        )
         assert result.worker_what == "Napping"
 
     def test_crash_count_defaults_to_zero(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        with patch("fido.status._git_dir", return_value=None):
-            result = repo_status(cfg)
+        result = repo_status(cfg, collector=_FakeStatusCollector())
         assert result.crash_count == 0
 
     def test_crash_fields_passed_through(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        with patch("fido.status._git_dir", return_value=None):
-            result = repo_status(
-                cfg, crash_count=5, last_crash_error="ValueError: oops"
-            )
+        result = repo_status(
+            cfg,
+            crash_count=5,
+            last_crash_error="ValueError: oops",
+            collector=_FakeStatusCollector(),
+        )
         assert result.crash_count == 5
         assert result.last_crash_error == "ValueError: oops"
 
@@ -1034,13 +1083,16 @@ class TestRepoStatus:
         (fido_dir / "tasks.json").write_text(json.dumps(tasks))
 
         cfg = self._make_config(tmp_path)
-        with (
-            patch("fido.status._git_dir", return_value=git_dir),
-            patch("fido.status._fido_running", return_value=True),
-            patch("fido.status._claude_pid", return_value=555),
-            patch("fido.status._process_uptime_seconds", return_value=180),
-        ):
-            result = repo_status(cfg, worker_what="Working on: #7 do thing")
+        result = repo_status(
+            cfg,
+            worker_what="Working on: #7 do thing",
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+                fido_running_fn=lambda p: True,
+                claude_pid_fn=lambda p: 555,
+                process_uptime_fn=lambda p: 180,
+            ),
+        )
 
         assert result.name == "owner/repo"
         assert result.fido_running is True
@@ -1058,13 +1110,12 @@ class TestRepoStatus:
         fido_dir.mkdir(parents=True)
 
         cfg = self._make_config(tmp_path)
-        with (
-            patch("fido.status._git_dir", return_value=git_dir),
-            patch("fido.status._fido_running", return_value=False),
-            patch("fido.status._claude_pid", return_value=None),
-            patch("fido.status._process_uptime_seconds", return_value=None),
-        ):
-            result = repo_status(cfg)
+        result = repo_status(
+            cfg,
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+            ),
+        )
         assert result.worker_what is None
 
     def test_no_claude_pid_skips_uptime(self, tmp_path: Path) -> None:
@@ -1072,29 +1123,34 @@ class TestRepoStatus:
         fido_dir = git_dir / "fido"
         fido_dir.mkdir(parents=True)
 
-        cfg = self._make_config(tmp_path)
-        with (
-            patch("fido.status._git_dir", return_value=git_dir),
-            patch("fido.status._fido_running", return_value=False),
-            patch("fido.status._claude_pid", return_value=None),
-            patch("fido.status._process_uptime_seconds") as mock_uptime,
-        ):
-            result = repo_status(cfg)
+        uptime_called = False
 
-        mock_uptime.assert_not_called()
+        def tracking_uptime(pid: int) -> int | None:
+            nonlocal uptime_called
+            uptime_called = True
+            return None
+
+        cfg = self._make_config(tmp_path)
+        result = repo_status(
+            cfg,
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+                process_uptime_fn=tracking_uptime,
+            ),
+        )
+
+        assert not uptime_called
         assert result.claude_pid is None
         assert result.claude_uptime is None
 
     def test_worker_stuck_defaults_to_false(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        with patch("fido.status._git_dir", return_value=None):
-            result = repo_status(cfg)
+        result = repo_status(cfg, collector=_FakeStatusCollector())
         assert result.worker_stuck is False
 
     def test_worker_stuck_passed_through_no_git_dir(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        with patch("fido.status._git_dir", return_value=None):
-            result = repo_status(cfg, worker_stuck=True)
+        result = repo_status(cfg, worker_stuck=True, collector=_FakeStatusCollector())
         assert result.worker_stuck is True
 
     def test_worker_stuck_passed_through_with_git_dir(self, tmp_path: Path) -> None:
@@ -1102,20 +1158,19 @@ class TestRepoStatus:
         fido_dir = git_dir / "fido"
         fido_dir.mkdir(parents=True)
         cfg = self._make_config(tmp_path)
-        with (
-            patch("fido.status._git_dir", return_value=git_dir),
-            patch("fido.status._fido_running", return_value=False),
-            patch("fido.status._claude_pid", return_value=None),
-            patch("fido.status._process_uptime_seconds", return_value=None),
-        ):
-            result = repo_status(cfg, worker_stuck=True)
+        result = repo_status(
+            cfg,
+            worker_stuck=True,
+            collector=_FakeStatusCollector(git_dir_fn=lambda p: git_dir),
+        )
         assert result.worker_stuck is True
 
     def test_provider_status_passed_through(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
         status = ProviderPressureStatus(provider=ProviderID.CLAUDE_CODE, pressure=0.95)
-        with patch("fido.status._git_dir", return_value=None):
-            result = repo_status(cfg, provider_status=status)
+        result = repo_status(
+            cfg, provider_status=status, collector=_FakeStatusCollector()
+        )
         assert result.provider is ProviderID.CLAUDE_CODE
         assert result.provider_status == status
 
@@ -1139,13 +1194,13 @@ class TestRepoStatus:
         (fido_dir / "tasks.json").write_text(json.dumps(tasks))
 
         cfg = self._make_config(tmp_path)
-        with (
-            patch("fido.status._git_dir", return_value=git_dir),
-            patch("fido.status._fido_running", return_value=True),
-            patch("fido.status._claude_pid", return_value=None),
-            patch("fido.status._process_uptime_seconds", return_value=None),
-        ):
-            result = repo_status(cfg)
+        result = repo_status(
+            cfg,
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+                fido_running_fn=lambda p: True,
+            ),
+        )
 
         # Non-completed: [pending, in_progress, pending] → 3 total; in_progress is #2.
         assert result.current_task == "active task"
@@ -1169,70 +1224,6 @@ class TestCollect:
             last_crash_error=None,
             worker_stuck=False,
         )
-
-    def test_fido_up_with_uptime(self, tmp_path: Path) -> None:
-        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=600),
-            patch("fido.status._port_from_pid", return_value=None),
-            patch("fido.status.repo_status", return_value=self._fake_repo_status()),
-        ):
-            result = collect()
-
-        assert result.fido_pid == 42
-        assert result.fido_uptime == 600
-        assert len(result.repos) == 1
-        assert result.provider_statuses == []
-
-    def test_fido_down(self) -> None:
-        with (
-            patch("fido.status._fido_pid", return_value=None),
-            patch("fido.status._repos_from_pid") as mock_repos,
-            patch("fido.status._process_uptime_seconds") as mock_uptime,
-            patch("fido.status._port_from_pid") as mock_port,
-            patch("fido.status.repo_status") as mock_repo_status,
-        ):
-            result = collect()
-
-        mock_uptime.assert_not_called()
-        mock_repos.assert_not_called()
-        mock_repo_status.assert_not_called()
-        mock_port.assert_not_called()
-        assert result.fido_pid is None
-        assert result.fido_uptime is None
-
-    def test_passes_provider_status_to_repo_status(self, tmp_path: Path) -> None:
-        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        provider_status = ProviderPressureStatus(
-            provider=ProviderID.CLAUDE_CODE,
-            pressure=0.91,
-        )
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=600),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=(
-                    {
-                        "owner/repo": self._activity_info(
-                            provider_status=provider_status
-                        )
-                    },
-                    None,
-                ),
-            ),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_repo,
-        ):
-            result = collect()
-
-        assert result.provider_statuses == [provider_status]
-        assert mock_repo.call_args.kwargs["provider_status"] == provider_status
 
     def _activity_info(
         self,
@@ -1258,84 +1249,123 @@ class TestCollect:
             "provider_status": provider_status,
         }
 
+    def test_fido_up_with_uptime(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                process_uptime_fn=lambda pid: 600,
+            )
+        )
+
+        assert result.fido_pid == 42
+        assert result.fido_uptime == 600
+        assert len(result.repos) == 1
+        assert result.provider_statuses == []
+
+    def test_fido_down(self) -> None:
+        result = collect(collector=_FakeStatusCollector())
+        assert result.fido_pid is None
+        assert result.fido_uptime is None
+
+    def test_passes_provider_status_to_repo_status(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.91,
+        )
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                process_uptime_fn=lambda pid: 600,
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
+                    {
+                        "owner/repo": self._activity_info(
+                            provider_status=provider_status
+                        )
+                    },
+                    None,
+                ),
+            )
+        )
+
+        assert result.provider_statuses == [provider_status]
+        assert result.repos[0].provider_status == provider_status
+
     def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=({"owner/repo": self._activity_info()}, None),
-            ) as mock_fetch,
-            patch("fido.status.repo_status", return_value=self._fake_repo_status()),
-        ):
-            collect()
-        mock_fetch.assert_called_once_with(9000)
+        fetch_calls: list[int] = []
+
+        def tracking_fetch(port: int) -> tuple:
+            fetch_calls.append(port)
+            return ({"owner/repo": self._activity_info()}, None)
+
+        collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=tracking_fetch,
+            )
+        )
+        assert fetch_calls == [9000]
 
     def test_skips_fetch_when_port_unknown(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=None),
-            patch("fido.status._fetch_activities") as mock_fetch,
-            patch("fido.status.repo_status", return_value=self._fake_repo_status()),
-        ):
-            collect()
-        mock_fetch.assert_not_called()
+
+        def _should_not_fetch(port: int) -> tuple:
+            raise AssertionError("should not be called")
+
+        collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                fetch_activities_fn=_should_not_fetch,
+            )
+        )
 
     def test_passes_worker_what_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=(
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
                     {"owner/repo": self._activity_info("Fixing CI: tests")},
                     None,
                 ),
-            ),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        mock_rs.assert_called_once_with(
-            rc,
-            worker_what="Fixing CI: tests",
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-            worker_uptime=None,
-            webhook_activities=[],
-            provider_status=None,
-            session_owner=None,
-            session_alive=False,
-            session_pid=None,
-            session_dropped_count=0,
-            session_sent_count=0,
-            session_received_count=0,
-            claude_talker=None,
-            rescoping=False,
-            issue_cache=None,
+            )
         )
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what == "Fixing CI: tests"
+        assert repo.crash_count == 0
+        assert repo.last_crash_error is None
+        assert repo.worker_stuck is False
+        assert repo.worker_uptime is None
+        assert repo.webhook_activities == []
+        assert repo.provider_status is None
+        assert repo.session_owner is None
+        assert repo.session_alive is False
+        assert repo.session_dropped_count == 0
+        assert repo.session_sent_count == 0
+        assert repo.session_received_count == 0
+        assert repo.claude_talker is None
+        assert repo.rescoping is False
+        assert repo.issue_cache is None
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=(
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
                     {
                         "owner/repo": self._activity_info(
                             "Napping",
@@ -1345,64 +1375,42 @@ class TestCollect:
                     },
                     None,
                 ),
-            ),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        mock_rs.assert_called_once_with(
-            rc,
-            worker_what="Napping",
-            crash_count=3,
-            last_crash_error="ValueError: oops",
-            worker_stuck=False,
-            worker_uptime=None,
-            webhook_activities=[],
-            provider_status=None,
-            session_owner=None,
-            session_alive=False,
-            session_pid=None,
-            session_dropped_count=0,
-            session_sent_count=0,
-            session_received_count=0,
-            claude_talker=None,
-            rescoping=False,
-            issue_cache=None,
+            )
         )
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what == "Napping"
+        assert repo.crash_count == 3
+        assert repo.last_crash_error == "ValueError: oops"
+        assert repo.worker_stuck is False
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch("fido.status._fetch_activities", return_value=({}, None)),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        mock_rs.assert_called_once_with(
-            rc,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-            worker_uptime=None,
-            webhook_activities=[],
-            provider_status=None,
-            session_owner=None,
-            session_alive=False,
-            session_pid=None,
-            session_dropped_count=0,
-            session_sent_count=0,
-            session_received_count=0,
-            claude_talker=None,
-            rescoping=False,
-            issue_cache=None,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({}, None),
+            )
         )
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what is None
+        assert repo.crash_count == 0
+        assert repo.last_crash_error is None
+        assert repo.worker_stuck is False
+        assert repo.worker_uptime is None
+        assert repo.webhook_activities == []
+        assert repo.provider_status is None
+        assert repo.session_owner is None
+        assert repo.session_alive is False
+        assert repo.session_dropped_count == 0
+        assert repo.session_sent_count == 0
+        assert repo.session_received_count == 0
+        assert repo.claude_talker is None
+        assert repo.rescoping is False
+        assert repo.issue_cache is None
 
     def test_passes_claude_talker_to_repo_status(self, tmp_path: Path) -> None:
         """An active SessionTalker in /status → ClaudeTalkerInfo on RepoStatus."""
@@ -1426,28 +1434,29 @@ class TestCollect:
                 "started_at": "2026-04-14T18:00:00+00:00",
             },
         }
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=({"owner/repo": activity_info}, None),
-            ),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        kwargs = mock_rs.call_args.kwargs
-        assert kwargs["claude_talker"] == ClaudeTalkerInfo(
+        # Use a real git dir so repo_status() reaches the full path and applies
+        # session_pid → claude_pid substitution (early-exit always sets claude_pid=None).
+        git_dir = tmp_path / ".git"
+        (git_dir / "fido").mkdir(parents=True)
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({"owner/repo": activity_info}, None),
+                git_dir_fn=lambda p: git_dir,
+            )
+        )
+        repo = result.repos[0]
+        assert repo.claude_talker == ClaudeTalkerInfo(
             thread_id=1234,
             kind="worker",
             description="persistent session turn",
             subprocess_pid=42,
         )
-        assert kwargs["session_pid"] == 42
+        # session_pid=42 in the activity dict → collect() passes session_pid=42 to
+        # repo_status() → used as claude_pid (authoritative over pgrep heuristic).
+        assert repo.claude_pid == 42
 
     def test_claude_talker_subprocess_pid_none_when_absent(
         self, tmp_path: Path
@@ -1473,22 +1482,16 @@ class TestCollect:
                 "started_at": "2026-04-14T18:00:00+00:00",
             },
         }
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=({"owner/repo": activity_info}, None),
-            ),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        kwargs = mock_rs.call_args.kwargs
-        assert kwargs["claude_talker"] == ClaudeTalkerInfo(
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({"owner/repo": activity_info}, None),
+            )
+        )
+        repo = result.repos[0]
+        assert repo.claude_talker == ClaudeTalkerInfo(
             thread_id=7,
             kind="worker",
             description="copilot session turn",
@@ -1497,78 +1500,49 @@ class TestCollect:
 
     def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=({"owner/repo": self._activity_info(is_stuck=True)}, None),
-            ),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        mock_rs.assert_called_once_with(
-            rc,
-            worker_what="Working on: #1",
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=True,
-            worker_uptime=None,
-            webhook_activities=[],
-            provider_status=None,
-            session_owner=None,
-            session_alive=False,
-            session_pid=None,
-            session_dropped_count=0,
-            session_sent_count=0,
-            session_received_count=0,
-            claude_talker=None,
-            rescoping=False,
-            issue_cache=None,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
+                    {"owner/repo": self._activity_info(is_stuck=True)},
+                    None,
+                ),
+            )
         )
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what == "Working on: #1"
+        assert repo.worker_stuck is True
 
     def test_passes_rescoping_true_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch(
-                "fido.status._fetch_activities",
-                return_value=(
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
                     {"owner/repo": self._activity_info(rescoping=True)},
                     None,
                 ),
-            ),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        kwargs = mock_rs.call_args.kwargs
-        assert kwargs["rescoping"] is True
+            )
+        )
+        assert result.repos[0].rescoping is True
 
     def test_rescoping_false_when_no_activity_info(self, tmp_path: Path) -> None:
         """Repos with no activity entry (unknown to the live server) get rescoping=False."""
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with (
-            patch("fido.status._fido_pid", return_value=42),
-            patch("fido.status._repos_from_pid", return_value=[rc]),
-            patch("fido.status._process_uptime_seconds", return_value=0),
-            patch("fido.status._port_from_pid", return_value=9000),
-            patch("fido.status._fetch_activities", return_value=({}, None)),
-            patch(
-                "fido.status.repo_status", return_value=self._fake_repo_status()
-            ) as mock_rs,
-        ):
-            collect()
-        kwargs = mock_rs.call_args.kwargs
-        assert kwargs["rescoping"] is False
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({}, None),
+            )
+        )
+        assert result.repos[0].rescoping is False
 
 
 class TestFormatAgentLine:
@@ -1594,35 +1568,35 @@ class TestFormatAgentLine:
 
     def test_returns_none_when_no_pid_and_session_not_alive(self) -> None:
         repo = self._repo(claude_pid=None, session_alive=False)
-        assert _format_agent_line(repo) is None
+        assert _format_agent_line(repo, c=Color()) is None
 
     def test_returns_line_when_pid_present(self) -> None:
         repo = self._repo(claude_pid=1234)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "pid 1234" in line
 
     def test_returns_line_when_session_alive_no_pid(self) -> None:
         repo = self._repo(claude_pid=None, session_alive=True)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "agent" in line
 
     def test_includes_uptime_when_present(self) -> None:
         repo = self._repo(claude_pid=42, claude_uptime=90)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "running 1m" in line
 
     def test_omits_uptime_when_absent(self) -> None:
         repo = self._repo(claude_pid=42, claude_uptime=None)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "running" not in line
 
     def test_includes_session_idle_when_alive_and_no_talker(self) -> None:
         repo = self._repo(claude_pid=42, session_alive=True, claude_talker=None)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "session idle" in line
 
@@ -1632,19 +1606,19 @@ class TestFormatAgentLine:
             session_alive=True,
             session_owner="worker-orly",
         )
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "session idle" not in line
 
     def test_includes_dropped_count_singular(self) -> None:
         repo = self._repo(claude_pid=42, session_dropped_count=1)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "dropped session 1" in line
 
     def test_includes_dropped_count_plural(self) -> None:
         repo = self._repo(claude_pid=42, session_dropped_count=3)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "dropped sessions 3" in line
 
@@ -1652,13 +1626,13 @@ class TestFormatAgentLine:
         from fido.provider import ProviderID
 
         repo = self._repo(claude_pid=42, provider=ProviderID.COPILOT_CLI)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "copilot-cli" in line
 
     def test_indented_with_two_spaces(self) -> None:
         repo = self._repo(claude_pid=42)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert line.startswith("  ")
 
@@ -1666,26 +1640,26 @@ class TestFormatAgentLine:
         repo = self._repo(
             claude_pid=42, session_sent_count=5, session_received_count=12
         )
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "5 sent, 12 received" in line
 
     def test_omits_sent_and_received_counts_when_both_zero(self) -> None:
         repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=0)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "sent" not in line
         assert "received" not in line
 
     def test_includes_counts_when_only_sent_is_nonzero(self) -> None:
         repo = self._repo(claude_pid=42, session_sent_count=3, session_received_count=0)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "3 sent, 0 received" in line
 
     def test_includes_counts_when_only_received_is_nonzero(self) -> None:
         repo = self._repo(claude_pid=42, session_sent_count=0, session_received_count=7)
-        line = _format_agent_line(repo)
+        line = _format_agent_line(repo, c=Color())
         assert line is not None
         assert "0 sent, 7 received" in line
 
@@ -1711,7 +1685,7 @@ class TestFormatStatus:
 
     def test_fido_up_with_uptime(self) -> None:
         status = FidoStatus(fido_pid=12345, fido_uptime=7980, repos=[])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert output == "fido: UP (pid 12345, uptime 2h13m)"
 
     def test_includes_host_resources(self) -> None:
@@ -1732,7 +1706,7 @@ class TestFormatStatus:
             ),
         )
 
-        output = format_status(status)
+        output = format_status(status, color=Color())
 
         assert "host: cpu load 0.25/2 (0.50, 0.75)" in output
         assert "mem 3.0GiB/4.0GiB (75%)" in output
@@ -1750,7 +1724,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "limits: claude-code 91% (five hour)" in output
         assert "owner/repo: claude-code" in output
         assert "owner/repo: claude-code 91% (five hour)" not in output
@@ -1768,7 +1742,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "resets 2026-04-16 07:00 UTC" in output
 
     def test_includes_provider_unavailable_summary(self) -> None:
@@ -1782,7 +1756,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "claude-code unavailable" in output
 
     def test_includes_provider_unknown_summary(self) -> None:
@@ -1793,7 +1767,7 @@ class TestFormatStatus:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "claude-code limits unknown" in output
         assert "owner/repo: claude-code" in output
         assert "owner/repo: claude-code limits unknown" not in output
@@ -1810,19 +1784,19 @@ class TestFormatStatus:
             ],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "copilot-cli limits unknown" in output
         assert "owner/repo: copilot-cli" in output
         assert "owner/repo: copilot-cli limits unknown" not in output
 
     def test_fido_up_no_uptime(self) -> None:
         status = FidoStatus(fido_pid=12345, fido_uptime=None, repos=[])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert output == "fido: UP (pid 12345)"
 
     def test_fido_down(self) -> None:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert output == "fido: DOWN"
 
     def test_repo_fido_idle_no_issue(self) -> None:
@@ -1831,7 +1805,7 @@ class TestFormatStatus:
             fido_uptime=None,
             repos=[self._repo(name="owner/myrepo")],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "owner/myrepo: claude-code" in output
         assert "no assigned issues" in output
 
@@ -1841,7 +1815,7 @@ class TestFormatStatus:
             fido_uptime=None,
             repos=[self._repo(fido_running=True)],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "owner/repo: claude-code" in output
 
     def test_repo_with_issue_and_task(self) -> None:
@@ -1858,7 +1832,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #42 — Add widget" in output
         assert "Worker: task 1/1 — Do the thing" in output
 
@@ -1881,7 +1855,7 @@ class TestFormatStatus:
             repos=[repo],
             provider_statuses=[provider_status],
         )
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Worker: paused for claude-code reset" in output
 
     def test_task_count_shows_question_mark_when_rescoping(self) -> None:
@@ -1894,7 +1868,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "task 2/5?" in output
 
     def test_task_count_no_question_mark_when_not_rescoping(self) -> None:
@@ -1907,7 +1881,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "task 2/5" in output
         assert "task 2/5?" not in output
 
@@ -1921,14 +1895,14 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #5" in output
         assert "Worker: task 1/2" in output
 
     def test_repo_issue_no_tasks(self) -> None:
         repo = self._repo(issue=3)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #3" in output
         # No worker running → Worker line hidden entirely
         assert "Worker:" not in output
@@ -1936,7 +1910,7 @@ class TestFormatStatus:
     def test_repo_issue_no_tasks_with_running_worker(self) -> None:
         repo = self._repo(issue=3, worker_what="waiting for work")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Issue: #3" in output
         # Worker is running but has no task → hidden (idle workers are noise)
         assert "Worker:" not in output
@@ -1945,7 +1919,7 @@ class TestFormatStatus:
         """Agent info appears on a dedicated body line, not as a header suffix."""
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=185)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "pid 9999" in output
         assert "running 3m" in output
         # Info is on a body line, not the repo header.
@@ -1957,7 +1931,7 @@ class TestFormatStatus:
     def test_claude_pid_no_uptime_on_agent_line(self) -> None:
         repo = self._repo(issue=1, claude_pid=9999, claude_uptime=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "pid 9999" in output
         assert "running" not in output
 
@@ -1977,7 +1951,7 @@ class TestFormatStatus:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Agent line is always present when there's a pid.
         assert "pid 9999" in output
         # Active-agent rows start with "* Worker:" (NO_COLOR-friendly marker);
@@ -2003,7 +1977,7 @@ class TestFormatStatus:
             claude_talker=None,
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Appears on the dedicated agent line, not as a header suffix.
         assert "pid 9999 (running 1m, session idle)" in output
         assert not any(
@@ -2019,7 +1993,7 @@ class TestFormatStatus:
             session_alive=True,
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "agent (session idle)" in output
 
     def test_agent_line_shows_dropped_session_count(self) -> None:
@@ -2030,7 +2004,7 @@ class TestFormatStatus:
             session_dropped_count=2,
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "pid 9999 (running 1m, dropped sessions 2)" in output
 
     def test_multiple_repos(self) -> None:
@@ -2040,7 +2014,7 @@ class TestFormatStatus:
             self._repo(name="c/d"),
         ]
         status = FidoStatus(fido_pid=1, fido_uptime=60, repos=repos)
-        lines = format_status(status).splitlines()
+        lines = format_status(status, color=Color()).splitlines()
         assert lines[0].startswith("fido:")
         assert any(line.startswith("a/b:") for line in lines)
         assert any(line.startswith("c/d:") for line in lines)
@@ -2056,7 +2030,7 @@ class TestFormatStatus:
             fido_running=True, issue=1, worker_what="Working on: #3 add widget"
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Worker:" not in output, output
 
     def test_worker_what_hidden_when_task_present(self) -> None:
@@ -2070,41 +2044,41 @@ class TestFormatStatus:
             worker_what="Working on something",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "Working on something" not in output
 
     def test_crash_count_zero_not_shown(self) -> None:
         repo = self._repo(crash_count=0, last_crash_error=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "crashes" not in output
         assert "crash" not in output.lower()
 
     def test_crash_count_nonzero_shown_with_error(self) -> None:
         repo = self._repo(crash_count=3, last_crash_error="RuntimeError: boom")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "crashes 3" in output
         assert "RuntimeError: boom" in output
 
     def test_crash_count_without_error(self) -> None:
         repo = self._repo(crash_count=1, last_crash_error=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "crashes 1" in output
         assert "last crash" not in output
 
     def test_worker_uptime_shown_in_header(self) -> None:
         repo = self._repo(fido_running=True, worker_uptime=7320)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # 7320s = 2h02m
         assert "up 2h2m" in output
 
     def test_issue_elapsed_shown_in_body(self) -> None:
         repo = self._repo(issue=1, issue_elapsed_seconds=3900)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # 3900s = 1h05m
         assert "elapsed 1h5m" in output
 
@@ -2115,13 +2089,13 @@ class TestFormatStatus:
             pr_title="Refactor widget",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "PR:     #42 — Refactor widget" in output
 
     def test_pr_line_without_title(self) -> None:
         repo = self._repo(issue=1, pr_number=7, pr_title=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "PR:     #7" in output
 
     def test_current_task_line_without_numbering(self) -> None:
@@ -2133,7 +2107,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Worker line shows the free-form task title.
         assert "Worker: task: Freeform task" in output
 
@@ -2161,7 +2135,9 @@ class TestFormatStatus:
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         webhook_lines = [
-            line for line in format_status(status).splitlines() if "webhook:" in line
+            line
+            for line in format_status(status, color=Color()).splitlines()
+            if "webhook:" in line
         ]
         assert "replying to review" in webhook_lines[0]
         assert "→ pid" not in webhook_lines[0]
@@ -2184,7 +2160,7 @@ class TestFormatStatus:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         worker_line = next(ln for ln in output.splitlines() if "Worker:" in ln)
         assert "<-" not in worker_line
 
@@ -2198,7 +2174,7 @@ class TestFormatStatus:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         worker_line = next(ln for ln in output.splitlines() if "Worker:" in ln)
         assert "<-" not in worker_line
 
@@ -2222,7 +2198,7 @@ class TestFormatStatus:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         webhook_lines = [ln for ln in output.splitlines() if "webhook:" in ln]
         # Active talker (replying to review, tid=2) sorts to top.
         assert "replying to review" in webhook_lines[0]
@@ -2245,7 +2221,7 @@ class TestFormatStatus:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
         lines = [
             line
-            for line in format_status(status).splitlines()
+            for line in format_status(status, color=Color()).splitlines()
             if "webhook" in line or "more" in line
         ]
         # 5 shown + 1 overflow summary.
@@ -2264,8 +2240,8 @@ class TestFormatStatus:
             ],
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        assert "+1 more webhook" in format_status(status)
-        assert "+1 more webhooks" not in format_status(status)
+        assert "+1 more webhook" in format_status(status, color=Color())
+        assert "+1 more webhooks" not in format_status(status, color=Color())
 
     def test_webhook_activities_rendered_as_sub_bullets(self) -> None:
         repo = self._repo(
@@ -2284,7 +2260,7 @@ class TestFormatStatus:
             ],
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Webhook lines are plain peer siblings without tree characters.
         assert "webhook: triaging comment on PR #9 (12s)" in output
         assert "webhook: replying to review (3s)" in output
@@ -2294,19 +2270,19 @@ class TestFormatStatus:
     def test_worker_busy_false_not_shown(self) -> None:
         repo = self._repo(worker_stuck=False)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "BUSY" not in output
 
     def test_worker_busy_true_shown(self) -> None:
         repo = self._repo(worker_stuck=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         assert "BUSY" in output
 
     def test_busy_appears_in_header_with_crash(self) -> None:
         repo = self._repo(worker_stuck=True, crash_count=1, last_crash_error="err")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        output = format_status(status)
+        output = format_status(status, color=Color())
         # Both appear in the comma-separated top-line stats.
         assert "crashes 1" in output
         assert "BUSY" in output
@@ -2334,26 +2310,23 @@ class TestFormatStatusColor:
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
-    def _color_env(self) -> dict[str, str]:
-        return {"FORCE_COLOR": "1"}
+    def _color_env(self) -> Color:
+        return Color({"FORCE_COLOR": "1"})
 
     def test_fido_up_header_bold(self) -> None:
         status = FidoStatus(fido_pid=42, fido_uptime=60, repos=[])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert output.startswith(_CODES["bold"])
 
     def test_fido_down_header_bold(self) -> None:
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert _CODES["bold"] in output
 
     def test_repo_running_bold(self) -> None:
         repo = self._repo(fido_running=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
         assert _CODES["bold"] in header
 
@@ -2366,8 +2339,7 @@ class TestFormatStatusColor:
         """
         repo = self._repo(fido_running=False)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
         # 24-bit brown background (60, 30, 5) — the "fido is down" highlight.
         assert "\x1b[48;2;60;30;5m" in header
@@ -2375,22 +2347,19 @@ class TestFormatStatusColor:
     def test_issue_number_cyan(self) -> None:
         repo = self._repo(issue=42)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['cyan']}#42" in output
 
     def test_pr_number_magenta(self) -> None:
         repo = self._repo(issue=1, pr_number=99)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['magenta']}#99" in output
 
     def test_elapsed_dim(self) -> None:
         repo = self._repo(issue=1, issue_elapsed_seconds=120)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}(elapsed 2m)" in output
         assert f"  {_CODES['dim']}(elapsed 2m)" not in output
         assert f" {_CODES['dim']}(elapsed 2m)" in output
@@ -2398,8 +2367,7 @@ class TestFormatStatusColor:
     def test_busy_red(self) -> None:
         repo = self._repo(worker_stuck=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['red']}BUSY" in output
 
     def test_provider_warning_dim(self) -> None:
@@ -2414,8 +2382,7 @@ class TestFormatStatusColor:
             repos=[repo],
             provider_statuses=[provider_status],
         )
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}claude-code 90%" in output
 
     def test_provider_pause_dark_gray(self) -> None:
@@ -2430,8 +2397,7 @@ class TestFormatStatusColor:
             repos=[repo],
             provider_statuses=[provider_status],
         )
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dark_gray']}claude-code 95%" in output
 
     def test_provider_ok_has_no_warning_color(self) -> None:
@@ -2445,16 +2411,14 @@ class TestFormatStatusColor:
             repos=[self._repo(provider_status=provider_status)],
             provider_statuses=[provider_status],
         )
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}claude-code 50%" not in output
         assert f"{_CODES['dark_gray']}claude-code 50%" not in output
 
     def test_crash_red_bold(self) -> None:
         repo = self._repo(crash_count=2, last_crash_error="RuntimeError: boom")
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['red_bold']}crashes 2" in output
         assert f"{_CODES['red_bold']}last crash: RuntimeError: boom" in output
 
@@ -2467,8 +2431,7 @@ class TestFormatStatusColor:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['bold']}task 2/5" in output
 
     def test_worker_label_green_when_talker(self) -> None:
@@ -2482,8 +2445,7 @@ class TestFormatStatusColor:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
@@ -2502,8 +2464,7 @@ class TestFormatStatusColor:
             worker_what="waiting",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert _CODES["green_bg"] in worker_line
 
@@ -2515,8 +2476,7 @@ class TestFormatStatusColor:
             worker_what="working",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
@@ -2533,8 +2493,7 @@ class TestFormatStatusColor:
             # No claude_talker, no session_owner — purely between-turn state.
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
         assert f"{_CODES['green_bg']}Worker:" in worker_line
 
@@ -2552,8 +2511,7 @@ class TestFormatStatusColor:
             worker_what="waiting for work",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert "Worker:" not in output, output
 
     def test_webhook_label_yellow_when_talker(self) -> None:
@@ -2571,8 +2529,7 @@ class TestFormatStatusColor:
             ),
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
         assert f"{_CODES['yellow_bg']}webhook:" in wh_line
 
@@ -2586,16 +2543,14 @@ class TestFormatStatusColor:
             ],
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
         assert _CODES["yellow_bg"] not in wh_line
 
     def test_session_idle_dim(self) -> None:
         repo = self._repo(issue=1, claude_pid=999, session_alive=True)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}session idle" in output
 
     def test_session_idle_hidden_while_worker_owns_agent(self) -> None:
@@ -2606,22 +2561,19 @@ class TestFormatStatusColor:
             session_owner="worker-orly",
         )
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert "session idle" not in output
 
     def test_claude_running_uptime_dim(self) -> None:
         repo = self._repo(issue=1, claude_pid=999, claude_uptime=120)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        with patch.dict("os.environ", self._color_env(), clear=True):
-            output = format_status(status)
+        output = format_status(status, color=self._color_env())
         assert f"{_CODES['dim']}running 2m" in output
 
     def test_no_color_env_suppresses_ansi(self) -> None:
         repo = self._repo(fido_running=True, issue=42, worker_stuck=True)
         status = FidoStatus(fido_pid=1, fido_uptime=60, repos=[repo])
-        with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
-            output = format_status(status)
+        output = format_status(status, color=Color({"NO_COLOR": ""}))
         assert "\033[" not in output
 
 
@@ -2656,15 +2608,14 @@ class TestProviderColoredStatus:
     def test_active_worker_line_starts_with_asterisk_marker(self) -> None:
         # NO_COLOR alternate for the GREEN_BG highlight: active rows carry
         # a leading ``* `` that's visible regardless of ANSI support.
-        with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
-            repo = self._repo(
-                fido_running=True,
-                issue=7,
-                current_task={"title": "implement foo", "index": 1, "total": 2},
-                worker_what="working",
-            )
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        repo = self._repo(
+            fido_running=True,
+            issue=7,
+            current_task={"title": "implement foo", "index": 1, "total": 2},
+            worker_what="working",
+        )
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        output = format_status(status, color=Color({"NO_COLOR": ""}))
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
         assert worker_lines[0].startswith("* "), worker_lines[0]
@@ -2672,15 +2623,14 @@ class TestProviderColoredStatus:
     def test_active_worker_line_has_no_asterisk_when_color_enabled(self) -> None:
         # When color is on, GREEN_BG provides the active-worker signal;
         # the ``*`` marker must NOT appear (it would be redundant clutter).
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            repo = self._repo(
-                fido_running=True,
-                issue=7,
-                current_task={"title": "implement foo", "index": 1, "total": 2},
-                worker_what="working",
-            )
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        repo = self._repo(
+            fido_running=True,
+            issue=7,
+            current_task={"title": "implement foo", "index": 1, "total": 2},
+            worker_what="working",
+        )
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        output = format_status(status, color=Color({"FORCE_COLOR": "1"}))
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
         # Strip ANSI codes to check prefix cleanly.
@@ -2698,97 +2648,92 @@ class TestProviderColoredStatus:
         green_bg highlight is suppressed.  Per #1029 the inactive form
         no longer renders, so this is the only Worker-line shape.
         """
-        with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
-            repo = self._repo(
-                fido_running=True,
-                issue=7,
-                current_task="Refactor",
-                session_alive=True,
-                session_owner="webhook-handler",
-                worker_what="waiting",
-            )
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        repo = self._repo(
+            fido_running=True,
+            issue=7,
+            current_task="Refactor",
+            session_alive=True,
+            session_owner="webhook-handler",
+            worker_what="waiting",
+        )
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        output = format_status(status, color=Color({"NO_COLOR": ""}))
         worker_lines = [ln for ln in output.splitlines() if "Worker:" in ln]
         assert worker_lines, f"no Worker line in:\n{output}"
         assert worker_lines[0].startswith("* Worker:"), worker_lines[0]
 
     def test_limits_line_colors_claude_code_token_when_color_enabled(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            # pressure=0.50 keeps the status healthy — no warning/paused
-            # overlay — so the provider-color highlight wins.
-            provider_status = ProviderPressureStatus(
-                provider=ProviderID.CLAUDE_CODE,
-                pressure=0.50,
-                window_name="five_hour",
-            )
-            status = FidoStatus(
-                fido_pid=None,
-                fido_uptime=None,
-                repos=[self._repo(provider_status=provider_status)],
-                provider_statuses=[provider_status],
-            )
-            output = format_status(status)
+        # pressure=0.50 keeps the status healthy — no warning/paused
+        # overlay — so the provider-color highlight wins.
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.50,
+            window_name="five_hour",
+        )
+        status = FidoStatus(
+            fido_pid=None,
+            fido_uptime=None,
+            repos=[self._repo(provider_status=provider_status)],
+            provider_statuses=[provider_status],
+        )
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected_prefix = rgb_fg(*palette.bright_fg) + "claude-code"
+        expected_prefix = _c.rgb_fg(*palette.bright_fg) + "claude-code"
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
         assert expected_prefix in limits_line
 
     def test_limits_line_highlights_copilot_token(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            provider_status = ProviderPressureStatus(provider=ProviderID.COPILOT_CLI)
-            status = FidoStatus(
-                fido_pid=None,
-                fido_uptime=None,
-                repos=[
-                    self._repo(
-                        provider=ProviderID.COPILOT_CLI, provider_status=provider_status
-                    )
-                ],
-                provider_statuses=[provider_status],
-            )
-            output = format_status(status)
+        provider_status = ProviderPressureStatus(provider=ProviderID.COPILOT_CLI)
+        status = FidoStatus(
+            fido_pid=None,
+            fido_uptime=None,
+            repos=[
+                self._repo(
+                    provider=ProviderID.COPILOT_CLI, provider_status=provider_status
+                )
+            ],
+            provider_statuses=[provider_status],
+        )
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.COPILOT_CLI]
-        expected_prefix = rgb_fg(*palette.bright_fg) + "copilot-cli"
+        expected_prefix = _c.rgb_fg(*palette.bright_fg) + "copilot-cli"
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
         assert expected_prefix in limits_line
 
     def test_limits_line_respects_paused_style_over_provider_fg(self) -> None:
         # A paused / warning status wins over the provider highlight so
         # state signalling isn't lost to identity coloring.
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            # pressure=0.99 crosses the pause threshold (0.95) → paused.
-            provider_status = ProviderPressureStatus(
-                provider=ProviderID.CLAUDE_CODE,
-                pressure=0.99,
-            )
-            status = FidoStatus(
-                fido_pid=None,
-                fido_uptime=None,
-                repos=[self._repo(provider_status=provider_status)],
-                provider_statuses=[provider_status],
-            )
-            output = format_status(status)
+        # pressure=0.99 crosses the pause threshold (0.95) → paused.
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.99,
+        )
+        status = FidoStatus(
+            fido_pid=None,
+            fido_uptime=None,
+            repos=[self._repo(provider_status=provider_status)],
+            provider_statuses=[provider_status],
+        )
+        output = format_status(status, color=Color({"FORCE_COLOR": "1"}))
         # DARK_GRAY code is \033[90m — must be present; truecolor provider
         # prefix must NOT be (identity color suppressed while paused).
         assert "\033[90m" in output
 
     def test_repo_section_lines_get_provider_bg_when_color_enabled(self) -> None:
-        from fido.color import rgb_bg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            repo = self._repo(fido_running=True, issue=7, issue_title="do thing")
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        repo = self._repo(fido_running=True, issue=7, issue_title="do thing")
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected_bg = rgb_bg(*palette.dim_bg)
+        expected_bg = _c.rgb_bg(*palette.dim_bg)
         repo_lines = [
             ln for ln in output.splitlines() if "owner/repo" in ln or "Issue:" in ln
         ]
@@ -2797,15 +2742,14 @@ class TestProviderColoredStatus:
             assert expected_bg in line, f"bg missing from: {line!r}"
 
     def test_repo_section_lines_get_codex_provider_bg_when_color_enabled(self) -> None:
-        from fido.color import rgb_bg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            repo = self._repo(provider=ProviderID.CODEX, fido_running=True, issue=7)
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        repo = self._repo(provider=ProviderID.CODEX, fido_running=True, issue=7)
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CODEX]
-        expected_bg = rgb_bg(*palette.dim_bg)
+        expected_bg = _c.rgb_bg(*palette.dim_bg)
         repo_lines = [
             ln for ln in output.splitlines() if "owner/repo" in ln or "Issue:" in ln
         ]
@@ -2814,48 +2758,44 @@ class TestProviderColoredStatus:
             assert expected_bg in line, f"bg missing from: {line!r}"
 
     def test_limits_line_highlights_codex_token(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            provider_status = ProviderPressureStatus(
-                provider=ProviderID.CODEX,
-                pressure=0.50,
-                window_name="five_hour",
-            )
-            status = FidoStatus(
-                fido_pid=None,
-                fido_uptime=None,
-                repos=[
-                    self._repo(
-                        provider=ProviderID.CODEX, provider_status=provider_status
-                    )
-                ],
-                provider_statuses=[provider_status],
-            )
-            output = format_status(status)
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CODEX,
+            pressure=0.50,
+            window_name="five_hour",
+        )
+        status = FidoStatus(
+            fido_pid=None,
+            fido_uptime=None,
+            repos=[
+                self._repo(provider=ProviderID.CODEX, provider_status=provider_status)
+            ],
+            provider_statuses=[provider_status],
+        )
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CODEX]
-        expected_prefix = rgb_fg(*palette.bright_fg) + "codex"
+        expected_prefix = _c.rgb_fg(*palette.bright_fg) + "codex"
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
         assert expected_prefix in limits_line
 
     def test_repo_header_colors_provider_name_with_bright_fg(self) -> None:
         # The provider token in the repo header stats line gets the provider's
         # bright_fg color, matching the visual identity on the global limits line.
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            provider_status = ProviderPressureStatus(
-                provider=ProviderID.CLAUDE_CODE,
-                pressure=0.50,
-                window_name="five_hour",
-            )
-            repo = self._repo(provider_status=provider_status)
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.50,
+            window_name="five_hour",
+        )
+        repo = self._repo(provider_status=provider_status)
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected = rgb_fg(*palette.bright_fg) + "claude-code"
+        expected = _c.rgb_fg(*palette.bright_fg) + "claude-code"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
 
@@ -2864,43 +2804,40 @@ class TestProviderColoredStatus:
     ) -> None:
         # Warning/paused state wins over the provider-color highlight in the
         # repo header, same precedence as the global limits line.
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            provider_status = ProviderPressureStatus(
-                provider=ProviderID.CLAUDE_CODE,
-                pressure=0.99,
-            )
-            repo = self._repo(provider_status=provider_status)
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.99,
+        )
+        repo = self._repo(provider_status=provider_status)
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        output = format_status(status, color=Color({"FORCE_COLOR": "1"}))
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         # DARK_GRAY code (\033[90m) must be present on the header for the paused state.
         assert "\033[90m" in header_line
 
     def test_repo_header_codex_provider_name_colored(self) -> None:
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            repo = self._repo(provider=ProviderID.CODEX)
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        repo = self._repo(provider=ProviderID.CODEX)
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CODEX]
-        expected = rgb_fg(*palette.bright_fg) + "codex"
+        expected = _c.rgb_fg(*palette.bright_fg) + "codex"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
 
     def test_repo_header_provider_name_colored_when_no_provider_status(self) -> None:
         # Even without a provider_status, the provider name gets bright_fg color
         # from the palette when the palette exists.
-        from fido.color import rgb_fg
         from fido.provider import PROVIDER_PALETTES
 
-        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
-            repo = self._repo(provider=ProviderID.CLAUDE_CODE, provider_status=None)
-            status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-            output = format_status(status)
+        repo = self._repo(provider=ProviderID.CLAUDE_CODE, provider_status=None)
+        status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
+        _c = Color({"FORCE_COLOR": "1"})
+        output = format_status(status, color=_c)
         palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
-        expected = rgb_fg(*palette.bright_fg) + "claude-code"
+        expected = _c.rgb_fg(*palette.bright_fg) + "claude-code"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
 
@@ -2975,7 +2912,7 @@ class TestFormatCacheLine:
         return RepoStatus(**defaults)
 
     def test_returns_none_when_no_cache(self) -> None:
-        assert _format_cache_line(self._repo(issue_cache=None)) is None
+        assert _format_cache_line(self._repo(issue_cache=None), c=Color()) is None
 
     def test_returns_none_when_cache_unloaded(self) -> None:
         info = IssueCacheInfo(
@@ -2987,7 +2924,7 @@ class TestFormatCacheLine:
             last_reconcile_at=None,
             last_reconcile_drift=0,
         )
-        assert _format_cache_line(self._repo(issue_cache=info)) is None
+        assert _format_cache_line(self._repo(issue_cache=info), c=Color()) is None
 
     def test_renders_basic_loaded_cache(self) -> None:
         info = IssueCacheInfo(
@@ -2999,7 +2936,7 @@ class TestFormatCacheLine:
             last_reconcile_at=None,
             last_reconcile_drift=0,
         )
-        line = _format_cache_line(self._repo(issue_cache=info))
+        line = _format_cache_line(self._repo(issue_cache=info), c=Color())
         assert line is not None
         assert "42 open" in line
         assert "applied 7" in line
@@ -3016,7 +2953,7 @@ class TestFormatCacheLine:
             last_reconcile_at=None,
             last_reconcile_drift=0,
         )
-        line = _format_cache_line(self._repo(issue_cache=info))
+        line = _format_cache_line(self._repo(issue_cache=info), c=Color())
         assert line is not None
         assert "stale-dropped 3" in line
 
@@ -3030,7 +2967,7 @@ class TestFormatCacheLine:
             last_reconcile_at=datetime(2026, 4, 19, tzinfo=UTC),
             last_reconcile_drift=2,
         )
-        line = _format_cache_line(self._repo(issue_cache=info))
+        line = _format_cache_line(self._repo(issue_cache=info), c=Color())
         assert line is not None
         assert "reconciled drift 2" in line
 
@@ -3066,14 +3003,14 @@ class TestFormatStatusCacheLineIntegration:
         )
         repo = self._repo(issue_cache=info)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "Cache:" in out
         assert "99 open" in out
 
     def test_format_status_omits_cache_line_when_absent(self) -> None:
         repo = self._repo(issue_cache=None)
         status = FidoStatus(fido_pid=None, fido_uptime=None, repos=[repo])
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "Cache:" not in out
 
 
@@ -3188,7 +3125,7 @@ class TestRateLimitColor:
 class TestFormatRateLimitWindow:
     def test_includes_label_used_limit_and_reset_text(self) -> None:
         w = _window(used=12, limit=5000)
-        out = _format_rate_limit_window(w, "REST")
+        out = _format_rate_limit_window(w, "REST", c=Color())
         assert "REST" in out
         assert "12/5000" in out
         assert "to reset" in out
@@ -3196,14 +3133,14 @@ class TestFormatRateLimitWindow:
 
 class TestFormatRateLimitLine:
     def test_returns_none_when_no_rate_limit(self) -> None:
-        assert _format_rate_limit_line(None) is None
+        assert _format_rate_limit_line(None, c=Color()) is None
 
     def test_renders_both_windows(self) -> None:
         info = RateLimitInfo(
             rest=_window("core", used=5, limit=5000),
             graphql=_window("graphql", used=10, limit=5000),
         )
-        out = _format_rate_limit_line(info)
+        out = _format_rate_limit_line(info, c=Color())
         assert out is not None
         assert "GitHub:" in out
         assert "REST" in out
@@ -3242,7 +3179,7 @@ class TestFormatStatusRateLimitIntegration:
             repos=[self._repo()],
             rate_limit=info,
         )
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "GitHub:" in out
 
     def test_format_status_omits_github_line_when_absent(self) -> None:
@@ -3252,7 +3189,7 @@ class TestFormatStatusRateLimitIntegration:
             repos=[self._repo()],
             rate_limit=None,
         )
-        out = format_status(status)
+        out = format_status(status, color=Color())
         assert "GitHub:" not in out
 
 

@@ -1,11 +1,10 @@
 """Top-level fido server entry point."""
 
 
-def main(argv: list[str] | None = None) -> None:
-    del argv
-    from fido.server import run as server_run
+def main() -> None:  # pragma: no cover
+    from fido.server import run
 
-    server_run()
+    run()
 
 
 if __name__ == "__main__":  # pragma: no cover

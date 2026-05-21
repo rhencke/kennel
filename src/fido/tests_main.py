@@ -3,23 +3,36 @@
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 
-def ensure_rocq_python_artifacts() -> None:
+def ensure_rocq_python_artifacts(
+    *,
+    _run: Callable[..., object] = subprocess.run,
+) -> None:
     if os.environ.get("FIDO_ROCQ_PYTEST_ARTIFACTS") == "prepared":
         return
 
     repo_root = Path(__file__).resolve().parents[2]
-    subprocess.run(
+    _run(
         [str(repo_root / "rocq-python-extraction" / "export_pytest_generated.sh")],
         check=True,
         cwd=repo_root,
     )
 
 
-def run_pytest(argv: list[str], *, paths: list[str], coverage: list[str]) -> int:
-    import pytest
+def run_pytest(
+    argv: list[str],
+    *,
+    paths: list[str],
+    coverage: list[str],
+    _pytest_main: Callable[[list[str]], int] | None = None,
+) -> int:
+    if _pytest_main is None:  # pragma: no cover
+        import pytest
+
+        _pytest_main = pytest.main
 
     # Cap xdist parallelism at 2 workers by default to keep total memory
     # footprint bounded under the 4 GiB cgroup cap on the test container
@@ -41,13 +54,23 @@ def run_pytest(argv: list[str], *, paths: list[str], coverage: list[str]) -> int
         *xdist_args,
         *user_argv,
     ]
-    return pytest.main(args)
+    return _pytest_main(args)
 
 
-def main() -> int:
-    ensure_rocq_python_artifacts()
+def main(
+    argv: list[str] | None = None,
+    *,
+    _ensure: Callable[[], None] | None = None,
+    _pytest_main: Callable[[list[str]], int] | None = None,
+) -> int:
+    actual_argv = sys.argv[1:] if argv is None else argv
+    ensure = _ensure if _ensure is not None else ensure_rocq_python_artifacts
+    ensure()
     return run_pytest(
-        sys.argv[1:], paths=[], coverage=["fido", "rocq-python-extraction/test"]
+        actual_argv,
+        paths=[],
+        coverage=["fido", "rocq-python-extraction/test"],
+        _pytest_main=_pytest_main,
     )
 
 

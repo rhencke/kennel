@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Never
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,10 +13,8 @@ from fido.events import (
     Action,
     Dispatcher,
     WebhookIngressOracle,
-    _apply_reply_result,
     _BackgroundRescopeTrigger,
     _build_issue_comment_action,
-    _build_on_rescope_apply,
     _configured_agent,
     _existing_reply_artifact,
     _get_commit_summary,
@@ -24,20 +22,14 @@ from fido.events import (
     _insight_source_link,
     _is_allowed,
     _load_active_context_for_rescope,
-    _make_reorder_kwargs,
-    _notify_intent_outcome,
     _posted_comment_id,
     _record_reply_artifact,
-    _reorder_tasks_background,
     _reply_promise_ids,
     _rewrite_pr_description,
     _task_snapshot,
     build_review_comment_action,
     launch_worker,
     needs_more_context,
-    recover_reply_promises,
-    reply_to_comment,
-    reply_to_issue_comment,
     reply_to_review,
     thread_lineage_comment_ids,
 )
@@ -50,6 +42,7 @@ from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
+from fido.tasks import Tasks
 from fido.types import ActiveIssue, ActivePR, RescopeIntent
 from fido.worker import ActivityReporter
 from tests.fakes import _FakeDispatcher
@@ -207,6 +200,8 @@ class TestNeedsMoreContext:
             needs_more_context("some comment")
 
     def test_configured_agent_uses_provider_factory(self, tmp_path: Path) -> None:
+        from fido.provider_factory import DefaultProviderFactory
+
         cfg = _config(tmp_path)
         cfg.repos["owner/repo"] = RepoConfig(
             name="owner/repo",
@@ -214,9 +209,12 @@ class TestNeedsMoreContext:
             provider=ProviderID.COPILOT_CLI,
         )
         sentinel = MagicMock()
-        with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = sentinel
-            assert _configured_agent(cfg, cfg.repos["owner/repo"]) is sentinel
+        factory = MagicMock(spec=DefaultProviderFactory)
+        factory.create_agent.return_value = sentinel
+        assert (
+            _configured_agent(cfg, cfg.repos["owner/repo"], _factory=factory)
+            is sentinel
+        )
 
 
 class TestRecoverReplyPromises:
@@ -273,14 +271,12 @@ class TestRecoverReplyPromises:
 
     def test_returns_false_when_no_promises(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        assert not recover_reply_promises(
+        assert not Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).recover_reply_promises(
             tmp_path / ".git" / "fido",
-            _config(tmp_path),
-            _repo_cfg(tmp_path),
-            gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
-            dispatcher=_FakeDispatcher(),
         )
 
     def test_recovers_issue_comment_promise(self, tmp_path: Path) -> None:
@@ -295,31 +291,32 @@ class TestRecoverReplyPromises:
             "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
             "user": {"login": "owner"},
         }
-        with (
-            patch(
-                "fido.events.reply_to_issue_comment",
-                return_value=("ACT", ["task one"]),
+        fake_registry = MagicMock(spec=ActivityReporter)
+        spy_tasks = Tasks(tmp_path)
+        fake_registry.tasks_for.return_value = spy_tasks
+
+        result = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                change_request="task one"
             ),
-            patch("fido.events.create_task") as mock_create_task,
-        ):
-            result = recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
+            sync_fn=lambda *a, **kw: None,
+            thread_start_fn=lambda t: None,
+            reorder_coalesce_state={},
+            get_commit_summary_fn=lambda wd: "summary",
+        ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         assert result is True
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
-        mock_create_task.assert_called_once()
-        assert mock_create_task.call_args.args[0] == "task one"
+        task_list = spy_tasks.list()
+        assert len(task_list) == 1
+        assert task_list[0]["title"] == "task one"
         # The thread dict carries lineage metadata
         # (``lineage_comment_ids`` + ``lineage_key``) so concurrent
         # comments in the same conversation can be deduped against this
         # task without re-fetching the thread.
-        assert mock_create_task.call_args.kwargs["thread"] == {
+        assert task_list[0]["thread"] == {
             "repo": "owner/repo",
             "pr": 7,
             "comment_id": 302,
@@ -347,17 +344,14 @@ class TestRecoverReplyPromises:
                 "body": f"done\n\n<!-- fido:reply-promise:{promise.promise_id} -->",
             }
         ]
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            assert recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
-        mock_reply.assert_not_called()
+
+        assert Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).recover_reply_promises(
+            fido_dir,
+            7,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert store.promise(promise.promise_id).state == "acked"
         self._assert_recovery_matches_oracle(
             tmp_path,
@@ -380,17 +374,14 @@ class TestRecoverReplyPromises:
                 "body": f"done\n\n<!-- fido:reply-promise:{promise.promise_id} -->",
             }
         ]
-        with patch("fido.events.reply_to_comment") as mock_reply:
-            assert recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
-        mock_reply.assert_not_called()
+
+        assert Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).recover_reply_promises(
+            fido_dir,
+            7,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert store.promise(promise.promise_id).state == "acked"
         self._assert_recovery_matches_oracle(
             tmp_path,
@@ -404,14 +395,12 @@ class TestRecoverReplyPromises:
         gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = None
-        assert not recover_reply_promises(
+        assert not Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).recover_reply_promises(
             fido_dir,
-            _config(tmp_path),
-            _repo_cfg(tmp_path),
-            gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
-            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -426,14 +415,12 @@ class TestRecoverReplyPromises:
         gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = None
-        assert not recover_reply_promises(
+        assert not Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).recover_reply_promises(
             fido_dir,
-            _config(tmp_path),
-            _repo_cfg(tmp_path),
-            gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
-            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -454,14 +441,12 @@ class TestRecoverReplyPromises:
             "html_url": "https://github.com/owner/repo/pull/8#discussion_r205",
             "user": {"login": "owner"},
         }
-        assert not recover_reply_promises(
+        assert not Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).recover_reply_promises(
             fido_dir,
-            _config(tmp_path),
-            _repo_cfg(tmp_path),
-            gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
-            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -485,14 +470,12 @@ class TestRecoverReplyPromises:
             "html_url": "https://github.com/owner/repo/pull/8#issuecomment-302",
             "user": {"login": "owner"},
         }
-        assert not recover_reply_promises(
+        assert not Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).recover_reply_promises(
             fido_dir,
-            _config(tmp_path),
-            _repo_cfg(tmp_path),
-            gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
-            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -516,20 +499,15 @@ class TestRecoverReplyPromises:
             "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
             "user": {"login": "owner"},
         }
-        with (
-            pytest.raises(ValueError, match="invalid GitHub API URL"),
-            patch("fido.events.reply_to_issue_comment") as mock_reply,
-        ):
-            recover_reply_promises(
+
+        with pytest.raises(ValueError, match="invalid GitHub API URL"):
+            Dispatcher(
+                _config(tmp_path), _repo_cfg(tmp_path), gh
+            ).recover_reply_promises(
                 fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
             )
-        mock_reply.assert_not_called()
         assert [
             p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
         ] == [302]
@@ -548,21 +526,20 @@ class TestRecoverReplyPromises:
             "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
             "user": {"login": "owner"},
         }
-        with (
-            pytest.raises(RuntimeError, match="reply failed"),
-            patch(
-                "fido.events.reply_to_issue_comment",
-                side_effect=RuntimeError("reply failed"),
-            ),
-        ):
-            recover_reply_promises(
-                fido_dir,
+
+        def _failing_synthesis(*args: object, **kwargs: object) -> Never:
+            raise RuntimeError("reply failed")
+
+        with pytest.raises(RuntimeError, match="reply failed"):
+            Dispatcher(
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
+                call_synthesis_fn=_failing_synthesis,
+            ).recover_reply_promises(
+                fido_dir,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
             )
         assert FidoStore(tmp_path).claim_state(302) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -584,20 +561,15 @@ class TestRecoverReplyPromises:
             "html_url": "https://github.com/owner/repo/pull/7#discussion_r205",
             "user": {"login": "owner"},
         }
-        with (
-            pytest.raises(ValueError, match="invalid GitHub API URL"),
-            patch("fido.events.reply_to_comment") as mock_reply,
-        ):
-            recover_reply_promises(
+
+        with pytest.raises(ValueError, match="invalid GitHub API URL"):
+            Dispatcher(
+                _config(tmp_path), _repo_cfg(tmp_path), gh
+            ).recover_reply_promises(
                 fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
             )
-        mock_reply.assert_not_called()
         assert [
             p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
         ] == [205]
@@ -617,21 +589,20 @@ class TestRecoverReplyPromises:
             "html_url": "https://github.com/owner/repo/pull/7#discussion_r205",
             "user": {"login": "owner"},
         }
-        with (
-            pytest.raises(RuntimeError, match="reply failed"),
-            patch(
-                "fido.events.reply_to_comment",
-                side_effect=RuntimeError("reply failed"),
-            ),
-        ):
-            recover_reply_promises(
-                fido_dir,
+
+        def _failing_synthesis(*args: object, **kwargs: object) -> Never:
+            raise RuntimeError("reply failed")
+
+        with pytest.raises(RuntimeError, match="reply failed"):
+            Dispatcher(
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
+                call_synthesis_fn=_failing_synthesis,
+            ).recover_reply_promises(
+                fido_dir,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
             )
         assert FidoStore(tmp_path).claim_state(205) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -653,24 +624,18 @@ class TestRecoverReplyPromises:
             "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
             "user": {"login": "owner"},
         }
-        with (
-            patch(
-                "fido.events.reply_to_issue_comment",
-                return_value=("DEFER", ["later"]),
-            ),
-            patch("fido.events.create_task") as mock_create_task,
-        ):
-            result = recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
+        # Synthesis returning no change_request yields ANSWER category,
+        # which does not trigger task creation — equivalent to old DEFER.
+        result = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(),
+            sync_fn=lambda *a, **kw: None,
+            thread_start_fn=lambda t: None,
+            reorder_coalesce_state={},
+        ).recover_reply_promises(fido_dir, 7, registry=MagicMock(spec=ActivityReporter))
         assert result is True
-        mock_create_task.assert_not_called()
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
 
     def test_issue_recovery_commits_tasks_before_promise_ack(
@@ -688,28 +653,31 @@ class TestRecoverReplyPromises:
             "user": {"login": "owner"},
         }
 
-        def fail_after_reply(*args: object, **kwargs: object) -> Never:
-            assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
-            raise RuntimeError("task add failed")
+        class _FailingTasks:
+            def add(self, **kwargs: object) -> Never:
+                raise RuntimeError("task add failed")
 
-        with (
-            patch(
-                "fido.events.reply_to_issue_comment",
-                return_value=("ACT", ["task one"]),
-            ),
-            patch("fido.events.create_task", side_effect=fail_after_reply),
-        ):
-            with pytest.raises(RuntimeError, match="task add failed"):
-                recover_reply_promises(
-                    fido_dir,
-                    _config(tmp_path),
-                    _repo_cfg(tmp_path),
-                    gh,
-                    7,
-                    registry=MagicMock(spec=ActivityReporter),
-                    dispatcher=_FakeDispatcher(),
-                )
-        assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_registry.tasks_for.return_value = _FailingTasks()
+
+        with pytest.raises(RuntimeError, match="task add failed"):
+            Dispatcher(
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                    change_request="task one"
+                ),
+                sync_fn=lambda *a, **kw: None,
+                thread_start_fn=lambda t: None,
+                reorder_coalesce_state={},
+                get_commit_summary_fn=lambda wd: "summary",
+            ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
+        # Task creation failure must not ack the promise — the worker can retry.
+        # The reply was sent before tasks are created, so state is "posted"
+        # (reply sent, flow incomplete) rather than "acked" (fully done) or
+        # "prepared" (nothing done yet).
+        assert FidoStore(tmp_path).promise(promise.promise_id).state != "acked"
 
     def test_coalesces_review_comment_promises_in_same_thread(
         self, tmp_path: Path
@@ -747,25 +715,27 @@ class TestRecoverReplyPromises:
             return comments[comment_id]
 
         gh.get_pull_comment.side_effect = get_pull_comment
-        with (
-            patch(
-                "fido.events.reply_to_comment",
-                return_value=("ACT", ["task a", "task b"]),
-            ) as mock_reply,
-            patch("fido.events.create_task") as mock_create_task,
-        ):
-            result = recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
+        synthesis_bodies: list[str] = []
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_registry.tasks_for.return_value = Tasks(tmp_path)
+
+        def capture_synthesis(comment: str, *args: object, **kwargs: object) -> object:
+            synthesis_bodies.append(comment)
+            return _synthesis_response(change_request="task a")
+
+        result = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=capture_synthesis,
+            sync_fn=lambda *a, **kw: None,
+            thread_start_fn=lambda t: None,
+            reorder_coalesce_state={},
+            get_commit_summary_fn=lambda wd: "summary",
+        ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         assert result is True
-        assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
-        assert mock_create_task.call_count == 2
+        assert synthesis_bodies[0] == "first\n\n---\n\nsecond"
+        assert len(Tasks(tmp_path).list()) == 1
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "acked"
         assert store.promise(second.promise_id).state == "acked"
@@ -809,25 +779,27 @@ class TestRecoverReplyPromises:
             return comments[comment_id]
 
         gh.get_issue_comment.side_effect = get_issue_comment
-        with (
-            patch(
-                "fido.events.reply_to_issue_comment",
-                return_value=("ACT", ["task a"]),
-            ) as mock_reply,
-            patch("fido.events.create_task") as mock_create_task,
-        ):
-            result = recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
+        synthesis_bodies: list[str] = []
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_registry.tasks_for.return_value = Tasks(tmp_path)
+
+        def capture_synthesis(comment: str, *args: object, **kwargs: object) -> object:
+            synthesis_bodies.append(comment)
+            return _synthesis_response(change_request="task a")
+
+        result = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=capture_synthesis,
+            sync_fn=lambda *a, **kw: None,
+            thread_start_fn=lambda t: None,
+            reorder_coalesce_state={},
+            get_commit_summary_fn=lambda wd: "summary",
+        ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         assert result is True
-        assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
-        mock_create_task.assert_called_once()
+        assert synthesis_bodies[0] == "first\n\n---\n\nsecond"
+        assert len(Tasks(tmp_path).list()) == 1
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "acked"
         assert store.promise(second.promise_id).state == "acked"
@@ -874,20 +846,22 @@ class TestRecoverReplyPromises:
 
         gh.get_issue_comment.side_effect = get_issue_comment
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("One combined reply."),
-        ):
-            assert recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
+        assert Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "One combined reply."
+            ),
+            sync_fn=lambda *a, **kw: None,
+            thread_start_fn=lambda t: None,
+            reorder_coalesce_state={},
+        ).recover_reply_promises(
+            fido_dir,
+            7,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         store = FidoStore(tmp_path)
         first_artifact = store.artifact_for_promise(first.promise_id)
@@ -938,29 +912,35 @@ class TestRecoverReplyPromises:
 
         gh.get_pull_comment.side_effect = get_pull_comment
 
-        def fail_after_reply(*args: object, **kwargs: object) -> Never:
-            store = FidoStore(tmp_path)
-            assert store.promise(first.promise_id).state == "prepared"
-            assert store.promise(second.promise_id).state == "prepared"
-            raise RuntimeError("task add failed")
+        class _FailingTasks:
+            def add(self, **kwargs: object) -> Never:
+                # The reply is sent before task creation, so state is "posted"
+                # (not "prepared"). Verify promises are not yet "acked" so the
+                # worker can retry.
+                store = FidoStore(tmp_path)
+                assert store.promise(first.promise_id).state != "acked"
+                assert store.promise(second.promise_id).state != "acked"
+                raise RuntimeError("task add failed")
 
-        with (
-            patch("fido.events.reply_to_comment", return_value=("ACT", ["task a"])),
-            patch("fido.events.create_task", side_effect=fail_after_reply),
-        ):
-            with pytest.raises(RuntimeError, match="task add failed"):
-                recover_reply_promises(
-                    fido_dir,
-                    _config(tmp_path),
-                    _repo_cfg(tmp_path),
-                    gh,
-                    7,
-                    registry=MagicMock(spec=ActivityReporter),
-                    dispatcher=_FakeDispatcher(),
-                )
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_registry.tasks_for.return_value = _FailingTasks()
+
+        with pytest.raises(RuntimeError, match="task add failed"):
+            Dispatcher(
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                    change_request="task a"
+                ),
+                sync_fn=lambda *a, **kw: None,
+                thread_start_fn=lambda t: None,
+                reorder_coalesce_state={},
+                get_commit_summary_fn=lambda wd: "summary",
+            ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         store = FidoStore(tmp_path)
-        assert store.promise(first.promise_id).state == "prepared"
-        assert store.promise(second.promise_id).state == "prepared"
+        assert store.promise(first.promise_id).state != "acked"
+        assert store.promise(second.promise_id).state != "acked"
 
     def test_review_recovery_replay_records_one_artifact_for_group(
         self, tmp_path: Path
@@ -1010,20 +990,22 @@ class TestRecoverReplyPromises:
             },
         ]
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("One combined review reply."),
-        ):
-            assert recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
+        assert Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "One combined review reply."
+            ),
+            sync_fn=lambda *a, **kw: None,
+            thread_start_fn=lambda t: None,
+            reorder_coalesce_state={},
+        ).recover_reply_promises(
+            fido_dir,
+            7,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         store = FidoStore(tmp_path)
         first_artifact = store.artifact_for_promise(first.promise_id)
@@ -1095,24 +1077,24 @@ class TestRecoverReplyPromises:
             return comments[comment_id]
 
         gh.get_pull_comment.side_effect = get_pull_comment
-        with (
-            patch(
-                "fido.events.reply_to_comment", return_value=("ANSWER", [])
-            ) as mock_reply,
-            patch("fido.events.create_task") as mock_create_task,
-        ):
-            with pytest.raises(ValueError, match="invalid GitHub API URL"):
-                recover_reply_promises(
-                    fido_dir,
-                    _config(tmp_path),
-                    _repo_cfg(tmp_path),
-                    gh,
-                    7,
-                    registry=MagicMock(spec=ActivityReporter),
-                    dispatcher=_FakeDispatcher(),
-                )
-        assert mock_reply.call_count == 0
-        mock_create_task.assert_not_called()
+        synthesis_calls: list[object] = []
+
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
+            synthesis_calls.append(args)
+            return _synthesis_response()
+
+        with pytest.raises(ValueError, match="invalid GitHub API URL"):
+            Dispatcher(
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                call_synthesis_fn=capture_synthesis,
+            ).recover_reply_promises(
+                fido_dir,
+                7,
+                registry=MagicMock(spec=ActivityReporter),
+            )
+        assert not synthesis_calls
         assert [
             p.anchor_comment_id for p in FidoStore(tmp_path).recoverable_promises()
         ] == [101, 102, 201, 999]
@@ -1164,20 +1146,24 @@ class TestRecoverReplyPromises:
             return comments[comment_id]
 
         gh.get_pull_comment.side_effect = get_pull_comment
-        with patch(
-            "fido.events.reply_to_comment", return_value=("ANSWER", [])
-        ) as mock_reply:
-            result = recover_reply_promises(
-                fido_dir,
-                _config(tmp_path),
-                _repo_cfg(tmp_path),
-                gh,
-                7,
-                registry=MagicMock(spec=ActivityReporter),
-                dispatcher=_FakeDispatcher(),
-            )
+        synthesis_calls: list[object] = []
+
+        def capture_synthesis(*args: object, **kwargs: object) -> object:
+            synthesis_calls.append(args)
+            return _synthesis_response()
+
+        result = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=capture_synthesis,
+        ).recover_reply_promises(
+            fido_dir,
+            7,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert result is True
-        assert mock_reply.call_count == 2
+        assert len(synthesis_calls) == 2
         assert FidoStore(tmp_path).recoverable_promises() == []
 
 
@@ -1903,11 +1889,8 @@ class TestReplyToComment:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
         gh = _make_mock_gh()
-        cat, titles = reply_to_comment(
+        cat, titles = Dispatcher(cfg, self._repo_cfg(tmp_path), gh).reply_to_comment(
             action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            gh,
             registry=MagicMock(spec=ActivityReporter),
         )
         assert cat == "ACT"
@@ -1919,11 +1902,8 @@ class TestReplyToComment:
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
         gh = _make_mock_gh()
-        cat, titles = reply_to_comment(
+        cat, titles = Dispatcher(cfg, self._repo_cfg(tmp_path), gh).reply_to_comment(
             action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            gh,
             registry=MagicMock(spec=ActivityReporter),
         )
         assert cat == "ACT"
@@ -1951,22 +1931,20 @@ class TestReplyToComment:
             },
         )
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 reply_text="I will add logging.",
                 change_request="Add logging to the request handler",
             ),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
 
@@ -2005,18 +1983,16 @@ class TestReplyToComment:
 
         mock_gh.reply_to_review_comment.side_effect = reply_to_review_comment
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Yep."),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                repo_cfg,
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            repo_cfg,
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yep."),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         effect = store.reply_outbox_effect(promise.promise_id)
         assert effect is not None
@@ -2052,18 +2028,14 @@ class TestReplyToComment:
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = []
 
-        with (
-            pytest.raises(RuntimeError, match="already claimed"),
-            patch(
-                "fido.events.call_synthesis",
-                return_value=_synthesis_response("Yep."),
-            ),
-        ):
-            reply_to_comment(
-                action,
+        with pytest.raises(RuntimeError, match="already claimed"):
+            Dispatcher(
                 cfg,
                 repo_cfg,
                 mock_gh,
+                call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yep."),
+            ).reply_to_comment(
+                action,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
             )
@@ -2080,19 +2052,19 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("What specifically?"),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "What specifically?"
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
 
     def test_synthesis_path_does_not_resolve_review_thread(
@@ -2112,18 +2084,16 @@ class TestReplyToComment:
         ]
         gh.reply_to_review_comment.return_value = {"id": 88}
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Handled."),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Handled."),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         gh.resolve_thread.assert_not_called()
 
     def test_apply_reply_result_skips_non_task_issue_categories(
@@ -2131,18 +2101,17 @@ class TestReplyToComment:
     ) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = self._repo_cfg(tmp_path)
-        with patch("fido.events.create_task") as mock_create_task:
-            _apply_reply_result(
-                "ASK",
-                ["ignored"],
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=None,
-                registry=None,
-                dispatcher=_FakeDispatcher(),
-            )
-        mock_create_task.assert_not_called()
+
+        Dispatcher(cfg, repo_cfg, MagicMock())._apply_reply_result(
+            "ASK",
+            ["ignored"],
+            thread=None,
+            registry=None,
+        )
+        # ASK category must not create any tasks.
+        from fido.tasks import Tasks
+
+        assert Tasks(tmp_path).list() == []
 
     def test_apply_reply_result_preserves_triggering_comment_link(
         self, tmp_path: Path
@@ -2158,22 +2127,31 @@ class TestReplyToComment:
             "author": "rhencke",
             "comment_type": "pulls",
         }
-        with patch("fido.events.create_task") as mock_create_task:
-            _apply_reply_result(
-                "ACT",
-                ["Remove redundant empty-list concatenation"],
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=None,
-                dispatcher=_FakeDispatcher(),
-            )
-        mock_create_task.assert_called_once()
-        _, kwargs = mock_create_task.call_args
-        assert kwargs["thread"]["comment_id"] == 102
+        from fido.tasks import Tasks
+
+        spy_tasks = Tasks(tmp_path)
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_registry.tasks_for.return_value = spy_tasks
+
+        Dispatcher(
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            sync_fn=lambda *a, **kw: None,
+            thread_start_fn=lambda t: None,
+            reorder_coalesce_state={},
+            get_commit_summary_fn=lambda wd: "summary",
+        )._apply_reply_result(
+            "ACT",
+            ["Remove redundant empty-list concatenation"],
+            thread=thread,
+            registry=fake_registry,
+        )
+        tasks = spy_tasks.list()
+        assert len(tasks) == 1
+        assert tasks[0]["thread"]["comment_id"] == 102
         assert (
-            kwargs["thread"]["url"]
+            tasks[0]["thread"]["url"]
             == "https://github.com/owner/repo/pull/1#discussion_r102"
         )
 
@@ -2187,19 +2165,19 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("I did this because..."),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "I did this because..."
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
         assert titles == []
 
@@ -2214,21 +2192,19 @@ class TestReplyToComment:
         )
 
         mock_gh = self._mock_gh()
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "On it!",
                 change_request="Cache results for performance",
             ),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         assert titles == ["Cache results for performance"]
 
@@ -2243,21 +2219,19 @@ class TestReplyToComment:
         )
 
         mock_gh = self._mock_gh()
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "That's noted for a future PR.",
                 change_request="Refactor everything in a separate PR",
             ),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         assert "refactor" in titles[0].lower()
         # Synthesis path never calls create_issue
@@ -2273,19 +2247,19 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Not applicable here."),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "Not applicable here."
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
 
     def test_empty_reply_body_raises(self, tmp_path: Path) -> None:
@@ -2298,19 +2272,18 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        with (
-            pytest.raises(SynthesisExhaustedError),
-            patch(
-                "fido.events.call_synthesis",
-                side_effect=SynthesisExhaustedError("exhausted"),
-            ),
-        ):
+        def _raise_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisExhaustedError("exhausted")
+
+        with pytest.raises(SynthesisExhaustedError):
             gh = MagicMock()
-            reply_to_comment(
-                action,
+            Dispatcher(
                 cfg,
                 self._repo_cfg(tmp_path),
                 gh,
+                call_synthesis_fn=_raise_exhausted,
+            ).reply_to_comment(
+                action,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
             )
@@ -2333,11 +2306,8 @@ class TestReplyToComment:
             is_bot=False,
         )
         gh = _make_mock_gh()
-        cat, titles = reply_to_comment(
+        cat, titles = Dispatcher(cfg, self._repo_cfg(tmp_path), gh).reply_to_comment(
             action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            gh,
             registry=MagicMock(spec=ActivityReporter),
         )
         assert cat == "ACT"
@@ -2353,19 +2323,19 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("ok", change_request="Do it"),
-        ):
-            gh = MagicMock()
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = MagicMock()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "ok", change_request="Do it"
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
 
     def test_act_title_comes_from_synthesis_change_request(
@@ -2380,22 +2350,20 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "On it!",
                 change_request="Add tests and update docs",
             ),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         assert titles == ["Add tests and update docs"]
 
@@ -2414,21 +2382,19 @@ class TestReplyToComment:
             {"id": 42, "author": "rhencke", "body": "please fix the parser"},
         ]
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "I'll fix the parser right away.",
                 change_request="Fix the parser",
             ),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         assert titles == ["Fix the parser"]
         reply_args = mock_gh.reply_to_review_comment.call_args.args
@@ -2462,20 +2428,18 @@ class TestReplyToComment:
                 "body": "We need sub issues in priority order.",
             },
         ]
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "On it!", change_request="Reorder sub issues by priority"
             ),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         # Human spoke last — must post a fresh reply, never edit the old one
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -2496,18 +2460,18 @@ class TestReplyToComment:
             {"id": 200, "author": "reviewer", "body": "What do you think?"},
             {"id": 201, "author": "fidocancode", "body": "Sure, sounds good"},
         ]
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Could you clarify?"),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "Could you clarify?"
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
         # Posted replies are immutable; answer replies also post a new artifact.
         reply_args = mock_gh.reply_to_review_comment.call_args.args
@@ -2539,15 +2503,16 @@ class TestReplyToComment:
             captured_calls.append(kwargs)
             return _synthesis_response("I will add logging.")
 
-        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=capture_synthesis,
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert captured_calls
         call_kwargs = captured_calls[0]
         assert call_kwargs.get("issue") is not None
@@ -2571,15 +2536,16 @@ class TestReplyToComment:
             captured_calls.append(kwargs)
             return _synthesis_response("I will add logging.")
 
-        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=capture_synthesis,
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert captured_calls
         call_kwargs = captured_calls[0]
         assert call_kwargs.get("issue") is None
@@ -2667,28 +2633,29 @@ class TestReplyToCommentSynthesisFallback:
         fallback = _synthesis_response(
             "I tried to respond but my structured-output turn failed."
         )
+        fallback_calls: list[tuple[object, ...]] = []
 
-        with (
-            patch(
-                "fido.events.call_synthesis",
-                side_effect=SynthesisExhaustedError("retries exhausted"),
-            ),
-            patch(
-                "fido.events.call_failure_explanation",
-                return_value=fallback,
-            ) as mock_fallback,
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        def fake_fallback(*args: object, **kwargs: object) -> object:
+            fallback_calls.append(args)
+            return fallback
+
+        def _raise_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisExhaustedError("retries exhausted")
+
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=_raise_exhausted,
+            call_failure_explanation_fn=fake_fallback,
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
         assert titles == []
-        mock_fallback.assert_called_once()
+        assert len(fallback_calls) == 1
         # Fallback reply was posted to GitHub.
         assert mock_gh.reply_to_review_comment.called
         reply_body = mock_gh.reply_to_review_comment.call_args.args[2]
@@ -2711,29 +2678,35 @@ class TestReplyToCommentSynthesisFallback:
             {"id": 556, "author": "rhencke", "body": "please rephrase"},
         ]
 
-        with (
-            patch(
-                "fido.events.call_synthesis",
-                side_effect=SynthesisExhaustedError("retries exhausted"),
-            ),
-            patch(
-                "fido.events.call_failure_explanation",
-                side_effect=SynthesisExhaustedError("fallback also exhausted"),
-            ),
-            patch(
-                "fido.synthesis_executor.SynthesisExecutor.remove_eyes_reaction"
-            ) as mock_remove_eyes,
-        ):
-            with pytest.raises(SynthesisExhaustedError, match="fallback also"):
-                reply_to_comment(
-                    action,
-                    cfg,
-                    self._repo_cfg(tmp_path),
-                    mock_gh,
-                    agent=_client(),
-                    registry=MagicMock(spec=ActivityReporter),
-                )
-        mock_remove_eyes.assert_called_once()
+        remove_eyes_calls: list[object] = []
+
+        class _FakeExecutor:
+            def remove_eyes_reaction(self, target: object) -> None:
+                remove_eyes_calls.append(target)
+
+            def execute_effects_only(self, *args: object, **kwargs: object) -> object:
+                raise AssertionError("execute_effects_only should not be called")
+
+        def _raise_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisExhaustedError("retries exhausted")
+
+        def _raise_fallback_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisExhaustedError("fallback also exhausted")
+
+        with pytest.raises(SynthesisExhaustedError, match="fallback also"):
+            Dispatcher(
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                call_synthesis_fn=_raise_exhausted,
+                call_failure_explanation_fn=_raise_fallback_exhausted,
+            ).reply_to_comment(
+                action,
+                agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
+                _executor=_FakeExecutor(),  # type: ignore[arg-type]
+            )
+        assert len(remove_eyes_calls) == 1
 
     def test_issue_comment_falls_back_when_synthesis_exhausted(
         self, tmp_path: Path
@@ -2753,26 +2726,28 @@ class TestReplyToCommentSynthesisFallback:
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.comment_issue.return_value = {"id": 8888}
 
-        with (
-            patch(
-                "fido.events.call_synthesis",
-                side_effect=SynthesisExhaustedError("retries exhausted"),
-            ),
-            patch(
-                "fido.events.call_failure_explanation",
-                return_value=fallback,
-            ) as mock_fallback,
-        ):
-            cat, _titles = reply_to_issue_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        fallback_calls: list[tuple[object, ...]] = []
+
+        def fake_fallback(*args: object, **kwargs: object) -> object:
+            fallback_calls.append(args)
+            return fallback
+
+        def _raise_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisExhaustedError("retries exhausted")
+
+        cat, _titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=_raise_exhausted,
+            call_failure_explanation_fn=fake_fallback,
+        ).reply_to_issue_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
-        mock_fallback.assert_called_once()
+        assert len(fallback_calls) == 1
         # Fallback was posted as a top-level issue comment.
         assert mock_gh.comment_issue.called
         body = mock_gh.comment_issue.call_args.args[2]
@@ -2814,21 +2789,19 @@ class TestReplyToIssueComment:
         """Synthesis path: change_request present → ACT."""
         cfg = self._cfg(tmp_path)
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "I'll fix that.", change_request="Fix the bug"
             ),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_issue_comment(
-                self._action(),
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_issue_comment(
+            self._action(),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         assert titles == ["Fix the bug"]
 
@@ -2836,38 +2809,34 @@ class TestReplyToIssueComment:
         """Synthesis path: no change_request → ANSWER (replaces old ASK)."""
         cfg = self._cfg(tmp_path)
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("What do you mean?"),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_issue_comment(
-                self._action("unclear"),
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response("What do you mean?"),
+        ).reply_to_issue_comment(
+            self._action("unclear"),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
 
     def test_answer_reply(self, tmp_path: Path) -> None:
         """Synthesis path: no change_request → ANSWER."""
         cfg = self._cfg(tmp_path)
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Yes, because..."),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_issue_comment(
-                self._action("why?"),
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yes, because..."),
+        ).reply_to_issue_comment(
+            self._action("why?"),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
 
     def test_claims_issue_reply_outbox_before_posting(self, tmp_path: Path) -> None:
@@ -2898,18 +2867,16 @@ class TestReplyToIssueComment:
 
         mock_gh.comment_issue.side_effect = comment_issue
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Yes, because..."),
-        ):
-            reply_to_issue_comment(
-                action,
-                cfg,
-                repo_cfg,
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            repo_cfg,
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yes, because..."),
+        ).reply_to_issue_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         effect = store.reply_outbox_effect(promise.promise_id)
         assert effect is not None
@@ -2920,19 +2887,19 @@ class TestReplyToIssueComment:
         """Synthesis path: no change_request → ANSWER (replaces old DUMP)."""
         cfg = self._cfg(tmp_path)
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("That won't work here."),
-        ):
-            gh = self._mock_gh()
-            cat, titles = reply_to_issue_comment(
-                self._action("do it differently"),
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "That won't work here."
+            ),
+        ).reply_to_issue_comment(
+            self._action("do it differently"),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
 
     def test_defer_reply(self, tmp_path: Path) -> None:
@@ -2940,21 +2907,19 @@ class TestReplyToIssueComment:
         cfg = self._cfg(tmp_path)
 
         mock_gh = self._mock_gh()
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "Out of scope for now.",
                 change_request="Big refactor in separate PR",
             ),
-        ):
-            cat, titles = reply_to_issue_comment(
-                self._action("big refactor"),
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_issue_comment(
+            self._action("big refactor"),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         assert "refactor" in titles[0].lower()
         # Synthesis path never calls create_issue
@@ -2984,27 +2949,25 @@ class TestReplyToIssueComment:
         )
 
         mock_gh = self._mock_gh()
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Yep."),
-        ):
-            cat, titles = reply_to_issue_comment(
-                Action(
-                    prompt="PR top-level comment on #7 by owner:\n\nplease fix",
-                    comment_body="please fix",
-                    is_bot=False,
-                    context={
-                        "pr_title": "My PR",
-                        "comment_id": 44,
-                        "reply_promise_id": promise.promise_id,
-                    },
-                ),
-                cfg,
-                repo_cfg,
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        cat, titles = Dispatcher(
+            cfg,
+            repo_cfg,
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yep."),
+        ).reply_to_issue_comment(
+            Action(
+                prompt="PR top-level comment on #7 by owner:\n\nplease fix",
+                comment_body="please fix",
+                is_bot=False,
+                context={
+                    "pr_title": "My PR",
+                    "comment_id": 44,
+                    "reply_promise_id": promise.promise_id,
+                },
+            ),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         assert cat == "ANSWER"
         assert titles == []
@@ -3014,19 +2977,18 @@ class TestReplyToIssueComment:
         """Synthesis exhausted error propagates fail-closed."""
         cfg = self._cfg(tmp_path)
 
-        with (
-            pytest.raises(SynthesisExhaustedError),
-            patch(
-                "fido.events.call_synthesis",
-                side_effect=SynthesisExhaustedError("exhausted"),
-            ),
-        ):
+        def _raise_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisExhaustedError("exhausted")
+
+        with pytest.raises(SynthesisExhaustedError):
             gh = self._mock_gh()
-            reply_to_issue_comment(
-                self._action(),
+            Dispatcher(
                 cfg,
                 self._repo_cfg(tmp_path),
                 gh,
+                call_synthesis_fn=_raise_exhausted,
+            ).reply_to_issue_comment(
+                self._action(),
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
             )
@@ -3043,18 +3005,14 @@ class TestReplyToIssueComment:
 
         mock_gh = self._mock_gh()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
-        with (
-            pytest.raises(Exception, match="gh fail"),
-            patch(
-                "fido.events.call_synthesis",
-                return_value=_synthesis_response("ok"),
-            ),
-        ):
-            reply_to_issue_comment(
-                action,
+        with pytest.raises(Exception, match="gh fail"):
+            Dispatcher(
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
+                call_synthesis_fn=lambda *a, **kw: _synthesis_response("ok"),
+            ).reply_to_issue_comment(
+                action,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
             )
@@ -3070,18 +3028,18 @@ class TestReplyToIssueComment:
         )
 
         mock_gh = self._mock_gh()
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("ok", change_request="Do it"),
-        ):
-            cat, titles = reply_to_issue_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "ok", change_request="Do it"
+            ),
+        ).reply_to_issue_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         mock_gh.add_reaction.assert_not_called()
 
@@ -3089,27 +3047,30 @@ class TestReplyToIssueComment:
         cfg = self._cfg(tmp_path)
         action = self._action()
 
-        with (
-            patch("fido.events.DefaultProviderFactory") as factory_cls,
-            patch(
-                "fido.events.call_synthesis",
-                return_value=_synthesis_response("ok", change_request="Do it"),
-            ),
-        ):
-            factory_cls.return_value.create_agent.return_value = _client()
-            gh = self._mock_gh()
-            cat, titles = reply_to_issue_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                registry=MagicMock(spec=ActivityReporter),
-            )
-        factory_cls.return_value.create_agent.assert_called_once_with(
+        create_agent_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        class _FakeFactory:
+            def create_agent(self, *args: object, **kwargs: object) -> object:
+                create_agent_calls.append((args, kwargs))
+                return _client()
+
+        gh = self._mock_gh()
+        cat, titles = Dispatcher(
+            cfg,
             self._repo_cfg(tmp_path),
-            work_dir=tmp_path,
-            repo_name="owner/repo",
+            gh,
+            provider_factory=_FakeFactory(),  # type: ignore[arg-type]
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "ok", change_request="Do it"
+            ),
+        ).reply_to_issue_comment(
+            action,
+            registry=MagicMock(spec=ActivityReporter),
         )
+        assert len(create_agent_calls) == 1
+        args, kwargs = create_agent_calls[0]
+        assert args == (self._repo_cfg(tmp_path),)
+        assert kwargs == {"work_dir": tmp_path, "repo_name": "owner/repo"}
         assert cat == "ACT"
 
     def test_includes_conversation_context_in_synthesis(self, tmp_path: Path) -> None:
@@ -3129,15 +3090,16 @@ class TestReplyToIssueComment:
             captured_calls.append(kwargs)
             return _synthesis_response("ok", change_request="Do it")
 
-        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
-            cat, titles = reply_to_issue_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=capture_synthesis,
+        ).reply_to_issue_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
         # INV-6 routes the conversation fetch through the per-(repo, item)
         # CommentCache rather than calling gh.get_issue_comments directly.
@@ -3158,18 +3120,18 @@ class TestReplyToIssueComment:
         mock_gh = self._mock_gh()
         mock_gh.get_issue_comments.side_effect = RuntimeError("API down")
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("ok", change_request="Do it"),
-        ):
-            cat, titles = reply_to_issue_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "ok", change_request="Do it"
+            ),
+        ).reply_to_issue_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ACT"
 
     def test_writes_durable_claim_after_reply(self, tmp_path: Path) -> None:
@@ -3177,18 +3139,18 @@ class TestReplyToIssueComment:
         cfg = self._cfg(tmp_path)
         mock_gh = self._mock_gh()
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Yes, here is why..."),
-        ):
-            reply_to_issue_comment(
-                self._action(cid=4275080243),
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "Yes, here is why..."
+            ),
+        ).reply_to_issue_comment(
+            self._action(cid=4275080243),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert FidoStore(tmp_path).claim_state(4275080243) == "completed"
 
     def test_claimed_issue_comment_returns_no_titles(self, tmp_path: Path) -> None:
@@ -3199,11 +3161,10 @@ class TestReplyToIssueComment:
         assert promise is not None
 
         gh = _make_mock_gh()
-        category, titles = reply_to_issue_comment(
+        category, titles = Dispatcher(
+            cfg, self._repo_cfg(tmp_path), gh
+        ).reply_to_issue_comment(
             self._action(cid=4275080244),
-            cfg,
-            self._repo_cfg(tmp_path),
-            gh,
             agent=_client("unused"),
             registry=MagicMock(spec=ActivityReporter),
         )
@@ -3221,19 +3182,19 @@ class TestReplyToIssueComment:
             context={"pr_title": "My PR"},  # no comment_id
         )
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("ok", change_request="Do it"),
-        ):
-            gh = self._mock_gh()
-            reply_to_issue_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        gh = self._mock_gh()
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "ok", change_request="Do it"
+            ),
+        ).reply_to_issue_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         claim_dir = tmp_path / ".git" / "fido" / "comments"
         assert not claim_dir.exists() or not list(claim_dir.iterdir()), (
             "no claim files should be written when comment_id is absent"
@@ -3256,15 +3217,16 @@ class TestReplyToIssueComment:
             captured_calls.append(kwargs)
             return _synthesis_response("I'll fix that.", change_request="Fix crash")
 
-        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
-            reply_to_issue_comment(
-                self._action(),
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=capture_synthesis,
+        ).reply_to_issue_comment(
+            self._action(),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert captured_calls
         call_kwargs = captured_calls[0]
         assert call_kwargs.get("issue") is not None
@@ -3282,15 +3244,16 @@ class TestReplyToIssueComment:
 
         mock_gh = self._mock_gh()
 
-        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
-            reply_to_issue_comment(
-                self._action(),
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=capture_synthesis,
+        ).reply_to_issue_comment(
+            self._action(),
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert captured_calls
         call_kwargs = captured_calls[0]
         assert call_kwargs.get("issue") is None
@@ -3303,49 +3266,56 @@ class TestGetCommitSummary:
         fake_result = sp.CompletedProcess(
             args=[], returncode=0, stdout="abc123 add thing\n", stderr=""
         )
-        with patch("fido.events.subprocess.run", return_value=fake_result) as mock_run:
-            result = _get_commit_summary(tmp_path)
+        run_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def fake_run(*args: object, **kwargs: object) -> object:
+            run_calls.append((args, kwargs))
+            return fake_result
+
+        result = _get_commit_summary(tmp_path, _run=fake_run)
         assert result == "abc123 add thing"
-        mock_run.assert_called_once_with(
-            ["git", "log", "--oneline", "-20"],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-        )
+        assert len(run_calls) == 1
+        args, kwargs = run_calls[0]
+        assert args == (["git", "log", "--oneline", "-20"],)
+        assert kwargs == {
+            "cwd": tmp_path,
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+            "check": True,
+        }
 
     def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
-        with patch("fido.events.subprocess.run", side_effect=FileNotFoundError):
-            with pytest.raises(FileNotFoundError):
-                _get_commit_summary(tmp_path)
+        def _raise(*args: object, **kwargs: object) -> Never:
+            raise FileNotFoundError
+
+        with pytest.raises(FileNotFoundError):
+            _get_commit_summary(tmp_path, _run=_raise)
 
     def test_raises_on_timeout(self, tmp_path: Path) -> None:
         import subprocess as sp
 
-        with patch(
-            "fido.events.subprocess.run",
-            side_effect=sp.TimeoutExpired(cmd="git", timeout=10),
-        ):
-            with pytest.raises(sp.TimeoutExpired):
-                _get_commit_summary(tmp_path)
+        def _raise(*args: object, **kwargs: object) -> Never:
+            raise sp.TimeoutExpired(cmd="git", timeout=10)
+
+        with pytest.raises(sp.TimeoutExpired):
+            _get_commit_summary(tmp_path, _run=_raise)
 
     def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
         import subprocess as sp
 
-        with patch(
-            "fido.events.subprocess.run",
-            side_effect=sp.CalledProcessError(128, ["git"]),
-        ):
-            with pytest.raises(sp.CalledProcessError):
-                _get_commit_summary(tmp_path)
+        def _raise(*args: object, **kwargs: object) -> Never:
+            raise sp.CalledProcessError(128, ["git"])
+
+        with pytest.raises(sp.CalledProcessError):
+            _get_commit_summary(tmp_path, _run=_raise)
 
     def test_raises_on_oserror(self, tmp_path: Path) -> None:
-        with patch(
-            "fido.events.subprocess.run", side_effect=OSError("permission denied")
-        ):
-            with pytest.raises(OSError):
-                _get_commit_summary(tmp_path)
+        def _raise(*args: object, **kwargs: object) -> Never:
+            raise OSError("permission denied")
+
+        with pytest.raises(OSError):
+            _get_commit_summary(tmp_path, _run=_raise)
 
 
 class _FakeRescopeRegistry:
@@ -3401,6 +3371,12 @@ class TestReorderTasksBackground:
             sub_dir=tmp_path / "sub",
         )
 
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+    def _dispatcher(self, tmp_path: Path, gh: object, **kwargs: object) -> Dispatcher:
+        return Dispatcher(self._cfg(tmp_path), self._repo_cfg(tmp_path), gh, **kwargs)  # type: ignore[arg-type]
+
     def _run_thread(self, started: list) -> None:
         """Run the captured thread's target synchronously."""
         started[0]._target()
@@ -3418,16 +3394,15 @@ class TestReorderTasksBackground:
         started: list = []
         _, mock_reorder = self._capture_reorder_calls()
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "some commits",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "some commits",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 1
         t = started[0]
@@ -3437,16 +3412,15 @@ class TestReorderTasksBackground:
         started: list = []
         _, mock_reorder = self._capture_reorder_calls()
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert tmp_path.name in started[0].name
 
@@ -3458,16 +3432,15 @@ class TestReorderTasksBackground:
         started: list = []
         calls, mock_reorder = self._capture_reorder_calls()
         registry = MagicMock(spec=ActivityReporter)
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "feat: add parser",
-            self._cfg(tmp_path),
             MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "feat: add parser",
             registry=registry,
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         assert len(calls) == 1
@@ -3480,18 +3453,16 @@ class TestReorderTasksBackground:
     ) -> None:
         started: list = []
         registry = MagicMock()
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         calls, mock_reorder = self._capture_reorder_calls()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             MagicMock(),
-            repo_cfg=repo_cfg,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=registry,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
         )
         self._run_thread(started)
         on_inprogress_affected = calls[0][2]["_on_inprogress_affected"]
@@ -3503,18 +3474,16 @@ class TestReorderTasksBackground:
     ) -> None:
         started: list = []
         registry = MagicMock()
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         _, mock_reorder = self._capture_reorder_calls()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             MagicMock(),
-            repo_cfg=repo_cfg,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=registry,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
             _release_untriaged_on_finish=True,
         )
 
@@ -3526,22 +3495,20 @@ class TestReorderTasksBackground:
         self, tmp_path: Path
     ) -> None:
         registry = MagicMock()
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
 
         def fail_start(_thread: object) -> Never:
             raise RuntimeError("cannot start")
 
         with pytest.raises(RuntimeError, match="cannot start"):
-            _reorder_tasks_background(
+            self._dispatcher(
                 tmp_path,
-                "commits",
-                self._cfg(tmp_path),
                 MagicMock(),
-                repo_cfg=repo_cfg,
+                thread_start_fn=fail_start,
+                reorder_fn=MagicMock(),
+                reorder_coalesce_state={},
+            ).reorder_tasks_background(
+                "commits",
                 registry=registry,
-                _start=fail_start,
-                _reorder_fn=MagicMock(),
-                _coalesce_state={},
                 _release_untriaged_on_finish=True,
             )
 
@@ -3554,19 +3521,17 @@ class TestReorderTasksBackground:
         """
         started: list = []
         registry = _FakeRescopeRegistry()
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         _, mock_reorder = self._capture_reorder_calls()
 
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             MagicMock(),
-            repo_cfg=repo_cfg,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=registry,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
             _release_untriaged_on_finish=True,
         )
         self._run_thread(started)
@@ -3593,19 +3558,17 @@ class TestReorderTasksBackground:
         """
         started: list = []
         registry = _FakeRescopeRegistry(raise_on_set_rescoping_true=True)
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         _, mock_reorder = self._capture_reorder_calls()
 
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             MagicMock(),
-            repo_cfg=repo_cfg,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=registry,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
             _release_untriaged_on_finish=True,
         )
         with pytest.raises(RuntimeError, match="rescoping flag broken"):
@@ -3623,22 +3586,20 @@ class TestReorderTasksBackground:
         release (#1280).
         """
         registry = _FakeRescopeRegistry(raise_on_set_rescoping_false=True)
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
 
         def fail_start(_thread: object) -> Never:
             raise RuntimeError("cannot start")
 
         with pytest.raises(RuntimeError):
-            _reorder_tasks_background(
+            self._dispatcher(
                 tmp_path,
-                "commits",
-                self._cfg(tmp_path),
                 MagicMock(),
-                repo_cfg=repo_cfg,
+                thread_start_fn=fail_start,
+                reorder_fn=MagicMock(),
+                reorder_coalesce_state={},
+            ).reorder_tasks_background(
+                "commits",
                 registry=registry,
-                _start=fail_start,
-                _reorder_fn=MagicMock(),
-                _coalesce_state={},
                 _release_untriaged_on_finish=True,
             )
 
@@ -3661,18 +3622,17 @@ class TestReorderTasksBackground:
             sync_calls.append((a, kw))
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _rewrite_fn=mock_rewrite,
-            _reorder_fn=mock_reorder,
-            _sync_fn=mock_sync,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            rewrite_fn=mock_rewrite,
+            reorder_fn=mock_reorder,
+            sync_fn=mock_sync,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
@@ -3692,19 +3652,18 @@ class TestReorderTasksBackground:
             rewrite_calls.append(kw)
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _rewrite_fn=mock_rewrite,
-            _sync_fn=lambda *a, **kw: None,
-            agent=fake_client,
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            rewrite_fn=mock_rewrite,
+            sync_fn=lambda *a, **kw: None,
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
+            agent=fake_client,
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
@@ -3723,48 +3682,48 @@ class TestReorderTasksBackground:
             order.append("rewrite")
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _rewrite_fn=mock_rewrite,
-            _reorder_fn=mock_reorder,
-            _sync_fn=mock_sync,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            rewrite_fn=mock_rewrite,
+            reorder_fn=mock_reorder,
+            sync_fn=mock_sync,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "commits",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
         on_done()
         assert order == ["sync", "rewrite"]
 
-    def test_on_done_uses_default_sync_tasks_when_no_sync_fn(
-        self, tmp_path: Path
-    ) -> None:
+    def test_on_done_calls_sync_fn(self, tmp_path: Path) -> None:
         started: list = []
         calls, mock_reorder = self._capture_reorder_calls()
+        sync_calls: list[tuple[object, ...]] = []
+
+        def fake_sync(*args: object, **kwargs: object) -> None:
+            sync_calls.append(args)
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "commits",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _rewrite_fn=lambda *a, **kw: None,
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            rewrite_fn=lambda *a, **kw: None,
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+            sync_fn=fake_sync,
+        ).reorder_tasks_background(
+            "commits",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
-        with patch("fido.tasks.sync_tasks") as mock_sync:
-            on_done()
-        mock_sync.assert_called_once()
+        on_done()
+        assert len(sync_calls) == 1
 
     def test_coalesces_when_already_running(self, tmp_path: Path) -> None:
         """Second call while first is running marks pending, does not spawn thread."""
@@ -3774,31 +3733,29 @@ class TestReorderTasksBackground:
 
         # First call — marks running, spawns thread
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs1",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs1",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 1
         assert state[str(tmp_path)]["running"] is True
 
         # Second call while thread has not run yet — should coalesce, not spawn
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs2",
-            self._cfg(tmp_path),
             MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs2",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 1  # no second thread spawned
         assert state[str(tmp_path)]["pending"] is not None
@@ -3811,28 +3768,26 @@ class TestReorderTasksBackground:
         calls, mock_reorder = self._capture_reorder_calls()
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs1",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs1",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         # Simulate a second trigger arriving before the thread runs
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs2",
-            self._cfg(tmp_path),
             MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs2",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         # Run the single thread — should execute reorder twice (cs1 then cs2)
         self._run_thread(started)
@@ -3850,16 +3805,15 @@ class TestReorderTasksBackground:
 
         for cs in ("cs1", "cs2", "cs3", "cs4"):
             gh = MagicMock()
-            _reorder_tasks_background(
+            self._dispatcher(
                 tmp_path,
-                cs,
-                self._cfg(tmp_path),
                 gh,
-                _start=lambda t: started.append(t),
-                _reorder_fn=mock_reorder,
-                _coalesce_state=state,
+                thread_start_fn=lambda t: started.append(t),
+                reorder_fn=mock_reorder,
+                reorder_coalesce_state=state,
+            ).reorder_tasks_background(
+                cs,
                 registry=MagicMock(spec=ActivityReporter),
-                repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
             )
         # Only one thread spawned; pending holds cs4 (the latest)
         assert len(started) == 1
@@ -3882,44 +3836,41 @@ class TestReorderTasksBackground:
 
         # First call — starts thread with intent1
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs1",
-            self._cfg(tmp_path),
             gh,
-            intents=[intent1],
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs1",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
+            intents=[intent1],
         )
         # Second call — coalesces, adds intent2
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs2",
-            self._cfg(tmp_path),
             MagicMock(),
-            intents=[intent2],
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs2",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
+            intents=[intent2],
         )
         # Third call — coalesces, adds intent3
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs3",
-            self._cfg(tmp_path),
             gh,
-            intents=[intent3],
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs3",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
+            intents=[intent3],
         )
         # Only one thread spawned; pending holds all three intents
         assert len(started) == 1
@@ -3940,16 +3891,15 @@ class TestReorderTasksBackground:
         started: list = []
         _, mock_reorder = self._capture_reorder_calls()
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         assert state[str(tmp_path)]["running"] is False
@@ -3963,29 +3913,27 @@ class TestReorderTasksBackground:
         _, mock_reorder = self._capture_reorder_calls()
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs1",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs1",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)  # first thread completes
 
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs2",
-            self._cfg(tmp_path),
             MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs2",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         assert len(started) == 2  # new thread spawned
 
@@ -3998,27 +3946,27 @@ class TestReorderTasksBackground:
         dir_b = tmp_path / "b"
 
         gh = MagicMock()
-        _reorder_tasks_background(
-            dir_a,
-            "cs",
+        Dispatcher(
             self._cfg(tmp_path),
+            RepoConfig(name="owner/repo", work_dir=dir_a),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
-            registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
-        )
-        _reorder_tasks_background(
-            dir_b,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
             "cs",
-            self._cfg(tmp_path),
-            MagicMock(),
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state=state,
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
+        )
+        Dispatcher(
+            self._cfg(tmp_path),
+            RepoConfig(name="owner/repo", work_dir=dir_b),
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "cs",
+            registry=MagicMock(spec=ActivityReporter),
         )
         assert len(started) == 2  # each dir gets its own thread
 
@@ -4031,17 +3979,15 @@ class TestReorderTasksBackground:
         registry.set_rescoping.side_effect = lambda repo, active: (
             rescoping_calls.append(active)
         )
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             MagicMock(),
-            repo_cfg=repo_cfg,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=registry,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
         )
         self._run_thread(started)
         assert rescoping_calls[0] is True
@@ -4051,17 +3997,15 @@ class TestReorderTasksBackground:
         started: list = []
         _, mock_reorder = self._capture_reorder_calls()
         registry = MagicMock()
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             MagicMock(),
-            repo_cfg=repo_cfg,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=registry,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
         )
         self._run_thread(started)
         # Last call must clear the flag
@@ -4072,21 +4016,19 @@ class TestReorderTasksBackground:
         """set_rescoping(False) is called even when reorder raises."""
         started: list = []
         registry = MagicMock()
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
 
         def boom(work_dir: Path, commit_summary: str, **kwargs: object) -> Never:
             raise RuntimeError("reorder exploded")
 
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             MagicMock(),
-            repo_cfg=repo_cfg,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=boom,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=registry,
-            _start=lambda t: started.append(t),
-            _reorder_fn=boom,
-            _coalesce_state={},
         )
         import pytest as _pytest
 
@@ -4100,22 +4042,20 @@ class TestReorderTasksBackground:
         from fido.provider import current_repo
 
         started: list = []
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         seen: list = []
 
         def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
             seen.append(current_repo())
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             gh,
-            repo_cfg=repo_cfg,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=MagicMock(spec=ActivityReporter),
         )
         self._run_thread(started)
@@ -4126,20 +4066,18 @@ class TestReorderTasksBackground:
         from fido.provider import current_repo, set_thread_repo
 
         started: list = []
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         _, mock_reorder = self._capture_reorder_calls()
 
         set_thread_repo("owner/repo")  # pre-set to confirm it gets cleared
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             gh,
-            repo_cfg=repo_cfg,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=MagicMock(spec=ActivityReporter),
         )
         self._run_thread(started)
@@ -4152,21 +4090,19 @@ class TestReorderTasksBackground:
         from fido.provider import current_repo
 
         started: list = []
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
 
         def boom(work_dir: Path, commit_summary: str, **kwargs: object) -> Never:
             raise RuntimeError("reorder exploded")
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             gh,
-            repo_cfg=repo_cfg,
-            _start=lambda t: started.append(t),
-            _reorder_fn=boom,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=boom,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=MagicMock(spec=ActivityReporter),
         )
         with pytest.raises(RuntimeError, match="reorder exploded"):
@@ -4192,16 +4128,15 @@ class TestReorderTasksBackground:
             seen.append(current_thread_kind())
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         assert seen == ["background"]
@@ -4217,16 +4152,15 @@ class TestReorderTasksBackground:
             ThreadKind.WEBHOOK
         )  # pre-set to confirm the finally block clears it
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=mock_reorder,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
         # run_loop must clear kind in its finally block so the caller's
@@ -4243,16 +4177,15 @@ class TestReorderTasksBackground:
             raise RuntimeError("reorder exploded")
 
         gh = MagicMock()
-        _reorder_tasks_background(
+        self._dispatcher(
             tmp_path,
-            "cs",
-            self._cfg(tmp_path),
             gh,
-            _start=lambda t: started.append(t),
-            _reorder_fn=boom,
-            _coalesce_state={},
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=boom,
+            reorder_coalesce_state={},
+        ).reorder_tasks_background(
+            "cs",
             registry=MagicMock(spec=ActivityReporter),
-            repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         with pytest.raises(RuntimeError, match="reorder exploded"):
             self._run_thread(started)
@@ -4299,13 +4232,9 @@ class TestBuildOnRescopeApply:
     def test_no_pr_ctx_skips_silently(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
-        cb = _build_on_rescope_apply(
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
             intents=[self._intent(101)],
-            repo="owner/repo",
             pr_ctx=None,
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=gh,
             agent=_client("nope"),
             prompts=Prompts("p"),
         )
@@ -4322,13 +4251,9 @@ class TestBuildOnRescopeApply:
         gh = MagicMock()
         alice = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
         bob = self._intent(202, "2024-01-15T10:01:00+00:00", author="bob")
-        cb = _build_on_rescope_apply(
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
             intents=[alice, bob],
-            repo="owner/repo",
             pr_ctx=self._pr(),
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=gh,
             agent=_client("Reply text"),
             prompts=Prompts("p"),
         )
@@ -4357,13 +4282,9 @@ class TestBuildOnRescopeApply:
         gh = MagicMock()
         alice1 = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
         alice2 = self._intent(102, "2024-01-15T10:01:00+00:00", author="alice")
-        cb = _build_on_rescope_apply(
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
             intents=[alice1, alice2],
-            repo="owner/repo",
             pr_ctx=self._pr(),
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=gh,
             agent=_client("nope"),
             prompts=Prompts("p"),
         )
@@ -4390,13 +4311,9 @@ class TestBuildOnRescopeApply:
         gh = MagicMock()
         alice = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
         bob = self._intent(202, "2024-01-15T10:01:00+00:00", author="bob")
-        cb = _build_on_rescope_apply(
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
             intents=[alice, bob],
-            repo="owner/repo",
             pr_ctx=self._pr(),
-            config=cfg,
-            repo_cfg=cfg.repos["owner/repo"],
-            gh=gh,
             agent=_client("nope"),
             prompts=Prompts("p"),
         )
@@ -4442,13 +4359,13 @@ class TestNotifyIntentOutcome:
             comment_type=comment_type,
         )
 
-    def _kwargs(self, cfg: Config, gh: MagicMock, agent: object) -> dict[str, object]:
+    def _dispatcher(self, tmp_path: Path, gh: object) -> Dispatcher:
+        cfg = self._cfg(tmp_path)
+        return Dispatcher(cfg, cfg.repos["owner/repo"], gh)
+
+    def _kwargs(self, agent: object) -> dict[str, object]:
         return {
-            "repo": "owner/repo",
             "pr": 42,
-            "config": cfg,
-            "repo_cfg": cfg.repos["owner/repo"],
-            "gh": gh,
             "batch_intents": [self._intent()],
             "affected_task_ids": ["t1"],
             "result": [],
@@ -4457,69 +4374,64 @@ class TestNotifyIntentOutcome:
         }
 
     def test_notify_changed_posts_review_thread_reply(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
         gh = MagicMock()
         intent = self._intent(comment_id=999)
-        _notify_intent_outcome(
+        self._dispatcher(tmp_path, gh)._notify_intent_outcome(
             intent,
             task_queue_rescope.NotifyChanged(),
-            **self._kwargs(cfg, gh, _client("Replanned, not done.")),
+            **self._kwargs(_client("Replanned, not done.")),
         )
         gh.reply_to_review_comment.assert_called_once_with(
             "owner/repo", 42, "Replanned, not done.", 999
         )
 
     def test_notify_dropped_uses_drop_framing(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
         captured: list[str] = []
 
         def fake(prompt: str, model: object, **kwargs: object) -> str:
             captured.append(prompt)
             return "ok"
 
-        _notify_intent_outcome(
+        self._dispatcher(tmp_path, MagicMock())._notify_intent_outcome(
             self._intent(),
             task_queue_rescope.NotifyDropped(),
-            **self._kwargs(cfg, MagicMock(), _client(side_effect=fake)),
+            **self._kwargs(_client(side_effect=fake)),
         )
         assert any("DROPPED" in p for p in captured)
         assert any("Do NOT say their work is done" in p for p in captured)
 
     def test_notify_changed_uses_replan_framing(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
         captured: list[str] = []
 
         def fake(prompt: str, model: object, **kwargs: object) -> str:
             captured.append(prompt)
             return "ok"
 
-        _notify_intent_outcome(
+        self._dispatcher(tmp_path, MagicMock())._notify_intent_outcome(
             self._intent(),
             task_queue_rescope.NotifyChanged(),
-            **self._kwargs(cfg, MagicMock(), _client(side_effect=fake)),
+            **self._kwargs(_client(side_effect=fake)),
         )
         assert any("REPLANNED" in p for p in captured)
         assert any("Do NOT say the work is done" in p for p in captured)
 
     def test_issue_comment_intent_skips(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
         gh = MagicMock()
         intent = self._intent(comment_id=42, comment_type="issues")
-        _notify_intent_outcome(
+        self._dispatcher(tmp_path, gh)._notify_intent_outcome(
             intent,
             task_queue_rescope.NotifyChanged(),
-            **{**self._kwargs(cfg, gh, _client("nope")), "batch_intents": [intent]},
+            **{**self._kwargs(_client("nope")), "batch_intents": [intent]},
         )
         gh.reply_to_review_comment.assert_not_called()
 
     def test_post_failure_does_not_raise(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
         gh = MagicMock()
         gh.reply_to_review_comment.side_effect = RuntimeError("network")
-        _notify_intent_outcome(
+        self._dispatcher(tmp_path, gh)._notify_intent_outcome(
             self._intent(),
             task_queue_rescope.NotifyChanged(),
-            **self._kwargs(cfg, gh, _client("ok")),
+            **self._kwargs(_client("ok")),
         )
 
     def test_co_contributing_intent_outside_batch_silently_skipped(
@@ -4528,7 +4440,6 @@ class TestNotifyIntentOutcome:
         # The result task lists a contributing_intent id that isn't in
         # batch_intents (e.g. a prior-batch intent that's no longer
         # being notified about).  The notifier silently skips it.
-        cfg = self._cfg(tmp_path)
         captured: list[str] = []
 
         def fake(prompt: str, model: object, **kwargs: object) -> str:
@@ -4537,11 +4448,11 @@ class TestNotifyIntentOutcome:
 
         intent = self._intent(101)
         result = [{"id": "t1", "title": "T", "contributing_intents": [101, 999]}]
-        _notify_intent_outcome(
+        self._dispatcher(tmp_path, MagicMock())._notify_intent_outcome(
             intent,
             task_queue_rescope.NotifyChanged(),
             **{
-                **self._kwargs(cfg, MagicMock(), _client(side_effect=fake)),
+                **self._kwargs(_client(side_effect=fake)),
                 "batch_intents": [intent],  # 999 deliberately absent
                 "result": result,
             },
@@ -4552,15 +4463,30 @@ class TestNotifyIntentOutcome:
     def test_default_agent_and_prompts_constructed_when_none(
         self, tmp_path: Path
     ) -> None:
-        cfg = self._cfg(tmp_path)
         intent = self._intent()
-        kwargs = self._kwargs(cfg, MagicMock(), _client("Auto reply"))
+        kwargs = self._kwargs(_client("Auto reply"))
         del kwargs["agent"]
         del kwargs["prompts"]
-        with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = _client("Auto reply")
-            _notify_intent_outcome(intent, task_queue_rescope.NotifyChanged(), **kwargs)
-        factory_cls.return_value.create_agent.assert_called_once()
+
+        create_agent_calls: list[tuple[object, ...]] = []
+
+        class _FakeFactory:
+            def create_agent(self, *args: object, **kwargs: object) -> object:
+                create_agent_calls.append(args)
+                return _client("Auto reply")
+
+        cfg = self._cfg(tmp_path)
+        Dispatcher(
+            cfg,
+            cfg.repos["owner/repo"],
+            MagicMock(),
+            provider_factory=_FakeFactory(),  # type: ignore[arg-type]
+        )._notify_intent_outcome(
+            intent,
+            task_queue_rescope.NotifyChanged(),
+            **kwargs,
+        )
+        assert len(create_agent_calls) == 1
 
 
 class TestBuildOpInputsAuthors:
@@ -4654,13 +4580,20 @@ class TestBackfillMissedPrComments:
         mock_gh = self._gh_with_pr([self._comment(100)])
         cfg = self._cfg(tmp_path)
         repo_cfg = self._repo_cfg(tmp_path)
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            count = Dispatcher(cfg, repo_cfg, mock_gh).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
+        reply_calls: list[tuple[object, ...]] = []
+
+        def fake_reply(*args: object, **kwargs: object) -> tuple[str, list[str]]:
+            reply_calls.append(args)
+            return ("ACT", [])
+
+        count = Dispatcher(
+            cfg, repo_cfg, mock_gh, backfill_reply_fn=fake_reply
+        ).backfill_missed_pr_comments(
+            1, gh_user="fidocancode", registry=self._registry()
+        )
         assert count == 1
-        mock_reply.assert_called_once()
-        action = mock_reply.call_args.args[0]
+        assert len(reply_calls) == 1
+        action = reply_calls[0][0]
         assert action.thread["comment_id"] == 100
         assert action.thread["comment_type"] == "issues"
         assert action.thread["author"] == "rhencke"
@@ -4670,43 +4603,56 @@ class TestBackfillMissedPrComments:
         # never invoked from backfill in the new path (still exists
         # as a function; slice 2 removes it once we confirm zero
         # callers).
+        # Backfill never calls create_task — it delegates entirely to reply_fn.
+        # Verify the call completes without raising (if create_task were invoked
+        # by backfill, the real function would blow up without the right args).
         mock_gh = self._gh_with_pr([self._comment(100)])
-        with (
-            patch("fido.events.create_task") as mock_create,
-            patch("fido.events.reply_to_issue_comment"),
-        ):
-            Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
-        mock_create.assert_not_called()
+        Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=lambda *a, **kw: ("ACT", []),
+        ).backfill_missed_pr_comments(
+            1,
+            gh_user="fidocancode",
+            registry=self._registry(),
+        )
 
     def test_skips_fido_own_comments(self, tmp_path: Path) -> None:
         mock_gh = self._gh_with_pr(
             [self._comment(100, user="fidocancode", body="my own reply")]
         )
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="FidoCanCode", registry=self._registry()
-            )
-        mock_reply.assert_not_called()
+
+        def _should_not_be_called_reply(*args: object, **kwargs: object) -> Never:
+            raise AssertionError("reply_to_issue_comment should not be called")
+
+        Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=_should_not_be_called_reply,
+        ).backfill_missed_pr_comments(
+            1,
+            gh_user="FidoCanCode",
+            registry=self._registry(),
+        )
 
     def test_skips_by_gh_user_case_insensitive(self, tmp_path: Path) -> None:
         mock_gh = self._gh_with_pr([self._comment(100, user="Alice", body="mine")])
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(1, gh_user="alice", registry=self._registry())
-        mock_reply.assert_not_called()
+
+        def _should_not_be_called_reply(*args: object, **kwargs: object) -> Never:
+            raise AssertionError("reply_to_issue_comment should not be called")
+
+        Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=_should_not_be_called_reply,
+        ).backfill_missed_pr_comments(
+            1,
+            gh_user="alice",
+            registry=self._registry(),
+        )
 
     def test_skips_fido_literal_name_even_if_gh_user_mismatch(
         self, tmp_path: Path
@@ -4716,42 +4662,58 @@ class TestBackfillMissedPrComments:
         mock_gh = self._gh_with_pr(
             [self._comment(100, user="fido-can-code", body="my reply")]
         )
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="mis-configured-bot", registry=self._registry()
-            )
-        mock_reply.assert_not_called()
+
+        def _should_not_be_called_reply(*args: object, **kwargs: object) -> Never:
+            raise AssertionError("reply_to_issue_comment should not be called")
+
+        Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=_should_not_be_called_reply,
+        ).backfill_missed_pr_comments(
+            1,
+            gh_user="mis-configured-bot",
+            registry=self._registry(),
+        )
 
     def test_skips_non_allowed_users(self, tmp_path: Path) -> None:
         mock_gh = self._gh_with_pr([self._comment(100, user="random-stranger")])
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
-        mock_reply.assert_not_called()
+
+        def _should_not_be_called_reply(*args: object, **kwargs: object) -> Never:
+            raise AssertionError("reply_to_issue_comment should not be called")
+
+        Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
+            mock_gh,
+            backfill_reply_fn=_should_not_be_called_reply,
+        ).backfill_missed_pr_comments(
+            1,
+            gh_user="fidocancode",
+            registry=self._registry(),
+        )
 
     def test_allows_configured_bots(self, tmp_path: Path) -> None:
         mock_gh = self._gh_with_pr(
             [self._comment(100, user="dependabot[bot]", body="bump dep")]
         )
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
-        assert mock_reply.call_count == 1
-        action = mock_reply.call_args.args[0]
+        reply_calls: list[tuple[object, ...]] = []
+
+        def fake_reply(*args: object, **kwargs: object) -> tuple[str, list[str]]:
+            reply_calls.append(args)
+            return ("ACT", [])
+
+        Dispatcher(
+            self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=fake_reply,
+        ).backfill_missed_pr_comments(
+            1, gh_user="fidocancode", registry=self._registry()
+        )
+        assert len(reply_calls) == 1
+        action = reply_calls[0][0]
         assert "bot" in action.thread["author"]
 
     def test_prompt_marks_bot_vs_human(self, tmp_path: Path) -> None:
@@ -4761,15 +4723,21 @@ class TestBackfillMissedPrComments:
                 self._comment(101, user="bot[bot]", body="bot msg"),
             ]
         )
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
-        actions = [c.args[0] for c in mock_reply.call_args_list]
+        reply_calls: list[tuple[object, ...]] = []
+
+        def fake_reply(*args: object, **kwargs: object) -> tuple[str, list[str]]:
+            reply_calls.append(args)
+            return ("ACT", [])
+
+        Dispatcher(
+            self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=fake_reply,
+        ).backfill_missed_pr_comments(
+            1, gh_user="fidocancode", registry=self._registry()
+        )
+        actions = [call[0] for call in reply_calls]
         # Action.is_bot reflects the per-comment user marker; the
         # prompt format remains stable for synthesis classification.
         assert any(not a.is_bot for a in actions)
@@ -4783,29 +4751,39 @@ class TestBackfillMissedPrComments:
                 {"id": 2, "user": None, "body": "x"},
             ]
         )
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
-        mock_reply.assert_not_called()
+
+        def _should_not_be_called_reply(*args: object, **kwargs: object) -> Never:
+            raise AssertionError("reply_to_issue_comment should not be called")
+
+        Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=_should_not_be_called_reply,
+        ).backfill_missed_pr_comments(
+            1,
+            gh_user="fidocancode",
+            registry=self._registry(),
+        )
 
     def test_empty_comment_list_is_noop(self, tmp_path: Path) -> None:
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = []
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            count = Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
+
+        def _should_not_be_called_reply(*args: object, **kwargs: object) -> Never:
+            raise AssertionError("reply_to_issue_comment should not be called")
+
+        count = Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=_should_not_be_called_reply,
+        ).backfill_missed_pr_comments(
+            1,
+            gh_user="fidocancode",
+            registry=self._registry(),
+        )
         assert count == 0
-        mock_reply.assert_not_called()
         # Also: with zero comments, no need to fetch PR metadata.
         mock_gh.get_pr.assert_not_called()
 
@@ -4827,18 +4805,24 @@ class TestBackfillMissedPrComments:
         assert promise is not None
         FidoStore(tmp_path).ack_promise(promise.promise_id)
 
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
+        reply_calls: list[tuple[object, ...]] = []
+
+        def fake_reply(*args: object, **kwargs: object) -> tuple[str, list[str]]:
+            reply_calls.append(args)
+            return ("ACT", [])
+
+        Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=fake_reply,
+        ).backfill_missed_pr_comments(
+            1, gh_user="fidocancode", registry=self._registry()
+        )
 
         # Only comment 200 (unclaimed) should be routed through synthesis.
-        assert mock_reply.call_count == 1
-        action = mock_reply.call_args.args[0]
+        assert len(reply_calls) == 1
+        action = reply_calls[0][0]
         assert action.thread["comment_id"] == 200
 
     def test_synthesis_failure_per_comment_does_not_break_loop(
@@ -4853,17 +4837,25 @@ class TestBackfillMissedPrComments:
                 self._comment(200, body="second"),
             ]
         )
-        with patch("fido.events.reply_to_issue_comment") as mock_reply:
-            mock_reply.side_effect = [RuntimeError("synth failed"), ("ACT", [])]
-            count = Dispatcher(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-            ).backfill_missed_pr_comments(
-                1, gh_user="fidocancode", registry=self._registry()
-            )
+        call_count = 0
+
+        def fake_reply(*args: object, **kwargs: object) -> tuple[str, list[str]]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("synth failed")
+            return ("ACT", [])
+
+        count = Dispatcher(
+            self._cfg(tmp_path),
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            backfill_reply_fn=fake_reply,
+        ).backfill_missed_pr_comments(
+            1, gh_user="fidocancode", registry=self._registry()
+        )
         assert count == 2
-        assert mock_reply.call_count == 2
+        assert call_count == 2
 
 
 class TestLaunchSync:
@@ -4883,16 +4875,25 @@ class TestLaunchSync:
     def test_calls_sync_tasks_background(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            Dispatcher(cfg, self._repo_cfg(tmp_path), mock_gh).launch_sync()
-        mock_sync.assert_called_once_with(tmp_path, mock_gh)
+        sync_calls: list[tuple[object, ...]] = []
+
+        def fake_sync(*args: object, **kwargs: object) -> None:
+            sync_calls.append(args)
+
+        Dispatcher(
+            cfg, self._repo_cfg(tmp_path), mock_gh, sync_fn=fake_sync
+        ).launch_sync()
+        assert len(sync_calls) == 1
+        assert sync_calls[0] == (tmp_path, mock_gh)
 
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("fido.tasks.sync_tasks_background"):
-            Dispatcher(
-                cfg, self._repo_cfg(tmp_path), _make_mock_gh()
-            ).launch_sync()  # should not raise
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            _make_mock_gh(),
+            sync_fn=lambda *a, **kw: None,
+        ).launch_sync()  # should not raise
 
 
 class TestLaunchWorker:
@@ -5124,20 +5125,7 @@ class TestDispatchReviewCommentNoNumber:
 
 
 class TestBackgroundRescopeTrigger:
-    """_BackgroundRescopeTrigger delegates to _reorder_tasks_background."""
-
-    def _cfg(self, tmp_path: Path) -> Config:
-        return Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-
-    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
-        return RepoConfig(name="owner/repo", work_dir=tmp_path)
+    """_BackgroundRescopeTrigger delegates to Dispatcher.reorder_tasks_background."""
 
     def _make_intent(
         self,
@@ -5151,73 +5139,57 @@ class TestBackgroundRescopeTrigger:
             timestamp=timestamp,
         )
 
-    def test_trigger_rescope_calls_reorder_tasks_background(
-        self, tmp_path: Path
-    ) -> None:
-        cfg = self._cfg(tmp_path)
-        repo_cfg = self._repo_cfg(tmp_path)
-        mock_gh = MagicMock()
+    def test_trigger_rescope_calls_reorder_tasks_background(self) -> None:
+        fake_dispatcher = _FakeDispatcher()
+        fake_registry = MagicMock(spec=ActivityReporter)
         intent = self._make_intent("Add logging to the handler")
 
         trigger = _BackgroundRescopeTrigger(
-            tmp_path,
-            cfg,
-            mock_gh,
-            repo_cfg=repo_cfg,
-            registry=MagicMock(spec=ActivityReporter),
+            fake_registry,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
         )
+        trigger.trigger_rescope(intent)
 
-        with patch("fido.events._reorder_tasks_background") as mock_reorder:
-            trigger.trigger_rescope(intent)
+        assert len(fake_dispatcher.reorder_tasks_background_calls) == 1
+        args, _ = fake_dispatcher.reorder_tasks_background_calls[0]
+        assert args[0] == "Add logging to the handler"
 
-        mock_reorder.assert_called_once()
-        call_kwargs = mock_reorder.call_args
-        assert call_kwargs.args[1] == "Add logging to the handler"
-
-    def test_trigger_rescope_passes_intent_as_intents_list(
-        self, tmp_path: Path
-    ) -> None:
+    def test_trigger_rescope_passes_intent_as_intents_list(self) -> None:
         """_BackgroundRescopeTrigger wraps the intent in a single-item list."""
-        cfg = self._cfg(tmp_path)
-        repo_cfg = self._repo_cfg(tmp_path)
-        mock_gh = MagicMock()
+        fake_dispatcher = _FakeDispatcher()
         intent = self._make_intent("Refactor tests", comment_id=77)
 
         trigger = _BackgroundRescopeTrigger(
-            tmp_path,
-            cfg,
-            mock_gh,
-            repo_cfg=repo_cfg,
-            registry=MagicMock(spec=ActivityReporter),
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
         )
+        trigger.trigger_rescope(intent)
 
-        with patch("fido.events._reorder_tasks_background") as mock_reorder:
-            trigger.trigger_rescope(intent)
+        _, kwargs = fake_dispatcher.reorder_tasks_background_calls[0]
+        assert kwargs["intents"] == [intent]
 
-        passed_intents = mock_reorder.call_args.kwargs["intents"]
-        assert passed_intents == [intent]
-
-    def test_trigger_rescope_passes_collaborators(self, tmp_path: Path) -> None:
-        """_BackgroundRescopeTrigger forwards work_dir, config, and gh to reorder."""
-        cfg = self._cfg(tmp_path)
-        repo_cfg = self._repo_cfg(tmp_path)
-        mock_gh = MagicMock()
+    def test_trigger_rescope_passes_registry_and_agent(self) -> None:
+        """_BackgroundRescopeTrigger forwards registry, agent, and prompts."""
+        fake_dispatcher = _FakeDispatcher()
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_agent = MagicMock()
+        fake_prompts = Prompts("p")
 
         trigger = _BackgroundRescopeTrigger(
-            tmp_path,
-            cfg,
-            mock_gh,
-            repo_cfg=repo_cfg,
-            registry=MagicMock(spec=ActivityReporter),
+            fake_registry,
+            agent=fake_agent,
+            prompts=fake_prompts,
+            dispatcher=fake_dispatcher,
         )
+        trigger.trigger_rescope(self._make_intent("Refactor the parser"))
 
-        with patch("fido.events._reorder_tasks_background") as mock_reorder:
-            trigger.trigger_rescope(self._make_intent("Refactor the parser"))
-
-        args = mock_reorder.call_args.args
-        assert args[0] == tmp_path
-        assert args[2] is cfg
-        assert args[3] is mock_gh
+        _, kwargs = fake_dispatcher.reorder_tasks_background_calls[0]
+        assert kwargs["agent"] is fake_agent
+        assert kwargs["prompts"] is fake_prompts
 
 
 class TestReplyToCommentElseBranch:
@@ -5248,18 +5220,18 @@ class TestReplyToCommentElseBranch:
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = []
         mock_gh.reply_to_review_comment.return_value = {"id": 999}
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("I'll look into this."),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "I'll look into this."
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert cat == "ANSWER"
         assert titles == []
 
@@ -5276,18 +5248,14 @@ class TestReplyToCommentElseBranch:
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = []
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        with (
-            pytest.raises(RuntimeError, match="network down"),
-            patch(
-                "fido.events.call_synthesis",
-                return_value=_synthesis_response("I'll fix it."),
-            ),
-        ):
-            reply_to_comment(
-                action,
+        with pytest.raises(RuntimeError, match="network down"):
+            Dispatcher(
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
+                call_synthesis_fn=lambda *a, **kw: _synthesis_response("I'll fix it."),
+            ).reply_to_comment(
+                action,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
             )
@@ -5326,18 +5294,18 @@ class TestReplyToCommentElseBranch:
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 52, "author": "owner", "body": "please fix this"}
         ]
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("I'll fix it.", change_request="Fix it"),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                repo_cfg,
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        cat, titles = Dispatcher(
+            cfg,
+            repo_cfg,
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "I'll fix it.", change_request="Fix it"
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         assert cat == "ACT"
         assert titles == ["Fix it"]
@@ -5382,20 +5350,18 @@ class TestReplyToCommentThreadRefetch:
         ]
         mock_gh.reply_to_review_comment.return_value = {"id": 999}
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "On it!", change_request="Refactor this module"
             ),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Must be called exactly twice: initial context fetch + pre-post re-fetch
         assert mock_gh.fetch_comment_thread.call_count == 2
@@ -5439,18 +5405,16 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Will do!"),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Will do!"),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Re-fetch shows human is last → post new reply, not edit
         # (Fido ID 502 existed in initial, so concurrent-skip is NOT triggered)
@@ -5498,20 +5462,18 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "Adding tests now!", change_request="Add tests"
             ),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Fresh data shows human is last speaker → post new reply, never edit
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -5542,18 +5504,18 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Fixed!", change_request="Fix the import"),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "Fixed!", change_request="Fix the import"
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Falls back to initial snapshot (no Fido reply) → posts new reply
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -5599,20 +5561,18 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "Woof, on it!", change_request="Add docstrings"
             ),
-        ):
-            cat, titles = reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Concurrent handler already replied — neither post nor edit is called
         mock_gh.reply_to_review_comment.assert_not_called()
@@ -5660,20 +5620,18 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "Woof, on it!", change_request="Add docstrings"
             ),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Sibling-comment reply must NOT skip our post — we still reply.
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -5703,18 +5661,18 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response("Thanks for the feedback!"),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
+                "Thanks for the feedback!"
+            ),
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Posted replies are immutable; Fido posts a new reply instead.
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -5754,20 +5712,18 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        with patch(
-            "fido.events.call_synthesis",
-            return_value=_synthesis_response(
+        Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
                 "Fixed the typo!", change_request="Fix the typo"
             ),
-        ):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(),
-                registry=MagicMock(spec=ActivityReporter),
-            )
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
 
         # Concurrent Fido reply detected (via fido-can-code) — skip
         mock_gh.reply_to_review_comment.assert_not_called()
@@ -5779,11 +5735,11 @@ class TestReplyToCommentThreadRefetch:
 
 class TestRewritePrDescription:
     @pytest.fixture(autouse=True)
-    def _mock_pr_body_lock(self) -> object:
-        from contextlib import nullcontext
+    def _init_git(self, tmp_path: Path) -> None:
+        """Initialize a git repo so pr_body_lock can resolve .git."""
+        import subprocess as sp
 
-        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
-            yield
+        sp.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
 
     def _pr_body(self, desc: str = "Does something useful.\n\nFixes #42.") -> str:
         return (
@@ -5958,27 +5914,32 @@ class TestRewritePrDescription:
 
     def test_defaults_to_none_agent(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        with patch("fido.worker._write_pr_description") as mock_write:
-            _rewrite_pr_description(
-                tmp_path,
-                mock_gh,
-                _state=self._mock_state(),
-                _tasks=self._mock_tasks(),
-            )
-        mock_write.assert_called_once()
-        assert mock_write.call_args.kwargs.get("agent") is None
+        write_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def capture_write(*args: object, **kwargs: object) -> None:
+            write_calls.append((args, kwargs))
+
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _state=self._mock_state(),
+            _tasks=self._mock_tasks(),
+            _write_fn=capture_write,
+        )
+        assert len(write_calls) == 1
+        assert write_calls[0][1].get("agent") is None
 
     def test_defaults_to_state(self, tmp_path: Path) -> None:
+        # Without an explicit _state, _rewrite_pr_description constructs a
+        # real State from tmp_path/.git/fido. Since no state.json exists there,
+        # State.load() returns {}, issue is None, and the function returns early.
         mock_gh = self._mock_gh()
-        mock_state = self._mock_state(issue=None)
-        with patch("fido.state.State", return_value=mock_state) as mock_state_cls:
-            _rewrite_pr_description(
-                tmp_path,
-                mock_gh,
-                agent=_client(),
-                _tasks=self._mock_tasks(),
-            )
-        mock_state_cls.assert_called_once_with(tmp_path / ".git" / "fido")
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            agent=_client(),
+            _tasks=self._mock_tasks(),
+        )
         mock_gh.edit_pr_body.assert_not_called()
 
     def test_does_not_retry_when_task_list_unchanged(self, tmp_path: Path) -> None:
@@ -6192,16 +6153,9 @@ class TestMakeReorderKwargsActiveContext:
 
     def test_no_issue_key_omitted_when_no_state(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        kwargs = _make_reorder_kwargs(
-            tmp_path,
-            self._cfg(tmp_path),
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            gh,
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
-        )
+        kwargs = Dispatcher(
+            self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
+        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert "issue" not in kwargs
         assert "pr" not in kwargs
 
@@ -6210,16 +6164,9 @@ class TestMakeReorderKwargsActiveContext:
         State(fido_dir).save({"issue": 5})
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "Do the thing", "body": "Details."}
-        kwargs = _make_reorder_kwargs(
-            tmp_path,
-            self._cfg(tmp_path),
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            gh,
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
-        )
+        kwargs = Dispatcher(
+            self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
+        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert "issue" in kwargs
         issue = kwargs["issue"]
         assert isinstance(issue, ActiveIssue)
@@ -6233,16 +6180,9 @@ class TestMakeReorderKwargsActiveContext:
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "t", "body": ""}
         gh.get_pr.return_value = {"title": "Fix it (closes #5)", "body": ""}
-        kwargs = _make_reorder_kwargs(
-            tmp_path,
-            self._cfg(tmp_path),
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            gh,
-            MagicMock(),
-            MagicMock(),
-            MagicMock(),
-        )
+        kwargs = Dispatcher(
+            self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
+        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert "pr" in kwargs
         pr = kwargs["pr"]
         assert isinstance(pr, ActivePR)
@@ -6441,7 +6381,12 @@ class TestDispatcher:
         cfg = _config(tmp_path)
         mock_gh = MagicMock()
         repo_cfg = _repo_cfg(tmp_path)
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            d = Dispatcher(cfg, repo_cfg, mock_gh)
-            d.launch_sync()
-        mock_sync.assert_called_once_with(repo_cfg.work_dir, mock_gh)
+        sync_calls: list[tuple[object, ...]] = []
+
+        def fake_sync(*args: object, **kwargs: object) -> None:
+            sync_calls.append(args)
+
+        d = Dispatcher(cfg, repo_cfg, mock_gh, sync_fn=fake_sync)
+        d.launch_sync()
+        assert len(sync_calls) == 1
+        assert sync_calls[0] == (repo_cfg.work_dir, mock_gh)

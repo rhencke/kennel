@@ -643,36 +643,6 @@ def current_thread_kind() -> ThreadKind:
     return kind if isinstance(kind, ThreadKind) else ThreadKind.WORKER
 
 
-def try_preempt_worker(
-    repo_name: str | None, cancel_fn: Callable[[], None]
-) -> tuple[bool, ThreadKind | None]:
-    """Invoke *cancel_fn* iff the calling thread is a real webhook AND the
-    session's current lock holder is a worker.  Otherwise do nothing.
-
-    Returns ``(preempted, current_kind)`` — *preempted* is ``True`` only when
-    *cancel_fn* was invoked; *current_kind* is the current holder's kind
-    (``"worker"``, ``"webhook"``, or ``None`` when the session is idle).
-    The caller uses that to log the outcome.
-
-    Provider-neutral decision gate for #637.  The *mechanism* of cancelling
-    a running turn differs across providers (stream-json ``control_request``
-    for claude, ACP ``cancel(session_id)`` for copilot), but the *decision*
-    is identical and lives here.  Worker callers never preempt anyone;
-    webhooks queue behind other webhooks (FIFO on the session lock) instead
-    of cancelling each other.  ``"background"`` callers (e.g. the rescope
-    thread, #1711) also never preempt — that's the whole point of the
-    third kind: they're system-internal, not user-facing, so they have
-    no priority claim on interrupting in-flight worker turns.
-    """
-    caller_kind = current_thread_kind()
-    current = get_talker(repo_name) if repo_name is not None else None
-    current_kind = current.kind if current is not None else None
-    if caller_kind == "webhook" and current_kind == "worker":
-        cancel_fn()
-        return True, current_kind
-    return False, current_kind
-
-
 def register_talker(talker: SessionTalker) -> None:
     """Register *talker* as the active provider driver for its repo.
 
@@ -722,6 +692,48 @@ def get_talker(repo_name: str) -> SessionTalker | None:
     """Return the active talker for *repo_name*, or ``None`` if idle."""
     with _talkers_lock:
         return _talkers.get(repo_name)
+
+
+class TalkerResolver(Protocol):
+    """Resolves the current session talker for a given repository name.
+
+    Production code passes :func:`get_talker`; tests pass a typed fake.
+    """
+
+    def __call__(self, repo_name: str) -> SessionTalker | None: ...
+
+
+def try_preempt_worker(
+    repo_name: str | None,
+    cancel_fn: Callable[[], None],
+    talker_resolver: TalkerResolver | None = None,
+) -> tuple[bool, ThreadKind | None]:
+    """Invoke *cancel_fn* iff the calling thread is a real webhook AND the
+    session's current lock holder is a worker.  Otherwise do nothing.
+
+    Returns ``(preempted, current_kind)`` — *preempted* is ``True`` only when
+    *cancel_fn* was invoked; *current_kind* is the current holder's kind
+    (``"worker"``, ``"webhook"``, or ``None`` when the session is idle).
+    The caller uses that to log the outcome.
+
+    Provider-neutral decision gate for #637.  The *mechanism* of cancelling
+    a running turn differs across providers (stream-json ``control_request``
+    for claude, ACP ``cancel(session_id)`` for copilot), but the *decision*
+    is identical and lives here.  Worker callers never preempt anyone;
+    webhooks queue behind other webhooks (FIFO on the session lock) instead
+    of cancelling each other.  ``"background"`` callers (e.g. the rescope
+    thread, #1711) also never preempt — that's the whole point of the
+    third kind: they're system-internal, not user-facing, so they have
+    no priority claim on interrupting in-flight worker turns.
+    """
+    _resolver = talker_resolver if talker_resolver is not None else get_talker
+    caller_kind = current_thread_kind()
+    current = _resolver(repo_name) if repo_name is not None else None
+    current_kind = current.kind if current is not None else None
+    if caller_kind == "webhook" and current_kind == "worker":
+        cancel_fn()
+        return True, current_kind
+    return False, current_kind
 
 
 def talker_now() -> datetime:
@@ -1194,7 +1206,10 @@ class OwnedSession:
         with their provider-specific cancel mechanism."""
         raise NotImplementedError  # pragma: no cover — abstract hook
 
-    def preempt_worker(self) -> bool:
+    def preempt_worker(
+        self,
+        talker_resolver: TalkerResolver | None = None,
+    ) -> bool:
         """Fire the cancel signal synchronously if a worker currently holds
         the session.
 
@@ -1211,7 +1226,8 @@ class OwnedSession:
         Returns ``True`` if a worker was preempted, ``False`` if the session
         was idle or already held by another webhook.
         """
-        current = get_talker(self._repo_name) if self._repo_name else None
+        _resolver = talker_resolver if talker_resolver is not None else get_talker
+        current = _resolver(self._repo_name) if self._repo_name else None
         current_kind = current.kind if current is not None else None
         if current_kind == "worker":
             self._fire_worker_cancel()

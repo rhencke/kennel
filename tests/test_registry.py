@@ -1037,21 +1037,20 @@ class TestMakeThread:
             _WorkerThread=mock_wt_cls,
         )
         from fido.config import RepoMembership
+        from fido.provider_factory import DefaultProviderFactory
 
-        mock_wt_cls.assert_called_once_with(
-            tmp_path,
-            "foo/bar",
-            mock_gh,
-            mock_registry,
-            RepoMembership(),
-            provider=None,
-            session_issue=None,
-            config=None,
-            repo_cfg=cfg,
-            dispatcher=fake_dispatcher,
-            issue_cache=mock_registry.get_issue_cache.return_value,
-            state_updater=None,
-        )
+        mock_wt_cls.assert_called_once()
+        call_args, call_kwargs = mock_wt_cls.call_args
+        assert call_args == (tmp_path, "foo/bar", mock_gh, mock_registry)
+        assert call_kwargs["membership"] == RepoMembership()
+        assert isinstance(call_kwargs["provider_factory"], DefaultProviderFactory)
+        assert call_kwargs["provider"] is None
+        assert call_kwargs["session_issue"] is None
+        assert call_kwargs["config"] is None
+        assert call_kwargs["repo_cfg"] is cfg
+        assert call_kwargs["dispatcher"] is fake_dispatcher
+        assert call_kwargs["issue_cache"] is mock_registry.get_issue_cache.return_value
+        assert call_kwargs["state_updater"] is None
         mock_registry.get_issue_cache.assert_called_once_with("foo/bar")
         assert result is mock_wt_cls.return_value
 

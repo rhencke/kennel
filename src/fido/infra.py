@@ -159,8 +159,29 @@ class OsProcess(Protocol):
         ...
 
 
-class RealOsProcess:
-    """Real :class:`OsProcess` that delegates to :mod:`os` and :mod:`signal`."""
+class _OsBackend(Protocol):
+    """Injectable OS operation backend for :class:`RealOsProcess`.
+
+    Each method maps one-to-one to an OS or signal stdlib call.  The real
+    implementation delegates directly; fakes record calls for tests.
+    """
+
+    def execvp(self, file: str, args: list[str]) -> None: ...
+
+    def exit(self, code: int) -> NoReturn: ...
+
+    def chdir(self, path: Path | str) -> None: ...
+
+    def signal(self, signum: int, handler: Callable[..., object]) -> object: ...
+
+
+class _StdlibOsBackend:  # pragma: no cover
+    """Real :class:`_OsBackend` that delegates to :mod:`os` and :mod:`signal`.
+
+    Not tested directly — these calls have irreversible process-level side
+    effects (process replacement, immediate termination, cwd mutation,
+    signal-table mutation).
+    """
 
     def execvp(self, file: str, args: list[str]) -> None:
         os.execvp(file, args)
@@ -171,8 +192,34 @@ class RealOsProcess:
     def chdir(self, path: Path | str) -> None:
         os.chdir(path)
 
-    def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
+    def signal(self, signum: int, handler: Callable[..., object]) -> object:
         return signal.signal(signum, handler)
+
+
+_STDLIB_OS_BACKEND = _StdlibOsBackend()
+
+
+class RealOsProcess:
+    """Real :class:`OsProcess` that delegates to :class:`_OsBackend`.
+
+    The default backend calls the stdlib directly.  Tests inject a fake
+    :class:`_OsBackend` to record calls without running real OS operations.
+    """
+
+    def __init__(self, backend: _OsBackend = _STDLIB_OS_BACKEND) -> None:
+        self._backend = backend
+
+    def execvp(self, file: str, args: list[str]) -> None:
+        self._backend.execvp(file, args)
+
+    def exit(self, code: int) -> NoReturn:
+        self._backend.exit(code)
+
+    def chdir(self, path: Path | str) -> None:
+        self._backend.chdir(path)
+
+    def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
+        return self._backend.signal(signum, handler)
 
 
 # ---------------------------------------------------------------------------

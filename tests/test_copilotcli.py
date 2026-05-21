@@ -1786,6 +1786,7 @@ class TestCopilotCLIClient:
             repo_name=None,
             session_id=None,
             snapshot_publisher=client,
+            talker_resolver=provider.get_talker,
         )
         session.reset.assert_called_once_with(client.work_model)
         session.switch_model.assert_not_called()
@@ -1823,6 +1824,7 @@ class TestCopilotCLIClient:
             repo_name=None,
             session_id=None,
             snapshot_publisher=client,
+            talker_resolver=provider.get_talker,
         )
         session.reset.assert_not_called()
 

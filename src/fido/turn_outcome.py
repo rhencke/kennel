@@ -33,6 +33,9 @@ from fido.rocq.turn_outcome import (
 )
 from fido.synthesis import Insight
 
+# Type alias for the parse_sentinel oracle function signature.
+_OracleFn = Callable[[str, str], TurnOutcome | None]
+
 _T = TypeVar("_T")
 
 __all__ = [
@@ -63,9 +66,11 @@ class TurnOutcomeBundle:
     out_of_scope_asks: tuple[OutOfScopeAsk, ...]
 
 
-def _assert_parse_oracle(kind: str, payload: str, result: TurnOutcome) -> None:
+def _assert_parse_oracle(
+    kind: str, payload: str, result: TurnOutcome, *, _oracle: "_OracleFn"
+) -> None:
     """Assert that the Rocq-proven parse_sentinel agrees with our dispatch."""
-    oracle = parse_sentinel(kind, payload)
+    oracle = _oracle(kind, payload)
     if oracle is None:
         raise AssertionError(
             f"parse_sentinel oracle returned None for kind={kind!r} "
@@ -77,14 +82,14 @@ def _assert_parse_oracle(kind: str, payload: str, result: TurnOutcome) -> None:
         )
 
 
-def _assert_reject_oracle(kind: str, payload: str) -> None:
+def _assert_reject_oracle(kind: str, payload: str, *, _oracle: "_OracleFn") -> None:
     """Assert that the Rocq-proven parse_sentinel also rejects this input.
 
     Called on ValueError paths where the parser refuses to produce a
     TurnOutcome.  If the model accepts an input the parser rejects,
     this crashes — surfacing the divergence immediately.
     """
-    oracle = parse_sentinel(kind, payload)
+    oracle = _oracle(kind, payload)
     if oracle is not None:
         raise AssertionError(
             f"parse_sentinel oracle accepted input the parser rejects: "
@@ -92,7 +97,9 @@ def _assert_reject_oracle(kind: str, payload: str) -> None:
         )
 
 
-def _require_nonempty_str(obj: dict[str, object], field: str, kind: str) -> str:
+def _require_nonempty_str(
+    obj: dict[str, object], field: str, kind: str, *, _oracle: "_OracleFn"
+) -> str:
     """Extract and validate a required non-empty string field from *obj*.
 
     Raises ValueError with a descriptive message if the field is missing,
@@ -104,7 +111,7 @@ def _require_nonempty_str(obj: dict[str, object], field: str, kind: str) -> str:
         # also rejects.  Python normalizes by stripping — the model rejects
         # empty payloads — so we pass the stripped form.
         if isinstance(value, str):
-            _assert_reject_oracle(kind, value.strip())
+            _assert_reject_oracle(kind, value.strip(), _oracle=_oracle)
         raise ValueError(
             f'turn_outcome "{kind}" requires a non-empty '
             f'"{field}" string, got: {value!r}'
@@ -117,11 +124,13 @@ def _parse_outcome_field(
     kind: str,
     field: str,
     make: Callable[[str], TurnOutcome],
+    *,
+    _oracle: "_OracleFn",
 ) -> TurnOutcome:
     """Validate *field* in *obj*, construct the outcome via *make*, assert the oracle."""
-    payload = _require_nonempty_str(obj, field, kind)
+    payload = _require_nonempty_str(obj, field, kind, _oracle=_oracle)
     result = make(payload)
-    _assert_parse_oracle(kind, payload, result)
+    _assert_parse_oracle(kind, payload, result, _oracle=_oracle)
     return result
 
 
@@ -181,7 +190,9 @@ def _parse_out_of_scope_ask(item: dict[str, object], label: str) -> "OutOfScopeA
     )
 
 
-def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
+def parse_turn_outcome(
+    text: str, *, _oracle: "_OracleFn | None" = None
+) -> TurnOutcomeBundle:
     """Parse the turn_outcome sentinel from the last non-empty line of *text*.
 
     Only the final non-empty line is examined — stale sentinels earlier in
@@ -190,11 +201,16 @@ def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
     Returns a :class:`TurnOutcomeBundle` with the dispatch ``outcome`` plus
     any optional ``insights`` and ``out_of_scope_asks`` declared by the LLM.
 
+    *_oracle* overrides the default :func:`parse_sentinel` Rocq oracle; used
+    by tests to exercise the divergence-detection paths without patching module
+    symbols.
+
     Raises:
         ValueError: If the line is absent, not valid JSON, not a recognised
             shape, or missing required fields.  The message describes *why*
             parsing failed so the nudge loop can relay it to the LLM.
     """
+    oracle: _OracleFn = _oracle if _oracle is not None else parse_sentinel
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         raise ValueError(
@@ -212,19 +228,35 @@ def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
     match kind:
         case "commit-task-complete":
             outcome: TurnOutcome = _parse_outcome_field(
-                obj, kind, "summary", lambda s: CommitTaskComplete(summary=s)
+                obj,
+                kind,
+                "summary",
+                lambda s: CommitTaskComplete(summary=s),
+                _oracle=oracle,
             )
         case "commit-task-in-progress":
             outcome = _parse_outcome_field(
-                obj, kind, "summary", lambda s: CommitTaskInProgress(summary=s)
+                obj,
+                kind,
+                "summary",
+                lambda s: CommitTaskInProgress(summary=s),
+                _oracle=oracle,
             )
         case "skip-task-with-reason":
             outcome = _parse_outcome_field(
-                obj, kind, "reason", lambda s: SkipTaskWithReason(reason=s)
+                obj,
+                kind,
+                "reason",
+                lambda s: SkipTaskWithReason(reason=s),
+                _oracle=oracle,
             )
         case "stuck-on-task":
             outcome = _parse_outcome_field(
-                obj, kind, "reason", lambda s: StuckOnTask(reason=s)
+                obj,
+                kind,
+                "reason",
+                lambda s: StuckOnTask(reason=s),
+                _oracle=oracle,
             )
         case None:
             raise ValueError(f'JSON object has no "turn_outcome" key: {last!r}')
@@ -232,7 +264,7 @@ def parse_turn_outcome(text: str) -> TurnOutcomeBundle:
             # The kind is unrecognised — assert the model also rejects it.
             # Use a non-empty probe payload: the model returns None for any
             # unknown kind regardless of payload content.
-            _assert_reject_oracle(kind, "x")
+            _assert_reject_oracle(kind, "x", _oracle=oracle)
             raise ValueError(f"Unrecognised turn_outcome value: {kind!r}")
     return TurnOutcomeBundle(
         outcome=outcome,

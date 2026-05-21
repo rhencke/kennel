@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -3429,15 +3429,16 @@ class TestReorderTasks:
         client.run_turn.assert_not_called()
 
     def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
-        from unittest.mock import patch
-
         self._add(tmp_path, "Task A")
-        with patch(
-            "fido.tasks.ClaudeClient",
-            return_value=_client(""),
-        ) as mock_cls:
-            reorder_tasks(Tasks(tmp_path), "")
-            mock_cls.assert_called_once_with()
+
+        factory_calls: list[None] = []
+
+        def fake_factory() -> object:
+            factory_calls.append(None)
+            return _client("")
+
+        reorder_tasks(Tasks(tmp_path), "", _client_factory=fake_factory)
+        assert factory_calls == [None]
 
     def test_skips_on_empty_opus_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
@@ -5381,14 +5382,18 @@ class TestTasksCompleteWithResolve:
     def test_marks_task_completed(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
-        Tasks(work_dir).complete_with_resolve(task["id"], MagicMock())
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], MagicMock(), syncer=lambda _w, _g: None
+        )
         assert Tasks(work_dir).list()[0]["status"] == "completed"
 
     def test_no_thread_does_not_call_github(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
         gh = MagicMock()
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
         gh.get_user.assert_not_called()
         gh.resolve_thread.assert_not_called()
 
@@ -5397,12 +5402,16 @@ class TestTasksCompleteWithResolve:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.THREAD, thread={"repo": "a/b"})
         gh = MagicMock()
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
         gh.resolve_thread.assert_not_called()
 
     def test_nonexistent_id_does_not_raise(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
-        Tasks(work_dir).complete_with_resolve("nonexistent-id", MagicMock())
+        Tasks(work_dir).complete_with_resolve(
+            "nonexistent-id", MagicMock(), syncer=lambda _w, _g: None
+        )
 
     def test_triggers_background_sync(self, tmp_path: Path) -> None:
         """Every completion fires sync_tasks_background so the PR body
@@ -5411,18 +5420,26 @@ class TestTasksCompleteWithResolve:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
         gh = MagicMock()
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
-        mock_sync.assert_called_once_with(work_dir, gh)
+        sync_calls: list[tuple[Any, Any]] = []
+        Tasks(work_dir).complete_with_resolve(
+            task["id"],
+            gh,
+            syncer=lambda wd, g: sync_calls.append((wd, g)),
+        )
+        assert sync_calls == [(work_dir, gh)]
 
     def test_triggers_background_sync_even_for_unknown_id(self, tmp_path: Path) -> None:
         """Sync still fires even when the task_id isn't found — caller
         intent ('I just tried to complete something') is the trigger."""
         work_dir = self._work_dir(tmp_path)
         gh = MagicMock()
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            Tasks(work_dir).complete_with_resolve("nonexistent-id", gh)
-        mock_sync.assert_called_once_with(work_dir, gh)
+        sync_calls: list[tuple[Any, Any]] = []
+        Tasks(work_dir).complete_with_resolve(
+            "nonexistent-id",
+            gh,
+            syncer=lambda wd, g: sync_calls.append((wd, g)),
+        )
+        assert sync_calls == [(work_dir, gh)]
 
     def test_resolves_thread_when_we_are_last(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -5449,7 +5466,9 @@ class TestTasksCompleteWithResolve:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
 
         gh.resolve_thread.assert_called_once_with("thread_node_abc")
         assert "thread resolved: thread_node_abc" in caplog.text
@@ -5479,7 +5498,9 @@ class TestTasksCompleteWithResolve:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
 
         gh.resolve_thread.assert_not_called()
         assert "not resolving" in caplog.text
@@ -5493,7 +5514,9 @@ class TestTasksCompleteWithResolve:
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = []
 
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
 
         gh.resolve_thread.assert_not_called()
 
@@ -5520,7 +5543,9 @@ class TestTasksCompleteWithResolve:
             }
         ]
 
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
 
         gh.resolve_thread.assert_called_once_with("thread_node_abc")
 
@@ -5541,7 +5566,9 @@ class TestTasksCompleteWithResolve:
             }
         ]
 
-        Tasks(work_dir).complete_with_resolve(task["id"], gh)
+        Tasks(work_dir).complete_with_resolve(
+            task["id"], gh, syncer=lambda _w, _g: None
+        )
 
         gh.resolve_thread.assert_not_called()
 
@@ -5576,7 +5603,9 @@ class TestTasksCompleteWithResolve:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
 
         gh.resolve_thread.assert_not_called()
         assert "pending same-thread work" in caplog.text
@@ -5594,5 +5623,7 @@ class TestTasksCompleteWithResolve:
         gh.get_user.side_effect = RuntimeError("network error")
 
         with caplog.at_level(logging.WARNING, logger="fido"):
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
+            Tasks(work_dir).complete_with_resolve(
+                task["id"], gh, syncer=lambda _w, _g: None
+            )
         assert "thread resolution skipped" in caplog.text

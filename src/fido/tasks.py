@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from fido.appstate import FidoState, TaskListSnapshot
@@ -2901,6 +2901,7 @@ def reorder_tasks(
     *,
     intents: list[RescopeIntent] | None = None,
     agent: ProviderAgent | None = None,
+    _client_factory: Callable[[], ProviderAgent] | None = None,
     prompts: Prompts | None = None,
     issue: ActiveIssue | None = None,
     pr: ActivePR | None = None,
@@ -2951,7 +2952,7 @@ def reorder_tasks(
         return
 
     if agent is None:
-        agent = ClaudeClient()
+        agent = (_client_factory if _client_factory is not None else ClaudeClient)()
     if prompts is None:
         prompts = Prompts("")
 
@@ -3306,6 +3307,12 @@ def reorder_tasks(
         _on_done()
 
 
+class BackgroundSyncer(Protocol):
+    """Typed collaborator for launching :func:`sync_tasks` in the background."""
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
+
+
 def sync_tasks_background(
     work_dir: Path,
     gh: GitHub,
@@ -3529,6 +3536,7 @@ class Tasks(JsonFileStore):
         task_id: str,
         gh: GitHub,
         *,
+        syncer: BackgroundSyncer,
         collaborators: frozenset[str] = frozenset(),
         allowed_bots: frozenset[str] = frozenset(),
     ) -> None:
@@ -3545,7 +3553,7 @@ class Tasks(JsonFileStore):
         (#988).
         """
         thread = self.complete_by_id(task_id)
-        sync_tasks_background(self._work_dir, gh)
+        syncer(self._work_dir, gh)
         if not thread:
             return
         repo = thread.get("repo", "")

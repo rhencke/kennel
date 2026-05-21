@@ -8,14 +8,21 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from fido.config import RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.issue_cache import IssueCache
+from fido.provider_factory import DefaultProviderFactory
 from fido.worker import WorkerThread
 from tests.fakes import _FakeDispatcher
 
 
 def _make_thread(tmp_path: Path, **kwargs: object) -> WorkerThread:
     gh = MagicMock(spec=GitHub)
+    kwargs.setdefault("membership", RepoMembership())
+    kwargs.setdefault(
+        "provider_factory",
+        DefaultProviderFactory(session_system_file=default_sub_dir() / "persona.md"),
+    )
     kwargs.setdefault("issue_cache", IssueCache("owner/repo"))
     kwargs.setdefault("dispatcher", _FakeDispatcher())
     return WorkerThread(

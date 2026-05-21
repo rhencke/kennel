@@ -148,8 +148,23 @@ class _TimeoutSession(_requests.Session):
         method_s = method.decode() if isinstance(method, bytes) else method
         url_s = url.decode() if isinstance(url, bytes) else url
         if method_s.upper() != "GET":
-            return super().request(method, url, *args, **kwargs)
+            return self._raw_request(method, url, *args, **kwargs)
         return self._cached_get(url_s, args, kwargs)
+
+    def _raw_request(  # pragma: no cover — real network; tests override via _FakeTimeoutSession
+        self,
+        method: str | bytes,
+        url: str | bytes,
+        *args: Any,  # noqa: ANN401  # forwarded verbatim to base.request
+        **kwargs: Any,  # noqa: ANN401  # forwarded verbatim to base.request
+    ) -> _requests.Response:
+        """Single choke-point to :meth:`requests.Session.request`.
+
+        All network calls within :class:`_TimeoutSession` route through here
+        so tests can override this one method (via subclassing) to intercept
+        every outbound request without patching the ``requests`` module.
+        """
+        return super().request(method, url, *args, **kwargs)
 
     def _cached_get(
         self,
@@ -159,7 +174,7 @@ class _TimeoutSession(_requests.Session):
     ) -> _requests.Response:
         cacheable = _CACHEABLE_URL_RE.match(url) is not None
         if not cacheable:
-            return super().request("GET", url, *args, **kwargs)
+            return self._raw_request("GET", url, *args, **kwargs)
         with self._lock:
             cached = self._cache.get(url)
         headers = dict(kwargs.get("headers") or {})
@@ -169,7 +184,7 @@ class _TimeoutSession(_requests.Session):
             if cached.last_modified:
                 headers["If-Modified-Since"] = cached.last_modified
             kwargs["headers"] = headers
-        resp = super().request("GET", url, *args, **kwargs)
+        resp = self._raw_request("GET", url, *args, **kwargs)
         if resp.status_code == 304 and cached is not None:
             return cached.replay(resp)
         if resp.status_code == 200 and (

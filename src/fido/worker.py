@@ -8,7 +8,6 @@ import os
 import re
 import subprocess
 import threading
-import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
@@ -30,8 +29,14 @@ from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
-from fido.harness_commit import HarnessCommitter
-from fido.infra import RealProcessRunner
+from fido.harness_commit import (
+    CommitOracle,
+    DecisionOracle,
+    HarnessCommitter,
+    RealCommitOracle,
+    RealDecisionOracle,
+)
+from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts, render_active_context
@@ -69,7 +74,7 @@ from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
-from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
+from fido.store import FidoStore, PRCommentQueueRecord, ReplyOwner, ReplyPromiseRecord
 from fido.tasks import Tasks
 from fido.turn_outcome import TurnOutcomeBundle, parse_turn_outcome
 from fido.types import (
@@ -212,8 +217,8 @@ class ActivityReporter(Protocol):
     threads it through to the reply / rescope chain in :mod:`fido.events`.
     Methods cover both worker-side calls (``has_untriaged``,
     ``wait_for_inbox_drain``, ``assert_worker_turn_ok``, ...) and the
-    ingress/rescope-side calls that ``reply_to_*`` and
-    ``_reorder_tasks_background`` make on the same reference
+    ingress/rescope-side calls that ``Dispatcher.reply_to_*`` and
+    ``Dispatcher.reorder_tasks_background`` make on the same reference
     (``enter_untriaged``, ``exit_untriaged``, ``set_rescoping``,
     ``abort_task``).  Keeping them on one Protocol lets us avoid a circular
     ``WorkerRegistry`` import in :mod:`fido.events` while still threading a
@@ -364,6 +369,8 @@ def build_prompt(
     subskill: str,
     context: str,
     labels: list[str] | None = None,
+    *,
+    sub_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     """Write system and prompt files for a sub-agent session.
 
@@ -383,9 +390,12 @@ def build_prompt(
     blog/journal work (closes #1164).  If ``life.md`` is absent the label is
     silently ignored.
 
+    *sub_dir* overrides :func:`_sub_dir` — pass in tests to avoid filesystem
+    access.
+
     Returns ``(system_file, prompt_file)`` where both live in *fido_dir*.
     """
-    sub = _sub_dir()
+    sub = sub_dir if sub_dir is not None else _sub_dir()
     persona = (sub / "persona.md").read_text().rstrip()
     skill = (sub / f"{subskill}.md").read_text().rstrip()
 
@@ -980,7 +990,13 @@ def _assert_ci_failure_matches_oracle(
     check_name: str,
     state: str,
     run_id: str,
+    _pick_next_task_fn: Callable[..., Any] | None = None,
 ) -> None:
+    _pick_fn = (
+        _pick_next_task_fn
+        if _pick_next_task_fn is not None
+        else ci_oracle.pick_next_task
+    )
     order, rows = _ci_oracle_task_rows(task_list)
     new_task = len(order) + 1
     result, created_task = ci_oracle.record_ci_failure(
@@ -993,7 +1009,7 @@ def _assert_ci_failure_matches_oracle(
     )
     store_order, next_rows = result
     _store, next_order = store_order
-    picked = ci_oracle.pick_next_task(next_order, next_rows)
+    picked = _pick_fn(next_order, next_rows)
     if picked != created_task:
         raise AssertionError(
             "ci_task_lifecycle oracle: admitted CI failure was not first pickup"
@@ -1266,6 +1282,183 @@ class AbortHandle:
             self._event.clear()
 
 
+# ---------------------------------------------------------------------------
+# Typed collaborator Protocols for Worker — replace callable-slot seams
+# ---------------------------------------------------------------------------
+
+
+class PromptBuilder(Protocol):
+    """Writes system and prompt files for a sub-agent session."""
+
+    def build_prompt(
+        self,
+        fido_dir: Path,
+        subskill: str,
+        context: str,
+        labels: list[str] | None = None,
+        *,
+        sub_dir: Path | None = None,
+    ) -> tuple[Path, Path]: ...
+
+
+class ProviderRunner(Protocol):
+    """Runs a provider turn and returns the outcome."""
+
+    def run(
+        self,
+        fido_dir: Path,
+        *,
+        agent: ProviderAgent | None = None,
+        model: ProviderModel,
+        session: str | None = None,
+        timeout: int = 300,
+        cwd: Path | str = ".",
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
+        retry_on_preempt: bool = True,
+    ) -> "ProviderRunOutcome": ...
+
+
+class HarnessCommitterFactory(Protocol):
+    """Creates a :class:`~fido.harness_commit.HarnessCommitter`."""
+
+    def create(
+        self,
+        work_dir: Path,
+        runner: ProcessRunner,
+        *,
+        decision_oracle: DecisionOracle,
+        commit_oracle: CommitOracle,
+    ) -> HarnessCommitter: ...
+
+
+class TaskSyncer(Protocol):
+    """Syncs task state to the PR body."""
+
+    def sync_tasks(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        *,
+        blocking: bool = False,
+    ) -> None: ...
+
+
+class BackgroundTaskSyncer(Protocol):
+    """Launches :func:`~fido.tasks.sync_tasks_background` in a daemon thread."""
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
+
+
+class TaskReorderer(Protocol):
+    """Reorders the pending task list via an Opus call (wraps :func:`~fido.tasks.reorder_tasks`)."""
+
+    def __call__(
+        self,
+        tasks_obj: "Tasks",
+        commit_summary: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None: ...
+
+
+class CommitSummarizer(Protocol):
+    """Returns a short ``git log --oneline`` summary of recent commits."""
+
+    def __call__(self, work_dir: Path) -> str: ...
+
+
+class _RealPromptBuilder:  # pragma: no cover
+    """Real :class:`PromptBuilder` — delegates to :func:`build_prompt`.
+
+    Not tested directly: requires a fully populated fido_dir on disk.
+    Tests inject :class:`_FakePromptBuilder` instead.
+    """
+
+    def build_prompt(
+        self,
+        fido_dir: Path,
+        subskill: str,
+        context: str,
+        labels: list[str] | None = None,
+        *,
+        sub_dir: Path | None = None,
+    ) -> tuple[Path, Path]:
+        return build_prompt(fido_dir, subskill, context, labels, sub_dir=sub_dir)
+
+
+class _RealProviderRunner:  # pragma: no cover
+    """Real :class:`ProviderRunner` — delegates to :func:`provider_run`.
+
+    Not tested directly: invokes the full provider subprocess pipeline.
+    Tests inject a fake :class:`ProviderRunner` instead.
+    """
+
+    def run(
+        self,
+        fido_dir: Path,
+        *,
+        agent: ProviderAgent | None = None,
+        model: ProviderModel,
+        session: str | None = None,
+        timeout: int = 300,
+        cwd: Path | str = ".",
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
+        retry_on_preempt: bool = True,
+    ) -> "ProviderRunOutcome":
+        return provider_run(
+            fido_dir,
+            agent=agent,
+            model=model,
+            session=session,
+            timeout=timeout,
+            cwd=cwd,
+            session_mode=session_mode,
+            retry_on_preempt=retry_on_preempt,
+        )
+
+
+class _RealHarnessCommitterFactory:  # pragma: no cover
+    """Real :class:`HarnessCommitterFactory` — delegates to :class:`HarnessCommitter`.
+
+    Not tested directly: requires a real git repo and process runner.
+    Tests inject a fake factory instead.
+    """
+
+    def create(
+        self,
+        work_dir: Path,
+        runner: ProcessRunner,
+        *,
+        decision_oracle: DecisionOracle,
+        commit_oracle: CommitOracle,
+    ) -> HarnessCommitter:
+        return HarnessCommitter(
+            work_dir,
+            runner,
+            decision_oracle=decision_oracle,
+            commit_oracle=commit_oracle,
+        )
+
+
+class _RealTaskSyncer:  # pragma: no cover
+    """Real :class:`TaskSyncer` — delegates to :func:`tasks.sync_tasks`.
+
+    Not tested directly: involves network I/O to GitHub.
+    Tests inject a fake :class:`TaskSyncer` instead.
+    """
+
+    def sync_tasks(self, work_dir: Path, gh: GitHub, *, blocking: bool = False) -> None:
+        tasks.sync_tasks(work_dir, gh, blocking=blocking)
+
+
+_DEFAULT_PROMPT_BUILDER: PromptBuilder = _RealPromptBuilder()
+_DEFAULT_PROVIDER_RUNNER: ProviderRunner = _RealProviderRunner()
+_DEFAULT_HARNESS_COMMITTER_FACTORY: HarnessCommitterFactory = (
+    _RealHarnessCommitterFactory()
+)
+_DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer()
+_DEFAULT_CLOCK: Clock = RealClock()
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -1278,30 +1471,41 @@ class Worker:
         self,
         work_dir: Path,
         gh: GitHub,
-        abort_task: AbortHandle | None = None,
         repo_name: str = "",
         registry: ActivityReporter | None = None,
-        membership: RepoMembership | None = None,
         session: PromptSession | None = None,
         session_issue: int | None = None,
-        _tasks: Tasks | None = None,
-        _state: State | None = None,
         provider_agent: ProviderAgent | None = None,
         provider: Provider | None = None,
         prompts: Prompts | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
-        provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
-        nudges: Nudges | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
         *,
+        # Required collaborators — all keyword-only, no defaults.
+        # WorkerThread._create_worker() passes the _DEFAULT_* singletons;
+        # tests inject typed fakes via the test-local Worker wrapper.
+        abort_task: AbortHandle,
+        membership: RepoMembership,
+        _tasks: Tasks,
+        _state: State,
+        nudges: Nudges,
+        provider_factory: DefaultProviderFactory,
+        prompt_builder: PromptBuilder,
+        provider_runner: ProviderRunner,
+        harness_committer_factory: HarnessCommitterFactory,
+        task_syncer: TaskSyncer,
+        clock: Clock,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
+        background_syncer: BackgroundTaskSyncer,
+        task_reorderer: TaskReorderer,
+        commit_summarizer: CommitSummarizer,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
-        self._abort_task = abort_task if abort_task is not None else AbortHandle()
+        self._abort_task = abort_task
         self._repo_name = repo_name
         # Replay missed issue_comment webhooks exactly once per WorkerThread
         # lifetime (at startup).  Fix for #794 — without this, top-level PR
@@ -1313,28 +1517,21 @@ class Worker:
         # iteration; webhook events keep the cache in sync.
         self._issue_cache = issue_cache
         self._registry = registry
-        self._membership = membership if membership is not None else RepoMembership()
+        self._membership = membership
         self._session_issue: int | None = session_issue
         self._next_turn_session_mode = TurnSessionMode.REUSE
 
-        self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
+        self._tasks = _tasks
         # Composition root passes the registry-owned State so worker
         # writes go through the publishing-aware on_mutate hook
-        # (#1696).  Tests bypassing the registry get a bare State
-        # whose on_mutate is a no-op.
-        self._state = (
-            _state if _state is not None else State(work_dir / ".git" / "fido")
-        )
+        # (#1696).  Callers must supply an explicit State instance.
+        self._state = _state
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
-        self._nudges = nudges if nudges is not None else Nudges()
+        self._nudges = nudges
         self._dispatcher = dispatcher
-        self._provider_factory = (
-            DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
-            if provider_factory is None
-            else provider_factory
-        )
+        self._provider_factory = provider_factory
         self._state_updater: AtomicUpdater[FidoState] | None = state_updater
         self._bootstrap_session: PromptSession | None = session
         if provider is not None:
@@ -1355,6 +1552,14 @@ class Worker:
             self._provider = None
         if self._provider is not None:
             self._bootstrap_session = self._provider.agent.session
+        self._prompt_builder = prompt_builder
+        self._provider_runner = provider_runner
+        self._harness_committer_factory = harness_committer_factory
+        self._task_syncer = task_syncer
+        self._clock = clock
+        self._background_syncer = background_syncer
+        self._task_reorderer = task_reorderer
+        self._commit_summarizer = commit_summarizer
 
     def _ensure_provider(self) -> Provider:
         """Return the owned provider, creating the configured provider if needed."""
@@ -1384,6 +1589,61 @@ class Worker:
         provider = self._provider
         if provider is not None:
             provider.agent.attach_session(agent.session)
+
+    def _provider_start(
+        self,
+        fido_dir: Path,
+        *,
+        agent: ProviderAgent | None = None,
+        model: ProviderModel,
+        cwd: Path | str = ".",
+        session: str | None = None,
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
+    ) -> tuple[str, str]:
+        """Delegate to module-level :func:`provider_start`.
+
+        Instance method so tests can override via ``worker._provider_start = mock``
+        without patching the module-level name.
+        """
+        return provider_start(
+            fido_dir,
+            agent=agent,
+            model=model,
+            cwd=cwd,
+            session=session,
+            session_mode=session_mode,
+        )
+
+    def _write_pr_description(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        repo: str,
+        pr_number: int,
+        issue: int,
+        task_list: list[dict[str, Any]],
+        existing_body: str = "",
+        *,
+        agent: ProviderAgent | None = None,
+        pre_baked_description: str = "",
+    ) -> None:
+        """Delegate to module-level :func:`_write_pr_description`.
+
+        Instance method so tests can override via
+        ``worker._write_pr_description = mock`` without patching the
+        module-level name.
+        """
+        _write_pr_description(
+            work_dir,
+            gh,
+            repo,
+            pr_number,
+            issue,
+            task_list,
+            existing_body,
+            agent=agent,
+            pre_baked_description=pre_baked_description,
+        )
 
     def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
@@ -2030,8 +2290,10 @@ class Worker:
                     f"Upstream: {remote}/{repo_ctx.default_branch}\n"
                     f"Work dir: {self.work_dir}"
                 )
-                build_prompt(fido_dir, "setup", context, labels=issue_labels)
-                _, setup_output = provider_start(
+                self._prompt_builder.build_prompt(
+                    fido_dir, "setup", context, labels=issue_labels
+                )
+                _, setup_output = self._provider_start(
                     fido_dir,
                     agent=self._provider_agent,
                     model=self._provider_agent.voice_model,
@@ -2135,8 +2397,10 @@ class Worker:
             f"Upstream: {remote}/{repo_ctx.default_branch}\n"
             f"Work dir: {self.work_dir}"
         )
-        build_prompt(fido_dir, "setup", context, labels=issue_labels)
-        _, setup_output = provider_start(
+        self._prompt_builder.build_prompt(
+            fido_dir, "setup", context, labels=issue_labels
+        )
+        _, setup_output = self._provider_start(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.voice_model,
@@ -2192,7 +2456,7 @@ class Worker:
             log.info("PR: #%s  %s", pr_number, url)
             return pr_number, slug, True
 
-        _write_pr_description(
+        self._write_pr_description(
             self.work_dir,
             self.gh,
             repo_ctx.repo,
@@ -2248,8 +2512,10 @@ class Worker:
             f"Upstream: origin/{repo_ctx.default_branch}\n"
             f"Work dir: {self.work_dir}\n"
         )
-        build_prompt(fido_dir, "merge", context, labels=issue_labels)
-        session_id, _ = provider_run(
+        self._prompt_builder.build_prompt(
+            fido_dir, "merge", context, labels=issue_labels
+        )
+        session_id, _ = self._provider_runner.run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -2356,7 +2622,7 @@ class Worker:
         self.set_status(f"Fixing CI: {check_name} on PR #{pr_number}")
 
         run_id = self._extract_run_id(failing.get("link", ""))
-        _assert_ci_failure_matches_oracle(
+        self._assert_ci_failure_matches_oracle(
             self._tasks.list(),
             check_name,
             failing.get("state", ""),
@@ -2386,10 +2652,10 @@ class Worker:
             f"\nReview threads related to this CI failure"
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
-        build_prompt(fido_dir, "ci", context, labels=issue_labels)
+        self._prompt_builder.build_prompt(fido_dir, "ci", context, labels=issue_labels)
         if not self._admit_worker_turn(pr_number):
             return True
-        session_id, _ = provider_run(
+        session_id, _ = self._provider_runner.run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -2400,8 +2666,18 @@ class Worker:
         log.info("CI fix done (session=%s)", session_id)
 
         # CI failures have no task entry — no complete call needed
-        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+        self._task_syncer.sync_tasks(self.work_dir, self.gh, blocking=True)
         return True
+
+    def _assert_ci_failure_matches_oracle(
+        self,
+        task_list: list[dict[str, Any]],
+        check_name: str,
+        state: str,
+        run_id: str,
+    ) -> None:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        _assert_ci_failure_matches_oracle(task_list, check_name, state, run_id)
 
     def _filter_threads(
         self,
@@ -2547,13 +2823,12 @@ class Worker:
         # SQLite promise first owns that comment.
         claimable: list[dict[str, Any]] = []
         promises: list[ReplyPromiseRecord] = []
-        store = FidoStore(self.work_dir)
         for t in threads:
             first_db_id = t.get("first_db_id")
             if first_db_id is None:
                 claimable.append(t)
                 continue
-            promise = store.prepare_reply(
+            promise = self._prepare_reply(
                 owner="worker",
                 comment_type="pulls",
                 anchor_comment_id=int(first_db_id),
@@ -2568,8 +2843,6 @@ class Worker:
             return False
 
         log.info("unresolved threads: %d", len(claimable))
-        from fido import events
-
         config = self._config
         repo_cfg = self._repo_cfg
         if config is None or repo_cfg is None:
@@ -2593,9 +2866,9 @@ class Worker:
             comment = self.gh.get_pull_comment(repo_ctx.repo, first_db_id)
             if comment is None:
                 log.info("skipping thread %s — root comment missing", first_db_id)
-                store.mark_failed(promise.promise_id)
+                FidoStore(self.work_dir).mark_failed(promise.promise_id)
                 continue
-            action = events.build_review_comment_action(
+            action = self._build_review_comment_action(
                 repo_ctx.repo,
                 pr_number,
                 pr_title,
@@ -2617,16 +2890,13 @@ class Worker:
                 "Worker._registry is required for handle_threads reply path"
             )
             try:
-                category, titles = events.reply_to_comment(
+                category, titles = self._do_reply_to_comment(
                     action,
-                    config,
-                    repo_cfg,
-                    self.gh,
                     self._registry,
                     agent=self._provider_agent,
                 )
             except Exception:
-                store.mark_failed(promise.promise_id)
+                FidoStore(self.work_dir).mark_failed(promise.promise_id)
                 raise
             # #1816 / INV-B: no direct task creation from the
             # ``(category, titles)`` return.  Synthesis emitted a
@@ -2634,8 +2904,78 @@ class Worker:
             # any task mutations.
             del category, titles
         log.info("threads done")
-        tasks.sync_tasks_background(self.work_dir, self.gh)
+        self._sync_tasks_background(self.work_dir, self.gh)
         return True
+
+    def _build_review_comment_action(
+        self,
+        repo: str,
+        pr_number: int,
+        pr_title: str,
+        pr_body: str,
+        comment: dict[str, Any],
+        *,
+        comment_body: str | None = None,
+        comment_author: str | None = None,
+    ) -> "Action":
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        from fido import events
+
+        return events.build_review_comment_action(
+            repo,
+            pr_number,
+            pr_title,
+            pr_body,
+            comment,
+            comment_body=comment_body,
+            comment_author=comment_author,
+        )
+
+    def _do_reply_to_comment(
+        self,
+        action: "Action",
+        registry: ActivityReporter,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts | None = None,
+    ) -> tuple[str, list[str]]:
+        return self._dispatcher.reply_to_comment(
+            action,
+            registry,
+            agent=agent,
+            prompts=prompts,
+        )
+
+    def _do_reply_to_issue_comment(
+        self,
+        action: "Action",
+        registry: ActivityReporter,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts | None = None,
+    ) -> tuple[str, list[str]]:
+        return self._dispatcher.reply_to_issue_comment(
+            action,
+            registry,
+            agent=agent,
+            prompts=prompts,
+        )
+
+    def _sync_tasks_background(self, work_dir: Path, gh: GitHub) -> None:
+        self._background_syncer(work_dir, gh)
+
+    def _prepare_reply(
+        self,
+        owner: ReplyOwner,
+        comment_type: str,
+        anchor_comment_id: int,
+    ) -> "ReplyPromiseRecord | None":
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        return FidoStore(self.work_dir).prepare_reply(
+            owner=owner,
+            comment_type=comment_type,
+            anchor_comment_id=anchor_comment_id,
+        )
 
     def sweep_orphan_pr_comments(self, repo: str) -> int:
         """Drop queued PR-comment entries whose PR is closed (#1691).
@@ -2739,9 +3079,7 @@ class Worker:
                 **(action.context or {}),
                 "reply_promise_id": promise.promise_id,
             }
-            category, titles = self._reply_to_queued_comment(
-                queued, action, config, repo_cfg
-            )
+            category, titles = self._reply_to_queued_comment(queued, action)
             # #1816 / INV-B: drop the direct-task path; rescope
             # handles task mutations via the RescopeIntent that
             # synthesis emitted inside _reply_to_queued_comment.
@@ -2753,7 +3091,7 @@ class Worker:
             store.retry_pr_comment(queued.queue_id, failure_reason=str(exc))
             raise
         store.complete_pr_comment(queued.queue_id)
-        tasks.sync_tasks_background(self.work_dir, self.gh)
+        self._sync_tasks_background(self.work_dir, self.gh)
 
     def _queued_comment_action(
         self,
@@ -2770,11 +3108,7 @@ class Worker:
         self,
         queued: PRCommentQueueRecord,
         action: "Action",
-        config: Config,
-        repo_cfg: RepoConfig,
     ) -> tuple[str, list[str]]:
-        from fido import events
-
         # registry is required (#1336): without it the synthesis path
         # constructs _BackgroundRescopeTrigger with no registry, the rescope
         # BG run_loop's finally cannot call exit_untriaged, and the inbox
@@ -2783,20 +3117,14 @@ class Worker:
             "Worker._registry is required when replying to queued comments"
         )
         if queued.comment_type == "pulls":
-            return events.reply_to_comment(
+            return self._do_reply_to_comment(
                 action,
-                config,
-                repo_cfg,
-                self.gh,
                 self._registry,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
-        return events.reply_to_issue_comment(
+        return self._do_reply_to_issue_comment(
             action,
-            config,
-            repo_cfg,
-            self.gh,
             self._registry,
             agent=self._provider_agent,
             prompts=self._get_prompts(),
@@ -2809,10 +3137,8 @@ class Worker:
         pr_title: str,
         pr_body: str,
     ) -> "Action":
-        from fido import events
-
         comment = _queued_comment_payload(queued)
-        action = events.build_review_comment_action(
+        action = self._build_review_comment_action(
             repo,
             queued.pr_number,
             pr_title,
@@ -2865,10 +3191,8 @@ class Worker:
     _PUSH_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)
 
     def _sleep(self, seconds: float) -> None:
-        """Sleep for *seconds*.  Extracted as an instance method so tests can
-        patch it via ``patch.object`` without touching the global
-        ``time.sleep``."""
-        time.sleep(seconds)
+        """Sleep for *seconds*, delegating to the injected :class:`Clock`."""
+        self._clock.sleep(seconds)
 
     def _push_with_retry(self, remote: str, slug: str) -> bool:
         """Push with exponential backoff, returning True on success.
@@ -3048,12 +3372,13 @@ class Worker:
         self._tasks.complete_with_resolve(
             task["id"],
             self.gh,
+            syncer=tasks.sync_tasks_background,
             collaborators=repo_ctx.collaborators,
             allowed_bots=allowed_bots,
         )
         with self._state.modify() as state:
             state.pop("current_task_id", None)
-        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+        self._task_syncer.sync_tasks(self.work_dir, self.gh, blocking=True)
         self._delete_leaked_task_comments(
             repo_ctx.repo,
             pr_number,
@@ -3500,7 +3825,7 @@ class Worker:
         with self._state.modify() as state:
             state.pop("current_task_id", None)
         self._abort_task.clear()
-        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+        self._task_syncer.sync_tasks(self.work_dir, self.gh, blocking=True)
 
     def _yield_for_untriaged(self) -> None:
         """Yield at a provider-turn boundary if untriaged webhooks are waiting.
@@ -3711,7 +4036,9 @@ class Worker:
             parent_repo=repo_ctx.repo,
         )
         context = f"{active_ctx}\n\n" + "\n".join(context_parts)
-        build_prompt(fido_dir, "task", context, labels=issue_labels)
+        self._prompt_builder.build_prompt(
+            fido_dir, "task", context, labels=issue_labels
+        )
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         # Snapshot fido-authored PR comments so we can detect and delete any
         # improvised top-level BLOCKED/leak comments this task turn posts
@@ -3735,8 +4062,13 @@ class Worker:
                 "task no longer current after webhook turn admission — restarting loop"
             )
             return True
-        harness_committer = HarnessCommitter(self.work_dir, RealProcessRunner())
-        run_outcome = provider_run(
+        harness_committer = self._harness_committer_factory.create(
+            self.work_dir,
+            RealProcessRunner(),
+            decision_oracle=RealDecisionOracle(),
+            commit_oracle=RealCommitOracle(),
+        )
+        run_outcome = self._provider_runner.run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -3915,7 +4247,7 @@ class Worker:
                     "task no longer current after webhook turn admission — stopping"
                 )
                 return True
-            run_outcome = provider_run(
+            run_outcome = self._provider_runner.run(
                 fido_dir,
                 agent=self._provider_agent,
                 model=self._provider_agent.work_model,
@@ -4334,13 +4666,10 @@ class Worker:
             return
 
         from fido.events import (
-            _get_commit_summary,  # pyright: ignore[reportPrivateUsage]
-            _make_reorder_kwargs,  # pyright: ignore[reportPrivateUsage]
             _rewrite_pr_description,  # pyright: ignore[reportPrivateUsage]
         )
-        from fido.tasks import reorder_tasks
 
-        commit_summary = _get_commit_summary(self.work_dir)
+        commit_summary = self._get_commit_summary_fn()
         # _make_reorder_kwargs always wires up on_inprogress_affected (#1336);
         # at pick time there is no in-progress task so the callback won't fire,
         # but the registry must be a real reference to keep the type contract.
@@ -4350,18 +4679,38 @@ class Worker:
         assert self._repo_cfg is not None, (
             "Worker._repo_cfg is required for rescope_before_pick"
         )
-        kwargs = _make_reorder_kwargs(
-            self.work_dir,
-            self._config,
-            self._repo_cfg,
+        reorder_kwargs = self._make_reorder_kwargs_fn(
             self._registry,
-            self.gh,
             self._provider_agent,
             self._get_prompts(),
             _rewrite_pr_description,
         )
         log.info("rescope_before_pick: rescoping task list before next pick")
-        reorder_tasks(self._tasks, commit_summary, **kwargs)
+        self._reorder_tasks_fn(self._tasks, commit_summary, reorder_kwargs)
+
+    def _get_commit_summary_fn(self) -> str:
+        return self._commit_summarizer(self.work_dir)
+
+    def _make_reorder_kwargs_fn(
+        self,
+        registry: "ActivityReporter",
+        agent: ProviderAgent,
+        prompts: Prompts,
+        rewrite_fn: Callable[..., None],
+        sync_fn: Callable[[Path, Any], None] | None = None,
+    ) -> dict[str, Any]:
+        return self._dispatcher._make_reorder_kwargs(  # pyright: ignore[reportPrivateUsage]
+            registry,
+            agent,
+            prompts,
+            rewrite_fn,
+            sync_fn,
+        )
+
+    def _reorder_tasks_fn(
+        self, tasks_obj: Tasks, commit_summary: str, reorder_kwargs: dict[str, Any]
+    ) -> None:
+        self._task_reorderer(tasks_obj, commit_summary, **reorder_kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
         """Enforce the git-identity invariant (see #792).
@@ -4540,38 +4889,13 @@ class Worker:
                         len(recovered_comments),
                         repo_ctx.repo,
                     )
-            recovery_provider = (
-                self._ensure_provider().provider_id
-                if self._repo_cfg is None
-                else self._repo_cfg.provider
-            )
-            recovery_repo_cfg = RepoConfig(
-                name=repo_ctx.repo,
-                work_dir=self.work_dir,
-                provider=recovery_provider,
-                membership=repo_ctx.membership,
-            )
-            recovery_config = Config(
-                port=0,
-                secret=b"",
-                repos={repo_ctx.repo: recovery_repo_cfg},
-                allowed_bots=frozenset(),
-                log_level="WARNING",
-                sub_dir=_sub_dir(),
-            )
-            from fido.events import recover_reply_promises
-
             assert self._registry is not None, (
                 "Worker._registry is required for recover_reply_promises"
             )
-            recovered_promises = recover_reply_promises(
+            recovered_promises = self._dispatcher.recover_reply_promises(
                 ctx.fido_dir,
-                recovery_config,
-                recovery_repo_cfg,
-                self.gh,
                 pr_number,
                 self._registry,
-                self._dispatcher,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
@@ -4680,15 +5004,15 @@ class WorkerThread(threading.Thread):
         repo_name: str,
         gh: GitHub,
         registry: ActivityReporter | None = None,
-        membership: RepoMembership | None = None,
         session: PromptSession | None = None,
         session_issue: int | None = None,
         provider: Provider | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
-        provider_factory: DefaultProviderFactory | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
         *,
+        membership: RepoMembership,
+        provider_factory: DefaultProviderFactory,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
     ) -> None:
@@ -4697,7 +5021,7 @@ class WorkerThread(threading.Thread):
         self._repo_name = repo_name
         self._gh = gh
         self._registry = registry
-        self._membership = membership if membership is not None else RepoMembership()
+        self._membership = membership
         self._wake = threading.Event()
         self._abort_task = AbortHandle()
         self._stop = threading.Event()
@@ -4713,11 +5037,7 @@ class WorkerThread(threading.Thread):
         # re-bootstraps via ``Worker._pick_from_cache``'s lazy
         # ``find_all_open_issues`` call).
         self._issue_cache = issue_cache
-        self._provider_factory = (
-            DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
-            if provider_factory is None
-            else provider_factory
-        )
+        self._provider_factory = provider_factory
         self._state_updater: AtomicUpdater[FidoState] | None = state_updater
         # Use the registry-owned State so WorkerThread's session-id
         # persistence (state.json reads/writes around session_id) goes
@@ -4751,6 +5071,7 @@ class WorkerThread(threading.Thread):
         # True until the first ``Worker.run()`` returns — flipped after that so
         # the one-shot startup backfill (fix #794) only fires once per thread.
         self._is_first_iteration = True
+        self._nudges = Nudges()
 
     def detach_provider(self) -> Provider | None:
         """Detach and return the owned provider for crash rescue."""
@@ -4916,6 +5237,50 @@ class WorkerThread(threading.Thread):
             raise RuntimeError("provider.ensure_session() returned no session")
         return session
 
+    def _create_worker(
+        self,
+        session: "PromptSession | None",
+        worker_tasks: "Tasks | None",
+        worker_state: "State | None",
+    ) -> "Worker":
+        """Create a Worker for the current loop iteration.
+
+        Extracted so tests can override this method via direct instance attribute
+        assignment, returning a fake instead of patching Worker at the class level.
+        """
+        # Imported lazily to avoid a module-level circular import:
+        # fido.events -> fido.worker at import time.
+        from fido import events as _fev  # noqa: PLC0415
+
+        return Worker(
+            self.work_dir,
+            self._gh,
+            self._repo_name,
+            self._registry,
+            session=session,
+            session_issue=self._session_issue,
+            config=self._config,
+            repo_cfg=self._repo_cfg,
+            first_iteration=self._is_first_iteration,
+            state_updater=self._state_updater,
+            abort_task=self._abort_task,
+            membership=self._membership,
+            _tasks=worker_tasks if worker_tasks is not None else Tasks(self.work_dir),
+            _state=worker_state if worker_state is not None else self._state,
+            nudges=self._nudges,
+            provider_factory=self._provider_factory,
+            prompt_builder=_DEFAULT_PROMPT_BUILDER,
+            provider_runner=_DEFAULT_PROVIDER_RUNNER,
+            harness_committer_factory=_DEFAULT_HARNESS_COMMITTER_FACTORY,
+            task_syncer=_DEFAULT_TASK_SYNCER,
+            clock=_DEFAULT_CLOCK,
+            dispatcher=self._dispatcher,
+            issue_cache=self._issue_cache,
+            background_syncer=tasks.sync_tasks_background,
+            task_reorderer=tasks.reorder_tasks,  # pyright: ignore[reportArgumentType]
+            commit_summarizer=_fev._get_commit_summary,  # pyright: ignore[reportPrivateUsage]
+        )
+
     def _resolve_fido_dir(self) -> Path | None:
         """Return the ``.git/fido`` directory for this worker's work_dir,
         or ``None`` when *work_dir* is not a git worktree (e.g. pytest
@@ -5030,25 +5395,7 @@ class WorkerThread(threading.Thread):
                 else:
                     worker_tasks = None
                     worker_state = None
-                worker = Worker(
-                    self.work_dir,
-                    self._gh,
-                    self._abort_task,
-                    self._repo_name,
-                    self._registry,
-                    self._membership,
-                    session=session,
-                    session_issue=self._session_issue,
-                    _tasks=worker_tasks,
-                    _state=worker_state,
-                    config=self._config,
-                    repo_cfg=self._repo_cfg,
-                    provider_factory=self._provider_factory,
-                    first_iteration=self._is_first_iteration,
-                    dispatcher=self._dispatcher,
-                    issue_cache=self._issue_cache,
-                    state_updater=self._state_updater,
-                )
+                worker = self._create_worker(session, worker_tasks, worker_state)
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
                 worker._provider_agent = provider.agent  # pyright: ignore[reportPrivateUsage]
                 try:

@@ -19,6 +19,7 @@ from fido.appstate import (
 )
 from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
+from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
 from fido.provider import (
     ContextOverflowError,
     OwnedSession,
@@ -49,6 +50,10 @@ _CODEX_CLIENT_INFO = {
     "title": "Fido",
     "version": "0.1.0",
 }
+
+# Module-level singletons used as default argument values (avoids B008).
+_DEFAULT_PROCESS_RUNNER: ProcessRunner = RealProcessRunner()
+_DEFAULT_CLOCK: Clock = RealClock()
 
 
 def _sandbox_acp_policy_for_phase(allowed_tools: str | None) -> dict[str, str]:
@@ -160,11 +165,12 @@ def _codex(
     prompt: str | None = None,
     timeout: int = 30,
     cwd: Path | str | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: ProcessRunner = _DEFAULT_PROCESS_RUNNER,
 ) -> subprocess.CompletedProcess[str]:
     """Run the Codex CLI with *args*, optionally piping *prompt* to stdin."""
-    return runner(
+    return runner.run(
         ["codex", *args],
+        check=False,
         input=prompt,
         capture_output=True,
         text=True,
@@ -173,19 +179,28 @@ def _codex(
     )
 
 
-def _spawn_app_server(
-    *,
-    cwd: Path | str | None = None,
-) -> CodexAppServerProcess:
-    return subprocess.Popen(  # noqa: S603 - command is fixed, args are not shell-expanded.
-        ["codex", "app-server", "--listen", "stdio://"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-        bufsize=1,
-    )
+class AppServerSpawner(Protocol):
+    """Spawns a ``codex app-server`` subprocess."""
+
+    def spawn(self, *, cwd: Path | str | None = None) -> CodexAppServerProcess: ...
+
+
+class _RealAppServerSpawner:
+    """Real :class:`AppServerSpawner` that delegates to :func:`subprocess.Popen`."""
+
+    def spawn(self, *, cwd: Path | str | None = None) -> CodexAppServerProcess:
+        return subprocess.Popen(  # noqa: S603 - command is fixed, args are not shell-expanded.
+            ["codex", "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            bufsize=1,
+        )
+
+
+_DEFAULT_APP_SERVER_SPAWNER: AppServerSpawner = _RealAppServerSpawner()
 
 
 class CodexAppServerClient:
@@ -194,7 +209,7 @@ class CodexAppServerClient:
     def __init__(
         self,
         *,
-        process_factory: Callable[..., CodexAppServerProcess] = _spawn_app_server,
+        process_factory: AppServerSpawner = _DEFAULT_APP_SERVER_SPAWNER,
         cwd: Path | str | None = None,
         timeout: float = _CODEX_APP_SERVER_TIMEOUT,
         max_line_bytes: int = _CODEX_APP_SERVER_MAX_LINE_BYTES,
@@ -212,7 +227,7 @@ class CodexAppServerClient:
         self._stderr_lines: queue.Queue[str] = queue.Queue()
         self._stopped = False
         self._protocol_error: BaseException | None = None
-        self._process = self._process_factory(cwd=self._cwd)
+        self._process = self._process_factory.spawn(cwd=self._cwd)
         self._reader = threading.Thread(
             target=self._read_stdout,
             name="codex-app-server-stdout",
@@ -422,6 +437,22 @@ class CodexAppServerClient:
             raise CodexProtocolError("Codex app-server connection is stopped")
         if self._process.poll() is not None:
             raise CodexProtocolError("Codex app-server process exited")
+
+
+class AppServerFactory(Protocol):
+    """Creates :class:`CodexAppServer` instances."""
+
+    def create(self, *, cwd: Path | str | None = None) -> CodexAppServer: ...
+
+
+class _RealAppServerFactory:
+    """Real :class:`AppServerFactory` that constructs :class:`CodexAppServerClient`."""
+
+    def create(self, *, cwd: Path | str | None = None) -> CodexAppServer:
+        return CodexAppServerClient(cwd=cwd)
+
+
+_DEFAULT_APP_SERVER_FACTORY: AppServerFactory = _RealAppServerFactory()
 
 
 def _iter_jsonl(output: str) -> Iterable[dict[str, Any]]:
@@ -649,11 +680,11 @@ class CodexAPI(ProviderAPI):
     def __init__(
         self,
         *,
-        client_factory: Callable[[], CodexAppServer] = CodexAppServerClient,
-        monotonic: Callable[[], float] = time.monotonic,
+        client_factory: AppServerFactory = _DEFAULT_APP_SERVER_FACTORY,
+        clock: Clock = _DEFAULT_CLOCK,
     ) -> None:
         self._client_factory = client_factory
-        self._monotonic = monotonic
+        self._clock = clock
         self._limit_snapshot_lock = threading.Lock()
         self._limit_snapshot_cached_at: float | None = None
         self._limit_snapshot_cache: ProviderLimitSnapshot | None = None
@@ -667,13 +698,13 @@ class CodexAPI(ProviderAPI):
             if (
                 self._limit_snapshot_cache is not None
                 and self._limit_snapshot_cached_at is not None
-                and self._monotonic() - self._limit_snapshot_cached_at
+                and self._clock.monotonic() - self._limit_snapshot_cached_at
                 < _CODEX_RATE_LIMIT_CACHE_SECONDS
             ):
                 return self._limit_snapshot_cache
             client: CodexAppServer | None = None
             try:
-                client = self._client_factory()
+                client = self._client_factory.create()
                 payload = client.request(
                     "account/rateLimits/read", timeout=_CODEX_APP_SERVER_TIMEOUT
                 )
@@ -698,8 +729,39 @@ class CodexAPI(ProviderAPI):
                 if client is not None:
                     client.stop()
             self._limit_snapshot_cache = snapshot
-            self._limit_snapshot_cached_at = self._monotonic()
+            self._limit_snapshot_cached_at = self._clock.monotonic()
             return snapshot
+
+
+class TalkerAccess(Protocol):
+    """Groups the four per-session provider-talker operations."""
+
+    def get_talker(self, repo_name: str) -> "provider.SessionTalker | None": ...
+
+    def register_talker(self, talker: "provider.SessionTalker") -> None: ...
+
+    def unregister_talker(self, repo_name: str, thread_id: int) -> None: ...
+
+    def current_thread_kind(self) -> "provider.ThreadKind": ...
+
+
+class _RealTalkerAccess:
+    """Real :class:`TalkerAccess` that delegates to :mod:`fido.provider`."""
+
+    def get_talker(self, repo_name: str) -> "provider.SessionTalker | None":
+        return provider.get_talker(repo_name)
+
+    def register_talker(self, talker: "provider.SessionTalker") -> None:
+        provider.register_talker(talker)
+
+    def unregister_talker(self, repo_name: str, thread_id: int) -> None:
+        provider.unregister_talker(repo_name, thread_id)
+
+    def current_thread_kind(self) -> "provider.ThreadKind":
+        return provider.current_thread_kind()
+
+
+_DEFAULT_TALKER_ACCESS: TalkerAccess = _RealTalkerAccess()
 
 
 class CodexSession(OwnedSession):
@@ -716,19 +778,21 @@ class CodexSession(OwnedSession):
         work_dir: Path | str,
         model: ProviderModel | str,
         repo_name: str | None = None,
-        client_factory: Callable[..., CodexAppServer] = CodexAppServerClient,
+        client_factory: AppServerFactory = _DEFAULT_APP_SERVER_FACTORY,
         session_id: str | None = None,
         turn_idle_timeout: float = _CODEX_TURN_IDLE_TIMEOUT,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Clock = _DEFAULT_CLOCK,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
+        talker_access: TalkerAccess = _DEFAULT_TALKER_ACCESS,
     ) -> None:
         self._work_dir = Path(work_dir).resolve()
         self._repo_name = repo_name
+        self._talker_access = talker_access
         self._base_system_prompt = (
             system_file.read_text() if system_file.exists() else ""
         )
         self._client_factory = client_factory
-        self._client = self._client_factory(cwd=self._work_dir)
+        self._client = self._client_factory.create(cwd=self._work_dir)
         self._model = coerce_provider_model(model)
         self._turn_idle_timeout = turn_idle_timeout
         self._clock = clock
@@ -748,7 +812,7 @@ class CodexSession(OwnedSession):
     def owner(self) -> str | None:
         if self._repo_name is None:
             return None
-        talker = provider.get_talker(self._repo_name)
+        talker = self._talker_access.get_talker(self._repo_name)
         if talker is None or talker.kind != "worker":
             return None
         for thread in threading.enumerate():
@@ -922,7 +986,7 @@ class CodexSession(OwnedSession):
         idle_deadline = IdleDeadline(
             self._turn_idle_timeout,
             poll_interval=_CODEX_TURN_POLL_INTERVAL,
-            clock=self._clock,
+            clock=self._clock.monotonic,
         )
         while True:
             timeout = idle_deadline.poll_timeout_or_expired()
@@ -998,7 +1062,7 @@ class CodexSession(OwnedSession):
             old_client = self._client
             self._last_turn_cancelled = False
         old_client.stop()
-        new_client = self._client_factory(cwd=self._work_dir)
+        new_client = self._client_factory.create(cwd=self._work_dir)
         with self._state_lock:
             self._client = new_client
         self._ensure_thread(session_id=old_session_id)
@@ -1050,7 +1114,7 @@ class CodexSession(OwnedSession):
         if depth > 0:
             self._bump_entry_depth()
             return self
-        kind = provider.current_thread_kind()
+        kind = self._talker_access.current_thread_kind()
         if kind == "worker":
             self._fsm_acquire_worker()
         else:
@@ -1058,7 +1122,7 @@ class CodexSession(OwnedSession):
         self._bump_entry_depth()
         if self._repo_name is not None:
             try:
-                provider.register_talker(
+                self._talker_access.register_talker(
                     provider.SessionTalker(
                         repo_name=self._repo_name,
                         thread_id=threading.get_ident(),
@@ -1078,7 +1142,9 @@ class CodexSession(OwnedSession):
         depth = self._drop_entry_depth()
         if depth == 0:
             if self._repo_name is not None:
-                provider.unregister_talker(self._repo_name, threading.get_ident())
+                self._talker_access.unregister_talker(
+                    self._repo_name, threading.get_ident()
+                )
             self._fsm_release()
 
     def _ensure_thread(self, *, session_id: str | None) -> None:
@@ -1200,7 +1266,7 @@ def run_codex_exec(
     model: ProviderModel | str,
     timeout: int = 30,
     cwd: Path | str = ".",
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: ProcessRunner = _DEFAULT_PROCESS_RUNNER,
     allowed_tools: str | None = None,
 ) -> str:
     """Run one non-persistent Codex exec turn and return raw JSONL output.
@@ -1241,7 +1307,7 @@ def run_codex_exec_resume(
     model: ProviderModel | str,
     timeout: int = 300,
     cwd: Path | str = ".",
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: ProcessRunner = _DEFAULT_PROCESS_RUNNER,
     allowed_tools: str | None = None,
 ) -> str:
     """Run one non-persistent Codex exec resume turn and return raw JSONL output.
@@ -1274,6 +1340,64 @@ def run_codex_exec_resume(
     return completed.stdout
 
 
+class SessionFactory(Protocol):
+    """Creates owned :class:`PromptSession` instances for :class:`CodexClient`."""
+
+    def create(
+        self,
+        system_file: Path,
+        *,
+        work_dir: Path | str,
+        model: ProviderModel | str,
+        repo_name: str | None = None,
+        session_id: str | None = None,
+        snapshot_publisher: "provider.SnapshotPublisher | None" = None,
+    ) -> PromptSession: ...
+
+
+class _RealSessionFactory:
+    """Real :class:`SessionFactory` that constructs :class:`CodexSession`."""
+
+    def create(
+        self,
+        system_file: Path,
+        *,
+        work_dir: Path | str,
+        model: ProviderModel | str,
+        repo_name: str | None = None,
+        session_id: str | None = None,
+        snapshot_publisher: "provider.SnapshotPublisher | None" = None,
+    ) -> PromptSession:
+        return CodexSession(
+            system_file,
+            work_dir=work_dir,
+            model=model,
+            repo_name=repo_name,
+            session_id=session_id,
+            snapshot_publisher=snapshot_publisher,
+        )
+
+
+_DEFAULT_SESSION_FACTORY: SessionFactory = _RealSessionFactory()
+
+
+class SessionResolver(Protocol):
+    """Resolves the current :class:`PromptSession` for :class:`CodexClient`."""
+
+    def resolve(self) -> PromptSession: ...
+
+
+class _RealSessionResolver:
+    """Real :class:`SessionResolver` that delegates to
+    :func:`provider.current_repo_session`."""
+
+    def resolve(self) -> PromptSession:
+        return provider.current_repo_session()
+
+
+_DEFAULT_SESSION_RESOLVER: SessionResolver = _RealSessionResolver()
+
+
 class CodexClient(SessionBackedAgent, ProviderAgent):
     """Injectable collaborator for Codex CLI and app-server interactions."""
 
@@ -1283,9 +1407,9 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
 
     def __init__(
         self,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        session_fn: Callable[[], PromptSession] = provider.current_repo_session,
-        session_factory: Callable[..., PromptSession] | None = None,
+        runner: ProcessRunner = _DEFAULT_PROCESS_RUNNER,
+        session_resolver: SessionResolver = _DEFAULT_SESSION_RESOLVER,
+        session_factory: SessionFactory = _DEFAULT_SESSION_FACTORY,
         session_system_file: Path | None = None,
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
@@ -1293,11 +1417,9 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._runner = runner
-        self._session_factory = (
-            CodexSession if session_factory is None else session_factory
-        )
+        self._session_factory = session_factory
         super().__init__(
-            session_fn=session_fn,
+            session_fn=session_resolver.resolve,
             session_system_file=session_system_file,
             work_dir=work_dir,
             repo_name=repo_name,
@@ -1320,7 +1442,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         work_dir = self._work_dir
         assert system_file is not None
         assert work_dir is not None
-        return self._session_factory(
+        return self._session_factory.create(
             system_file,
             work_dir=work_dir,
             model=model,

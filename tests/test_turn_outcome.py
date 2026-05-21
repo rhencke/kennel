@@ -1,10 +1,7 @@
 """Tests for fido.turn_outcome — sentinel parser."""
 
-from unittest.mock import patch
-
 import pytest
 
-import fido.turn_outcome as _to_mod
 from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
@@ -301,11 +298,11 @@ class TestOracleDivergenceDetection:
         def bad_sentinel(_kind: str, _payload: str) -> None:
             return None
 
-        with patch.object(_to_mod, "parse_sentinel", bad_sentinel):
-            with pytest.raises(AssertionError, match="oracle returned None"):
-                parse_turn_outcome(
-                    '{"turn_outcome": "commit-task-complete", "summary": "Add foo"}'
-                )
+        with pytest.raises(AssertionError, match="oracle returned None"):
+            parse_turn_outcome(
+                '{"turn_outcome": "commit-task-complete", "summary": "Add foo"}',
+                _oracle=bad_sentinel,
+            )
 
     def test_parse_oracle_mismatch_raises(self) -> None:
         """If parse_sentinel returns a different outcome than the parser built, AssertionError fires."""
@@ -314,11 +311,11 @@ class TestOracleDivergenceDetection:
             # Oracle disagrees: claims the outcome is in-progress, not complete
             return CommitTaskInProgress(summary="wrong")
 
-        with patch.object(_to_mod, "parse_sentinel", bad_sentinel):
-            with pytest.raises(AssertionError, match="oracle mismatch"):
-                parse_turn_outcome(
-                    '{"turn_outcome": "commit-task-complete", "summary": "Add foo"}'
-                )
+        with pytest.raises(AssertionError, match="oracle mismatch"):
+            parse_turn_outcome(
+                '{"turn_outcome": "commit-task-complete", "summary": "Add foo"}',
+                _oracle=bad_sentinel,
+            )
 
     def test_reject_oracle_accepts_unknown_kind_raises(self) -> None:
         """If parse_sentinel accepts an input the parser rejects (unknown kind), AssertionError fires."""
@@ -327,11 +324,10 @@ class TestOracleDivergenceDetection:
             # Oracle wrongly accepts an unrecognised kind
             return CommitTaskComplete(summary="should not parse")
 
-        with patch.object(_to_mod, "parse_sentinel", bad_sentinel):
-            with pytest.raises(
-                AssertionError, match="oracle accepted input the parser rejects"
-            ):
-                parse_turn_outcome('{"turn_outcome": "do-the-thing"}')
+        with pytest.raises(
+            AssertionError, match="oracle accepted input the parser rejects"
+        ):
+            parse_turn_outcome('{"turn_outcome": "do-the-thing"}', _oracle=bad_sentinel)
 
     def test_reject_oracle_accepts_empty_payload_raises(self) -> None:
         """If parse_sentinel accepts an empty-payload input the parser rejects, AssertionError fires."""
@@ -340,10 +336,10 @@ class TestOracleDivergenceDetection:
             # Oracle wrongly accepts an empty summary
             return CommitTaskComplete(summary="")
 
-        with patch.object(_to_mod, "parse_sentinel", bad_sentinel):
-            with pytest.raises(
-                AssertionError, match="oracle accepted input the parser rejects"
-            ):
-                parse_turn_outcome(
-                    '{"turn_outcome": "commit-task-complete", "summary": ""}'
-                )
+        with pytest.raises(
+            AssertionError, match="oracle accepted input the parser rejects"
+        ):
+            parse_turn_outcome(
+                '{"turn_outcome": "commit-task-complete", "summary": ""}',
+                _oracle=bad_sentinel,
+            )

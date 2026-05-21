@@ -24,16 +24,12 @@ from fido.color import (
     RED_BOLD,
     YELLOW,
     YELLOW_BG,
-    color,
-    color_enabled,
-    rgb_bg,
-    rgb_fg,
-    wrap_bg_line,
-    wrap_raw,
+    Color,
 )
 from fido.config import RepoConfig, default_sub_dir
 from fido.provider import (
     ProviderID,
+    ProviderPalette,
     ProviderPressureStatus,
     palette_for,
 )
@@ -188,16 +184,20 @@ def _format_percent(used: int, total: int) -> str:
     return f"{round((used / total) * 100)}%"
 
 
-def _format_resource_line(resources: SystemResourceInfo | None) -> str | None:
+def _format_resource_line(
+    resources: SystemResourceInfo | None,
+    *,
+    c: Color,
+) -> str | None:
     if resources is None:
         return None
     mem_used = resources.mem_total_bytes - resources.mem_available_bytes
     disk_used = resources.disk_total_bytes - resources.disk_free_bytes
     cores = f"/{resources.cpu_count}" if resources.cpu_count else ""
     return (
-        f"{color(BOLD, 'host:')} "
+        f"{c.color(BOLD, 'host:')} "
         f"cpu load {resources.load_1:.2f}{cores} "
-        f"{color(DIM, f'({resources.load_5:.2f}, {resources.load_15:.2f})')}, "
+        f"{c.color(DIM, f'({resources.load_5:.2f}, {resources.load_15:.2f})')}, "
         f"mem {_format_gib(mem_used)}/{_format_gib(resources.mem_total_bytes)} "
         f"({_format_percent(mem_used, resources.mem_total_bytes)}), "
         f"disk {resources.disk_path} "
@@ -206,12 +206,16 @@ def _format_resource_line(resources: SystemResourceInfo | None) -> str | None:
     )
 
 
-def _fido_running(lock_path: Path) -> bool:
+def _fido_running(
+    lock_path: Path,
+    *,
+    _open: Callable[..., Any] = open,  # noqa: A002
+) -> bool:
     """Return True if the fido lock file is held by another process."""
     if not lock_path.exists():
         return False
     try:
-        fd = open(lock_path)  # noqa: SIM115
+        fd = _open(lock_path)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -306,14 +310,10 @@ def _system_resources(
         return None
 
 
-def _repos_from_pid(pid: int) -> list[RepoConfig]:
-    """Read repo specs from /proc/<pid>/cmdline, returning [] if unavailable."""
-    try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return []
+def _parse_repo_cmdline(data: bytes) -> list[RepoConfig]:
+    """Parse repo specs from /proc/<pid>/cmdline bytes. Pure — no I/O."""
     repos = []
-    for arg in cmdline.rstrip(b"\x00").split(b"\x00"):
+    for arg in data.rstrip(b"\x00").split(b"\x00"):
         try:
             spec = arg.decode()
         except UnicodeDecodeError:
@@ -340,22 +340,70 @@ def _repos_from_pid(pid: int) -> list[RepoConfig]:
     return repos
 
 
+def _repos_from_pid(pid: int) -> list[RepoConfig]:
+    """Read repo specs from /proc/<pid>/cmdline, returning [] if unavailable."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return _parse_repo_cmdline(cmdline)
+
+
 def _fido_pid() -> int | None:
     """Return the PID of the running fido server, or None."""
     pids = _pgrep("fido --port")
     return pids[0] if pids else None
 
 
+class StatusCollector:
+    """Groups system-introspection methods used by :func:`repo_status`,
+    :func:`collect`, and :func:`running_repo_configs`.
+
+    The real implementation delegates to the private module-level helpers
+    (``_git_dir``, ``_fido_running``, …).  Tests inject a subclass or a
+    hand-rolled fake that overrides specific methods without touching the
+    others.
+    """
+
+    def git_dir(self, path: Path) -> Path | None:
+        return _git_dir(path)
+
+    def fido_running(self, lock_path: Path) -> bool:
+        return _fido_running(lock_path)
+
+    def claude_pid(self, fido_dir: Path) -> int | None:
+        return _claude_pid(fido_dir)
+
+    def process_uptime(self, pid: int) -> int | None:
+        return _process_uptime_seconds(pid)
+
+    def fido_pid(self) -> int | None:
+        return _fido_pid()
+
+    def repos_from_pid(self, pid: int) -> list[RepoConfig]:
+        return _repos_from_pid(pid)
+
+    def port_from_pid(self, pid: int) -> int | None:
+        return _port_from_pid(pid)
+
+    def fetch_activities(
+        self, port: int
+    ) -> tuple[dict[str, Any], RateLimitInfo | None]:
+        return _fetch_activities(port)
+
+
+_REAL_COLLECTOR: StatusCollector = StatusCollector()
+
+
 def running_repo_configs(
     *,
-    _fido_pid_fn: Callable[[], int | None] = _fido_pid,
-    _repos_from_pid_fn: Callable[[int], list[RepoConfig]] = _repos_from_pid,
+    collector: StatusCollector = _REAL_COLLECTOR,
 ) -> list[RepoConfig]:
     """Return the repo configs for the currently running fido, or []."""
-    pid = _fido_pid_fn()
+    pid = collector.fido_pid()
     if pid is None:
         return []
-    return _repos_from_pid_fn(pid)
+    return collector.repos_from_pid(pid)
 
 
 def _status_persona_path() -> Path:
@@ -368,9 +416,12 @@ def provider_statuses_for_repo_configs(
     _provider_factory: DefaultProviderFactory | None = None,
 ) -> dict[ProviderID, ProviderPressureStatus]:
     """Return one normalized provider-pressure summary per configured provider."""
-    provider_factory = _provider_factory or DefaultProviderFactory(
-        session_system_file=_status_persona_path()
-    )
+    if _provider_factory is not None:
+        provider_factory = _provider_factory
+    else:
+        provider_factory = DefaultProviderFactory(
+            session_system_file=_status_persona_path()
+        )
     statuses: dict[ProviderID, ProviderPressureStatus] = {}
     for repo_cfg in repo_configs:
         if repo_cfg.provider in statuses:
@@ -435,13 +486,9 @@ def _parse_issue_cache(raw: object) -> IssueCacheInfo | None:
     )
 
 
-def _port_from_pid(pid: int) -> int | None:
-    """Extract the --port value from fido's /proc/<pid>/cmdline, or None."""
-    try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return None
-    args = cmdline.rstrip(b"\x00").split(b"\x00")
+def _parse_port_from_cmdline(data: bytes) -> int | None:
+    """Extract the --port value from /proc/<pid>/cmdline bytes. Pure — no I/O."""
+    args = data.rstrip(b"\x00").split(b"\x00")
     for i, arg in enumerate(args):
         if arg == b"--port" and i + 1 < len(args):
             try:
@@ -449,6 +496,15 @@ def _port_from_pid(pid: int) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+def _port_from_pid(pid: int) -> int | None:
+    """Extract the --port value from fido's /proc/<pid>/cmdline, or None."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return _parse_port_from_cmdline(cmdline)
 
 
 def _fetch_activities(
@@ -519,7 +575,11 @@ def _parse_rate_window(raw: dict[str, Any]) -> RateLimitWindowInfo:
     )
 
 
-def _claude_pid(fido_dir: Path) -> int | None:
+def _claude_pid(
+    fido_dir: Path,
+    *,
+    _pgrep_fn: Callable[[str], list[int]] = _pgrep,
+) -> int | None:
     """Return the PID of the claude process for this fido_dir, or None.
 
     Matches both initial sessions (command line includes the system-prompt
@@ -527,13 +587,13 @@ def _claude_pid(fido_dir: Path) -> int | None:
     ``--resume <session_id>`` from state.json, which doesn't mention the
     system file).
     """
-    pids = _pgrep(str(fido_dir / "system"))
+    pids = _pgrep_fn(str(fido_dir / "system"))
     if pids:
         return pids[0]
     session_id = State(fido_dir).load().get("setup_session_id")
     if not session_id:
         return None
-    pids = _pgrep(session_id)
+    pids = _pgrep_fn(session_id)
     return pids[0] if pids else None
 
 
@@ -558,7 +618,11 @@ def _git_dir(
         return None
 
 
-def _read_state(fido_dir: Path) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]  # used by tests
+def _read_state(  # pyright: ignore[reportUnusedFunction]  # used by tests
+    fido_dir: Path,
+    *,
+    _read_text_fn: Callable[[Path], str] = Path.read_text,
+) -> dict[str, Any]:
     """Read state.json from fido_dir, returning {} if absent or unreadable."""
     path = fido_dir / "state.json"
     lock_path = fido_dir / "state.lock"
@@ -568,7 +632,7 @@ def _read_state(fido_dir: Path) -> dict[str, Any]:  # pyright: ignore[reportUnus
             fcntl.flock(lock_fd, fcntl.LOCK_SH)
             if not path.exists():
                 return {}
-            return json.loads(path.read_text())
+            return json.loads(_read_text_fn(path))
     except (json.JSONDecodeError, OSError):  # fmt: skip
         return {}
 
@@ -634,10 +698,12 @@ def repo_status(
     rescoping: bool = False,
     provider_status: ProviderPressureStatus | None = None,
     issue_cache: IssueCacheInfo | None = None,
+    *,
+    collector: StatusCollector = _REAL_COLLECTOR,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
-    git_dir = _git_dir(repo_config.work_dir)
+    git_dir = collector.git_dir(repo_config.work_dir)
     if git_dir is None:
         return RepoStatus(
             name=repo_config.name,
@@ -673,7 +739,7 @@ def repo_status(
         )
 
     fido_dir = git_dir / "fido"
-    running = _fido_running(fido_dir / "lock")
+    running = collector.fido_running(fido_dir / "lock")
 
     state = State(fido_dir).load()
     issue = state.get("issue")
@@ -692,9 +758,11 @@ def repo_status(
     # Prefer the fido-tracked session pid (authoritative, known from the
     # ClaudeSession subprocess) over a pgrep heuristic that can't find the
     # persistent session (its system file is outside fido_dir).
-    claude_pid = session_pid if session_pid is not None else _claude_pid(fido_dir)
+    claude_pid = (
+        session_pid if session_pid is not None else collector.claude_pid(fido_dir)
+    )
     claude_uptime = (
-        _process_uptime_seconds(claude_pid) if claude_pid is not None else None
+        collector.process_uptime(claude_pid) if claude_pid is not None else None
     )
 
     return RepoStatus(
@@ -731,18 +799,21 @@ def repo_status(
     )
 
 
-def collect() -> FidoStatus:
+def collect(
+    *,
+    collector: StatusCollector = _REAL_COLLECTOR,
+) -> FidoStatus:
     """Collect the full fido + per-repo status."""
-    pid = _fido_pid()
-    uptime = _process_uptime_seconds(pid) if pid is not None else None
-    repo_configs = _repos_from_pid(pid) if pid is not None else []
+    pid = collector.fido_pid()
+    uptime = collector.process_uptime(pid) if pid is not None else None
+    repo_configs = collector.repos_from_pid(pid) if pid is not None else []
 
     activities: dict[str, Any] = {}
     rate_limit_info: RateLimitInfo | None = None
     if pid is not None:
-        port = _port_from_pid(pid)
+        port = collector.port_from_pid(pid)
         if port is not None:
-            activities, rate_limit_info = _fetch_activities(port)
+            activities, rate_limit_info = collector.fetch_activities(port)
 
     provider_statuses: dict[ProviderID, ProviderPressureStatus] = {}
     repos = []
@@ -806,6 +877,7 @@ def collect() -> FidoStatus:
                 rescoping=bool(info.get("rescoping")) if info else False,
                 provider_status=provider_status,
                 issue_cache=cache_info,
+                collector=collector,
             )
         )
     return FidoStatus(
@@ -825,7 +897,7 @@ _WEBHOOK_DISPLAY_CAP: int = 5
 """Max webhook lines to print per repo; overflow rolled into a +N-more line."""
 
 
-def _format_agent_line(repo: RepoStatus) -> str | None:
+def _format_agent_line(repo: RepoStatus, *, c: Color) -> str | None:
     """Dedicated first body line showing agent session state.
 
     Returns None when there is nothing to display (no pid, session not alive).
@@ -838,33 +910,33 @@ def _format_agent_line(repo: RepoStatus) -> str | None:
 
     parts: list[str] = []
     if repo.claude_uptime is not None:
-        parts.append(color(DIM, f"running {_format_uptime(repo.claude_uptime)}"))
+        parts.append(c.color(DIM, f"running {_format_uptime(repo.claude_uptime)}"))
     if (
         repo.session_alive
         and not _worker_is_agent_talker(repo)
         and repo.claude_talker is None
     ):
-        parts.append(color(DIM, "session idle"))
+        parts.append(c.color(DIM, "session idle"))
     if repo.session_dropped_count > 0:
         noun = "session" if repo.session_dropped_count == 1 else "sessions"
-        parts.append(color(RED_BOLD, f"dropped {noun} {repo.session_dropped_count}"))
+        parts.append(c.color(RED_BOLD, f"dropped {noun} {repo.session_dropped_count}"))
     if repo.session_sent_count > 0 or repo.session_received_count > 0:
         parts.append(
-            color(
+            c.color(
                 DIM,
                 f"{repo.session_sent_count} sent, {repo.session_received_count} received",
             )
         )
 
     pid_str = (
-        color(DIM, f"pid {repo.claude_pid}")
+        c.color(DIM, f"pid {repo.claude_pid}")
         if repo.claude_pid is not None
-        else color(DIM, "agent")
+        else c.color(DIM, "agent")
     )
-    label = color(BOLD, f"{repo.provider}:")
+    label = c.color(BOLD, f"{repo.provider}:")
     if parts:
         joined = ", ".join(parts)
-        return f"  {label} {pid_str} {color(DIM, '(')}{joined}{color(DIM, ')')}"
+        return f"  {label} {pid_str} {c.color(DIM, '(')}{joined}{c.color(DIM, ')')}"
     return f"  {label} {pid_str}"
 
 
@@ -906,17 +978,26 @@ def _rate_limit_color(window: RateLimitWindowInfo) -> str:
     return DIM
 
 
-def _format_rate_limit_window(window: RateLimitWindowInfo, label: str) -> str:
+def _format_rate_limit_window(
+    window: RateLimitWindowInfo,
+    label: str,
+    *,
+    c: Color,
+) -> str:
     """Format one rate-limit window as ``LABEL used/limit (Xh Ym to reset)``
     with color coding by remaining percentage."""
     style = _rate_limit_color(window)
     rest_str = f"{window.used}/{window.limit}"
     reset_str = _format_duration_until(window.resets_at)
     body = f"{label} {rest_str} ({reset_str} to reset)"
-    return color(style, body)
+    return c.color(style, body)
 
 
-def _format_rate_limit_line(rate_limit: RateLimitInfo | None) -> str | None:
+def _format_rate_limit_line(
+    rate_limit: RateLimitInfo | None,
+    *,
+    c: Color,
+) -> str | None:
     """Top-of-status one-liner for the GitHub rate-limit snapshot.
 
     Hidden when the monitor hasn't yet completed its first refresh —
@@ -925,13 +1006,17 @@ def _format_rate_limit_line(rate_limit: RateLimitInfo | None) -> str | None:
     """
     if rate_limit is None:
         return None
-    rest_part = _format_rate_limit_window(rate_limit.rest, "REST")
-    gql_part = _format_rate_limit_window(rate_limit.graphql, "GraphQL")
-    label = color(BOLD, "GitHub:")
+    rest_part = _format_rate_limit_window(rate_limit.rest, "REST", c=c)
+    gql_part = _format_rate_limit_window(rate_limit.graphql, "GraphQL", c=c)
+    label = c.color(BOLD, "GitHub:")
     return f"{label} {rest_part}, {gql_part}"
 
 
-def _format_cache_line(repo: RepoStatus) -> str | None:
+def _format_cache_line(
+    repo: RepoStatus,
+    *,
+    c: Color,
+) -> str | None:
     """One-line picker-cache summary (#812).
 
     Hidden when the cache hasn't been bootstrapped — the line would just
@@ -940,13 +1025,13 @@ def _format_cache_line(repo: RepoStatus) -> str | None:
     cache = repo.issue_cache
     if cache is None or not cache.loaded:
         return None
-    parts: list[str] = [color(DIM, f"{cache.open_issues} open")]
-    parts.append(color(DIM, f"applied {cache.events_applied}"))
+    parts: list[str] = [c.color(DIM, f"{cache.open_issues} open")]
+    parts.append(c.color(DIM, f"applied {cache.events_applied}"))
     if cache.events_dropped_stale:
-        parts.append(color(DIM, f"stale-dropped {cache.events_dropped_stale}"))
+        parts.append(c.color(DIM, f"stale-dropped {cache.events_dropped_stale}"))
     if cache.last_reconcile_at is not None:
-        parts.append(color(DIM, f"reconciled drift {cache.last_reconcile_drift}"))
-    label = color(BOLD, "Cache:")
+        parts.append(c.color(DIM, f"reconciled drift {cache.last_reconcile_drift}"))
+    label = c.color(BOLD, "Cache:")
     return f"  {label}  {', '.join(parts)}"
 
 
@@ -981,25 +1066,37 @@ def _provider_status_summary(status: ProviderPressureStatus) -> str:
     return f"{provider} {status.percent_used}%{detail_text}"
 
 
-def _styled_provider_status(status: ProviderPressureStatus) -> str:
+def _styled_provider_status(
+    status: ProviderPressureStatus,
+    *,
+    c: Color,
+    _palette_for: Callable[..., ProviderPalette | None] | None = None,
+) -> str:
     base_style = _provider_status_style(status)
     summary = _provider_status_summary(status)
     if base_style:
         # Preserve the existing dim/dark-gray rules (used when the provider
         # is paused or warning) — those signal state more than identity, so
         # they win over the provider-color highlight.
-        return color(base_style, summary)
+        return c.color(base_style, summary)
     # Highlight the provider name (prefix of the summary) with the provider's
     # bright fg so each provider is visually identifiable in the limits line.
-    palette = palette_for(status.provider)
+    palette = (_palette_for if _palette_for is not None else palette_for)(
+        status.provider
+    )
     provider_token = str(status.provider)
     if palette is not None and summary.startswith(provider_token):
         tail = summary[len(provider_token) :]
-        return wrap_raw(rgb_fg(*palette.bright_fg), provider_token) + tail
+        return c.wrap_raw(c.rgb_fg(*palette.bright_fg), provider_token) + tail
     return summary
 
 
-def _styled_repo_provider(repo: RepoStatus) -> str:
+def _styled_repo_provider(
+    repo: RepoStatus,
+    *,
+    c: Color,
+    _palette_for: Callable[..., ProviderPalette | None] | None = None,
+) -> str:
     """Render the repo's provider label without repeating global limits details."""
     provider_str = str(repo.provider)
     provider_status = repo.provider_status
@@ -1008,22 +1105,26 @@ def _styled_repo_provider(repo: RepoStatus) -> str:
         if base_style:
             # Warning/paused state wins over identity color — same precedence
             # as the global limits line in _styled_provider_status.
-            return color(base_style, provider_str)
-    palette = palette_for(repo.provider)
+            return c.color(base_style, provider_str)
+    palette = (_palette_for if _palette_for is not None else palette_for)(repo.provider)
     if palette is not None:
-        return wrap_raw(rgb_fg(*palette.bright_fg), provider_str)
+        return c.wrap_raw(c.rgb_fg(*palette.bright_fg), provider_str)
     return provider_str
 
 
-def _format_provider_summary_line(statuses: list[ProviderPressureStatus]) -> str | None:
+def _format_provider_summary_line(
+    statuses: list[ProviderPressureStatus],
+    *,
+    c: Color,
+) -> str | None:
     if not statuses:
         return None
     ordered = sorted(statuses, key=lambda status: status.provider.value)
-    rendered = " | ".join(_styled_provider_status(status) for status in ordered)
-    return f"{color(BOLD, 'limits:')} {rendered}"
+    rendered = " | ".join(_styled_provider_status(status, c=c) for status in ordered)
+    return f"{c.color(BOLD, 'limits:')} {rendered}"
 
 
-def _format_repo_header(repo: RepoStatus) -> str:
+def _format_repo_header(repo: RepoStatus, *, c: Color) -> str:
     """Top line per repo: ``<name>: <stats>``.
 
     Stats list is comma-separated and only shows what matters right now:
@@ -1032,24 +1133,24 @@ def _format_repo_header(repo: RepoStatus) -> str:
     line when crash_count > 0.  If nobody is currently talking to the agent,
     the generic pid/uptime suffix appears on this line.
     """
-    stats: list[str] = [_styled_repo_provider(repo)]
+    stats: list[str] = [_styled_repo_provider(repo, c=c)]
     if repo.crash_count > 0:
-        stats.append(color(RED_BOLD, f"crashes {repo.crash_count}"))
+        stats.append(c.color(RED_BOLD, f"crashes {repo.crash_count}"))
     if repo.worker_uptime is not None:
-        stats.append(color(DIM, f"up {_format_uptime(repo.worker_uptime)}"))
+        stats.append(c.color(DIM, f"up {_format_uptime(repo.worker_uptime)}"))
     if repo.worker_stuck:
-        stats.append(color(RED, "BUSY"))
+        stats.append(c.color(RED, "BUSY"))
     if repo.crash_count > 0 and repo.last_crash_error:
-        stats.append(color(RED_BOLD, f"last crash: {repo.last_crash_error}"))
+        stats.append(c.color(RED_BOLD, f"last crash: {repo.last_crash_error}"))
 
-    name_styled = color(BOLD, f"{repo.name}:")
+    name_styled = c.color(BOLD, f"{repo.name}:")
     header = name_styled
     if stats:
         header += " " + ", ".join(stats)
     return header
 
 
-def _format_repo_body(repo: RepoStatus) -> list[str]:
+def _format_repo_body(repo: RepoStatus, *, c: Color) -> list[str]:
     """Per-repo body lines in fixed order:
 
     1. ``{provider}: pid N (running Xm, session idle)`` — agent session state,
@@ -1065,11 +1166,11 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
     """
     body: list[str] = []
 
-    agent_line = _format_agent_line(repo)
+    agent_line = _format_agent_line(repo, c=c)
     if agent_line is not None:
         body.append(agent_line)
 
-    cache_line = _format_cache_line(repo)
+    cache_line = _format_cache_line(repo, c=c)
     if cache_line is not None:
         body.append(cache_line)
 
@@ -1077,25 +1178,25 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
         body.append("  no assigned issues")
         return body
 
-    issue_line = f"  {color(BOLD, 'Issue:')} {color(CYAN, f'#{repo.issue}')}"
+    issue_line = f"  {c.color(BOLD, 'Issue:')} {c.color(CYAN, f'#{repo.issue}')}"
     if repo.issue_title:
-        issue_line += f" {color(DIM, '—')} {repo.issue_title}"
+        issue_line += f" {c.color(DIM, '—')} {repo.issue_title}"
     if repo.issue_elapsed_seconds is not None:
-        issue_line += (
-            f" {color(DIM, f'(elapsed {_format_uptime(repo.issue_elapsed_seconds)})')}"
-        )
+        issue_line += f" {c.color(DIM, f'(elapsed {_format_uptime(repo.issue_elapsed_seconds)})')}"
     body.append(issue_line)
 
     if repo.pr_number is not None:
-        pr_line = f"  {color(BOLD, 'PR:')}     {color(MAGENTA, f'#{repo.pr_number}')}"
+        pr_line = (
+            f"  {c.color(BOLD, 'PR:')}     {c.color(MAGENTA, f'#{repo.pr_number}')}"
+        )
         if repo.pr_title:
-            pr_line += f" {color(DIM, '—')} {repo.pr_title}"
+            pr_line += f" {c.color(DIM, '—')} {repo.pr_title}"
         body.append(pr_line)
 
     if _should_show_worker_line(repo):
-        body.append(_format_worker_thread_line(repo))
+        body.append(_format_worker_thread_line(repo, c=c))
 
-    body.extend(_format_webhook_lines(repo))
+    body.extend(_format_webhook_lines(repo, c=c))
 
     return body
 
@@ -1128,7 +1229,7 @@ def _should_show_worker_line(repo: RepoStatus) -> bool:
     return False
 
 
-def _format_worker_thread_line(repo: RepoStatus) -> str:
+def _format_worker_thread_line(repo: RepoStatus, *, c: Color) -> str:
     """Worker-thread state line, background-highlighted whenever the worker
     is assigned to a task.
 
@@ -1146,19 +1247,19 @@ def _format_worker_thread_line(repo: RepoStatus) -> str:
     briefly be None during task rescopes) still read as busy when the
     worker lock is held.
     """
-    state = _worker_thread_state(repo)
+    state = _worker_thread_state(repo, c=c)
     is_active = repo.current_task is not None or _worker_is_agent_talker(repo)
     # NO_COLOR users need an alternate signal to the GREEN_BG highlight;
     # a leading "* " is visible when color is disabled.  Under color mode
     # GREEN_BG already provides the highlight, so the asterisk is omitted.
     # Inactive rows always get two spaces so the label column stays aligned.
-    marker = "* " if (is_active and not color_enabled()) else "  "
-    label = color(GREEN_BG, "Worker:") if is_active else color(BOLD, "Worker:")
+    marker = "* " if (is_active and not c.color_enabled()) else "  "
+    label = c.color(GREEN_BG, "Worker:") if is_active else c.color(BOLD, "Worker:")
     line = f"{marker}{label} {state}"
     return line
 
 
-def _worker_thread_state(repo: RepoStatus) -> str:
+def _worker_thread_state(repo: RepoStatus, *, c: Color) -> str:
     """Compact string describing what the worker thread itself is doing.
 
     Prefers the richest descriptor available: current task (with position
@@ -1173,14 +1274,14 @@ def _worker_thread_state(repo: RepoStatus) -> str:
             if provider_status.resets_at is not None
             else ""
         )
-        return color(
+        return c.color(
             DARK_GRAY,
             f"paused for {provider_status.provider} reset{until}",
         )
     if repo.task_number is not None and repo.task_total is not None:
         uncertainty = "?" if repo.rescoping else ""
         suffix = f" — {repo.current_task}" if repo.current_task else ""
-        return f"{color(BOLD, f'task {repo.task_number}/{repo.task_total}{uncertainty}')}{suffix}"
+        return f"{c.color(BOLD, f'task {repo.task_number}/{repo.task_total}{uncertainty}')}{suffix}"
     if repo.current_task is not None:
         return f"task: {repo.current_task}"
     what = (repo.worker_what or "").strip()
@@ -1189,7 +1290,7 @@ def _worker_thread_state(repo: RepoStatus) -> str:
     return "waiting for work"
 
 
-def _format_webhook_lines(repo: RepoStatus) -> list[str]:
+def _format_webhook_lines(repo: RepoStatus, *, c: Color) -> list[str]:
     """Render up to :data:`_WEBHOOK_DISPLAY_CAP` webhook lines with the
     talker sorted to the top.  Returns ``[]`` when there are no webhooks.
     """
@@ -1210,20 +1311,24 @@ def _format_webhook_lines(repo: RepoStatus) -> list[str]:
     for w in shown:
         is_talker = talker_tid is not None and w.thread_id == talker_tid
         wh_label = (
-            color(YELLOW_BG, "webhook:") if is_talker else color(BOLD, "webhook:")
+            c.color(YELLOW_BG, "webhook:") if is_talker else c.color(BOLD, "webhook:")
         )
-        elapsed = color(DIM, f"({_format_uptime(w.elapsed_seconds)})")
+        elapsed = c.color(DIM, f"({_format_uptime(w.elapsed_seconds)})")
         line = f"  {wh_label} {w.description} {elapsed}"
         lines.append(line)
     if overflow > 0:
         lines.append(
-            color(DIM, f"  +{overflow} more webhook{'s' if overflow != 1 else ''}")
+            c.color(
+                DIM,
+                f"  +{overflow} more webhook{'s' if overflow != 1 else ''}",
+            )
         )
     return lines
 
 
-def format_status(status: FidoStatus) -> str:
+def format_status(status: FidoStatus, *, color: Color) -> str:
     """Format a FidoStatus as a human-readable string."""
+    c = color
     lines: list[str] = []
 
     if status.fido_pid is not None:
@@ -1233,30 +1338,33 @@ def format_status(status: FidoStatus) -> str:
             else ""
         )
         lines.append(
-            f"{color(BOLD, 'fido:')} {color(GREEN, 'UP')} "
-            f"{color(DIM, f'(pid {status.fido_pid}{uptime_str})')}"
+            f"{c.color(BOLD, 'fido:')} {c.color(GREEN, 'UP')} "
+            f"{c.color(DIM, f'(pid {status.fido_pid}{uptime_str})')}"
         )
     else:
-        lines.append(f"{color(BOLD, 'fido:')} {color(RED_BOLD, 'DOWN')}")
+        lines.append(f"{c.color(BOLD, 'fido:')} {c.color(RED_BOLD, 'DOWN')}")
 
-    resource_line = _format_resource_line(status.resources)
+    resource_line = _format_resource_line(status.resources, c=c)
     if resource_line is not None:
         lines.append(resource_line)
 
-    provider_summary = _format_provider_summary_line(status.provider_statuses)
+    provider_summary = _format_provider_summary_line(status.provider_statuses, c=c)
     if provider_summary is not None:
         lines.append(provider_summary)
 
-    rate_limit_line = _format_rate_limit_line(status.rate_limit)
+    rate_limit_line = _format_rate_limit_line(status.rate_limit, c=c)
     if rate_limit_line is not None:
         lines.append(rate_limit_line)
 
     for repo in status.repos:
-        section = [_format_repo_header(repo), *_format_repo_body(repo)]
+        section = [
+            _format_repo_header(repo, c=c),
+            *_format_repo_body(repo, c=c),
+        ]
         palette = palette_for(repo.provider)
         if palette is not None:
-            bg = rgb_bg(*palette.dim_bg)
-            section = [wrap_bg_line(bg, line) for line in section]
+            bg = c.rgb_bg(*palette.dim_bg)
+            section = [c.wrap_bg_line(bg, line) for line in section]
         lines.extend(section)
 
     return "\n".join(lines)
