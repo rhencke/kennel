@@ -1362,6 +1362,63 @@ class ReplyPromiseRecoverer(Protocol):
     ) -> bool: ...
 
 
+class BackgroundTaskSyncer(Protocol):
+    """Launches :func:`~fido.tasks.sync_tasks_background` in a daemon thread."""
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
+
+
+class TaskReorderer(Protocol):
+    """Reorders the pending task list via an Opus call (wraps :func:`~fido.tasks.reorder_tasks`)."""
+
+    def __call__(
+        self,
+        tasks_obj: "Tasks",
+        commit_summary: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None: ...
+
+
+class CommentReplier(Protocol):
+    """Replies to a PR comment via the synthesis LLM."""
+
+    def __call__(
+        self,
+        action: "Action",
+        config: Config,
+        repo_cfg: RepoConfig,
+        gh: GitHub,
+        registry: ActivityReporter,
+        *,
+        agent: ProviderAgent | None = None,
+        prompts: Prompts | None = None,
+    ) -> tuple[str, list[str]]: ...
+
+
+class CommitSummarizer(Protocol):
+    """Returns a short ``git log --oneline`` summary of recent commits."""
+
+    def __call__(self, work_dir: Path) -> str: ...
+
+
+class ReorderKwargsFactory(Protocol):
+    """Builds the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
+
+    def __call__(
+        self,
+        work_dir: Path,
+        config: Config,
+        repo_cfg: RepoConfig,
+        registry: ActivityReporter,
+        gh: GitHub,
+        agent: ProviderAgent,
+        prompts: Prompts,
+        rewrite_fn: Callable[..., None],
+        sync_fn: Callable[[Path, Any], None] | None = None,
+        sync_tasks_fn: Callable[[Path, Any], None] | None = None,
+    ) -> dict[str, Any]: ...
+
+
 class _RealPromptBuilder:  # pragma: no cover
     """Real :class:`PromptBuilder` — delegates to :func:`build_prompt`.
 
@@ -1526,6 +1583,12 @@ class Worker:
         reply_promise_recoverer: ReplyPromiseRecoverer,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
+        background_syncer: BackgroundTaskSyncer,
+        task_reorderer: TaskReorderer,
+        comment_replier: CommentReplier,
+        issue_comment_replier: CommentReplier,
+        commit_summarizer: CommitSummarizer,
+        reorder_kwargs_factory: ReorderKwargsFactory,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -1582,18 +1645,12 @@ class Worker:
         self._task_syncer = task_syncer
         self._clock = clock
         self._reply_promise_recoverer = reply_promise_recoverer
-        # Delegation impl attributes -- tests inject mocks via direct instance assignment
-        # instead of patching module functions.
-        self._sync_tasks_background_impl = tasks.sync_tasks_background
-        self._reorder_tasks_impl = tasks.reorder_tasks
-        # Events delegation targets.  Imported lazily (inside __init__) to avoid
-        # creating a module-level circular import with fido.events -> fido.worker.
-        from fido import events as _fev  # noqa: PLC0415
-
-        self._reply_to_comment_impl = _fev.reply_to_comment
-        self._reply_to_issue_comment_impl = _fev.reply_to_issue_comment
-        self._get_commit_summary_impl = _fev._get_commit_summary  # pyright: ignore[reportPrivateUsage]
-        self._make_reorder_kwargs_impl = _fev._make_reorder_kwargs  # pyright: ignore[reportPrivateUsage]
+        self._background_syncer = background_syncer
+        self._task_reorderer = task_reorderer
+        self._comment_replier = comment_replier
+        self._issue_comment_replier = issue_comment_replier
+        self._commit_summarizer = commit_summarizer
+        self._reorder_kwargs_factory = reorder_kwargs_factory
 
     def _ensure_provider(self) -> Provider:
         """Return the owned provider, creating the configured provider if needed."""
@@ -2979,8 +3036,7 @@ class Worker:
         agent: ProviderAgent,
         prompts: Prompts | None = None,
     ) -> tuple[str, list[str]]:
-        """Thin delegation — tests override via direct instance attribute assignment."""
-        return self._reply_to_comment_impl(
+        return self._comment_replier(
             action,
             config,
             repo_cfg,
@@ -3001,8 +3057,7 @@ class Worker:
         agent: ProviderAgent,
         prompts: Prompts | None = None,
     ) -> tuple[str, list[str]]:
-        """Thin delegation — tests override via direct instance attribute assignment."""
-        return self._reply_to_issue_comment_impl(
+        return self._issue_comment_replier(
             action,
             config,
             repo_cfg,
@@ -3013,8 +3068,7 @@ class Worker:
         )
 
     def _sync_tasks_background(self, work_dir: Path, gh: GitHub) -> None:
-        """Thin delegation — tests override via direct instance attribute assignment."""
-        self._sync_tasks_background_impl(work_dir, gh)
+        self._background_syncer(work_dir, gh)
 
     def _prepare_reply(
         self,
@@ -4755,8 +4809,7 @@ class Worker:
         self._reorder_tasks_fn(self._tasks, commit_summary, reorder_kwargs)
 
     def _get_commit_summary_fn(self) -> str:
-        """Thin delegation — tests override via direct instance attribute assignment."""
-        return self._get_commit_summary_impl(self.work_dir)
+        return self._commit_summarizer(self.work_dir)
 
     def _make_reorder_kwargs_fn(
         self,
@@ -4771,8 +4824,7 @@ class Worker:
         sync_fn: Callable[[Path, Any], None] | None = None,
         sync_tasks_fn: Callable[[Path, Any], None] | None = None,
     ) -> dict[str, Any]:
-        """Thin delegation — tests override via direct instance attribute assignment."""
-        return self._make_reorder_kwargs_impl(
+        return self._reorder_kwargs_factory(
             work_dir,
             config,
             repo_cfg,
@@ -4788,8 +4840,7 @@ class Worker:
     def _reorder_tasks_fn(
         self, tasks_obj: Tasks, commit_summary: str, reorder_kwargs: dict[str, Any]
     ) -> None:
-        """Thin delegation — tests override via direct instance attribute assignment."""
-        self._reorder_tasks_impl(tasks_obj, commit_summary, **reorder_kwargs)
+        self._task_reorderer(tasks_obj, commit_summary, **reorder_kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
         """Enforce the git-identity invariant (see #792).
@@ -5354,6 +5405,10 @@ class WorkerThread(threading.Thread):
         Extracted so tests can override this method via direct instance attribute
         assignment, returning a fake instead of patching Worker at the class level.
         """
+        # Imported lazily to avoid a module-level circular import:
+        # fido.events -> fido.worker at import time.
+        from fido import events as _fev  # noqa: PLC0415
+
         return Worker(
             self.work_dir,
             self._gh,
@@ -5379,6 +5434,12 @@ class WorkerThread(threading.Thread):
             reply_promise_recoverer=_DEFAULT_REPLY_PROMISE_RECOVERER,
             dispatcher=self._dispatcher,
             issue_cache=self._issue_cache,
+            background_syncer=tasks.sync_tasks_background,
+            task_reorderer=tasks.reorder_tasks,  # pyright: ignore[reportArgumentType]
+            comment_replier=_fev.reply_to_comment,
+            issue_comment_replier=_fev.reply_to_issue_comment,
+            commit_summarizer=_fev._get_commit_summary,  # pyright: ignore[reportPrivateUsage]
+            reorder_kwargs_factory=_fev._make_reorder_kwargs,  # pyright: ignore[reportPrivateUsage]
         )
 
     def _resolve_fido_dir(self) -> Path | None:

@@ -377,13 +377,10 @@ def provider_statuses_for_repo_configs(
     repo_configs: list[RepoConfig],
     *,
     _provider_factory: DefaultProviderFactory | None = None,
-    _factory_fn: Callable[[], DefaultProviderFactory] | None = None,
 ) -> dict[ProviderID, ProviderPressureStatus]:
     """Return one normalized provider-pressure summary per configured provider."""
     if _provider_factory is not None:
         provider_factory = _provider_factory
-    elif _factory_fn is not None:
-        provider_factory = _factory_fn()
     else:
         provider_factory = DefaultProviderFactory(
             session_system_file=_status_persona_path()

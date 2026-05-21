@@ -205,15 +205,13 @@ class TestProviderStatusesForRepoConfigs:
         factory.create_api.assert_any_call(claude_a)
         factory.create_api.assert_any_call(copilot)
 
-    def test_builds_default_factory_when_not_injected(self, tmp_path: Path) -> None:
+    def test_single_repo_with_injected_factory(self, tmp_path: Path) -> None:
         repo = RepoConfig(name="owner/repo", work_dir=tmp_path)
         factory = MagicMock()
         factory.create_api.return_value.get_limit_snapshot.return_value = (
             ProviderLimitSnapshot(provider=ProviderID.CLAUDE_CODE)
         )
-        statuses = provider_statuses_for_repo_configs(
-            [repo], _factory_fn=lambda: factory
-        )
+        statuses = provider_statuses_for_repo_configs([repo], _provider_factory=factory)
         assert list(statuses) == [ProviderID.CLAUDE_CODE]
 
     def test_uses_real_default_factory_for_empty_repo_list(self) -> None:
