@@ -340,12 +340,18 @@ class WorkerThread(_WorkerThreadBase):
     ) -> None:
         if "registry" not in kwargs:
             kwargs["registry"] = MagicMock(spec=ActivityReporter)
+        if "membership" not in kwargs:
+            kwargs["membership"] = RepoMembership()
         repo_cfg = kwargs.get("repo_cfg", _MISSING)
         if repo_cfg is _MISSING and kwargs.get("provider") is None:
             kwargs["repo_cfg"] = _default_repo_cfg(
                 work_dir,
                 repo_name=repo_name,
                 membership=kwargs.get("membership"),
+            )
+        if "provider_factory" not in kwargs:
+            kwargs["provider_factory"] = DefaultProviderFactory(
+                session_system_file=default_sub_dir() / "persona.md"
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueCache(repo_name)

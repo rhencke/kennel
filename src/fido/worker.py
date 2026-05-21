@@ -5157,15 +5157,15 @@ class WorkerThread(threading.Thread):
         repo_name: str,
         gh: GitHub,
         registry: ActivityReporter | None = None,
-        membership: RepoMembership | None = None,
         session: PromptSession | None = None,
         session_issue: int | None = None,
         provider: Provider | None = None,
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
-        provider_factory: DefaultProviderFactory | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
         *,
+        membership: RepoMembership,
+        provider_factory: DefaultProviderFactory,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
     ) -> None:
@@ -5174,7 +5174,7 @@ class WorkerThread(threading.Thread):
         self._repo_name = repo_name
         self._gh = gh
         self._registry = registry
-        self._membership = membership if membership is not None else RepoMembership()
+        self._membership = membership
         self._wake = threading.Event()
         self._abort_task = AbortHandle()
         self._stop = threading.Event()
@@ -5190,11 +5190,7 @@ class WorkerThread(threading.Thread):
         # re-bootstraps via ``Worker._pick_from_cache``'s lazy
         # ``find_all_open_issues`` call).
         self._issue_cache = issue_cache
-        self._provider_factory = (
-            DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
-            if provider_factory is None
-            else provider_factory
-        )
+        self._provider_factory = provider_factory
         self._state_updater: AtomicUpdater[FidoState] | None = state_updater
         # Use the registry-owned State so WorkerThread's session-id
         # persistence (state.json reads/writes around session_id) goes
